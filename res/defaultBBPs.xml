@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<default-bbps>
+  <!--
+    Example only. Uncomment after replacing YourArmorTriShapeName with a real
+    FO4 armor geometry name if you want automatic sample XML discovery.
+
+    <map shape="YourArmorTriShapeName" file="prototype-sample.xml" />
+  -->
+</default-bbps>

@@ -21,6 +21,8 @@ end
 add_requires("tbb")
 add_requires("xbyak")
 add_requires("tinyxml2")
+add_requires("microsoft-detours")
+add_requires("spdlog v1.16.0", {configs = {header_only = false, wchar = true, std_format = true}})
 
 -- define targets
 target("FO4FasterHdtSMP")
@@ -35,5 +37,6 @@ target("FO4FasterHdtSMP")
     add_files("src/**.cpp")
     add_headerfiles("src/**.h")
     add_includedirs("src")
-    add_packages("bullet3", "tbb", "xbyak", "tinyxml2")
+    add_packages("bullet3", "tbb", "xbyak", "tinyxml2", "microsoft-detours", "spdlog")
+    add_installfiles("res/configs.xml", "res/defaultBBPs.xml", "res/prototype-sample.xml", { prefixdir = "F4SE/Plugins/FO4FasterHdtSMP" })
     set_pcxxheader("src/pch.h")

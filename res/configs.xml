@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configs>
+  <solver>
+    <numIterations>10</numIterations>
+    <erp>0.2</erp>
+    <min-fps>60</min-fps>
+    <maxSubSteps>4</maxSubSteps>
+  </solver>
+  <smp>
+    <logLevel>3</logLevel>
+    <clampRotations>true</clampRotations>
+    <rotationSpeedLimit>10</rotationSpeedLimit>
+    <unclampedResets>true</unclampedResets>
+    <unclampedResetAngle>130</unclampedResetAngle>
+    <budgetMs>3.5</budgetMs>
+    <useRealTime>false</useRealTime>
+    <sampleSize>5</sampleSize>
+    <backupNodeByName></backupNodeByName>
+    <disable1stPersonViewPhysics>false</disable1stPersonViewPhysics>
+    <enableNpcPhysics>true</enableNpcPhysics>
+    <autoAdjustMaxActors>false</autoAdjustMaxActors>
+    <maxActiveActors>4</maxActiveActors>
+    <maxActorDistance>3000</maxActorDistance>
+    <enablePrototypeDiagnostics>false</enablePrototypeDiagnostics>
+    <prototypePhysicsXml></prototypePhysicsXml>
+  </smp>
+  <wind>
+    <enabled>false</enabled>
+    <useWeather>false</useWeather>
+    <windStrength>0</windStrength>
+    <directionX>1</directionX>
+    <directionY>0</directionY>
+    <directionZ>0</directionZ>
+    <distanceForNoWind>50</distanceForNoWind>
+    <distanceForMaxWind>3000</distanceForMaxWind>
+  </wind>
+</configs>
