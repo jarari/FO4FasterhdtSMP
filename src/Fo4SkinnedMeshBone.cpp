@@ -19,13 +19,13 @@ namespace
 	{
 		const btMatrix3x3 basis(
 			a_transform.rotate[0].x,
-			a_transform.rotate[0].y,
-			a_transform.rotate[0].z,
 			a_transform.rotate[1].x,
-			a_transform.rotate[1].y,
-			a_transform.rotate[1].z,
 			a_transform.rotate[2].x,
+			a_transform.rotate[0].y,
+			a_transform.rotate[1].y,
 			a_transform.rotate[2].y,
+			a_transform.rotate[0].z,
+			a_transform.rotate[1].z,
 			a_transform.rotate[2].z);
 
 		return btTransform(basis, btVector3(a_transform.translate.x, a_transform.translate.y, a_transform.translate.z));
@@ -41,9 +41,9 @@ namespace
 		const auto& basis = a_transform.getBasis();
 		RE::NiTransform result;
 		result.rotate = RE::NiMatrix3(
-			basis[0].x(), basis[0].y(), basis[0].z(), 0.0F,
-			basis[1].x(), basis[1].y(), basis[1].z(), 0.0F,
-			basis[2].x(), basis[2].y(), basis[2].z(), 0.0F);
+			basis[0].x(), basis[1].x(), basis[2].x(), 0.0F,
+			basis[0].y(), basis[1].y(), basis[2].y(), 0.0F,
+			basis[0].z(), basis[1].z(), basis[2].z(), 0.0F);
 		const auto origin = a_transform.getOrigin();
 		result.translate = RE::NiPoint3(origin.x(), origin.y(), origin.z());
 		result.scale = NormalizeNiScale(a_scale);
@@ -55,6 +55,9 @@ namespace
 		const btVector3 zero(0.0F, 0.0F, 0.0F);
 		a_body.setWorldTransform(a_transform);
 		a_body.setInterpolationWorldTransform(a_transform);
+		if (auto* motionState = a_body.getMotionState()) {
+			motionState->setWorldTransform(a_transform);
+		}
 		a_body.setLinearVelocity(zero);
 		a_body.setAngularVelocity(zero);
 		a_body.setInterpolationLinearVelocity(zero);
@@ -132,32 +135,6 @@ namespace Smp
 		});
 	}
 
-	void Fo4SkinnedMeshBone::AddDrivenAncestor(RE::NiNode* a_target, RE::NiNode* a_driver)
-	{
-		if (!a_target || !a_driver || a_target == a_driver) {
-			return;
-		}
-
-		const auto found = std::ranges::find_if(drivenAncestors_, [a_target, a_driver](const DrivenAncestorSlot& a_slot) {
-			return a_slot.target.get() == a_target && a_slot.driver.get() == a_driver;
-		});
-		if (found != drivenAncestors_.end()) {
-			return;
-		}
-
-		drivenAncestors_.push_back({
-			.target = a_target,
-			.driver = a_driver,
-		});
-	}
-
-	void Fo4SkinnedMeshBone::SetDriverNode(RE::NiNode* a_driver)
-	{
-		if (a_driver && a_driver != node_.get()) {
-			driverNode_ = a_driver;
-		}
-	}
-
 	void Fo4SkinnedMeshBone::RemoveSkinWorldTransformsForBuildGroup(const std::uint64_t a_buildGroup)
 	{
 		if (a_buildGroup == 0) {
@@ -166,23 +143,6 @@ namespace Smp
 
 		std::erase_if(skinWorldTransforms_, [a_buildGroup](const SkinWorldTransformSlot& a_slot) {
 			return a_slot.buildGroup == a_buildGroup;
-		});
-	}
-
-	void Fo4SkinnedMeshBone::SyncDrivenAncestors()
-	{
-		std::erase_if(drivenAncestors_, [](DrivenAncestorSlot& a_slot) {
-			if (!a_slot.target || !a_slot.driver) {
-				return true;
-			}
-
-			a_slot.target->world = a_slot.driver->world;
-			if (a_slot.target->parent) {
-				a_slot.target->local = a_slot.target->parent->world.Invert() * a_slot.target->world;
-			} else {
-				a_slot.target->local = a_slot.target->world;
-			}
-			return false;
 		});
 	}
 
@@ -216,21 +176,9 @@ namespace Smp
 			return;
 		}
 
-		SyncDrivenAncestors();
-
 		const auto oldScale = m_currentTransform.getScale();
 		const auto isStaticOrKinematic = m_rig.isStaticOrKinematicObject();
-		RE::NiTransform* skinWorld = nullptr;
-		for (auto& slot : skinWorldTransforms_) {
-			if ((skinWorld = ResolveSkinWorldTransform(slot)) != nullptr) {
-				break;
-			}
-		}
-		if (isStaticOrKinematic && driverNode_) {
-			m_currentTransform = ToBulletQsTransform(driverNode_->world);
-		} else {
-			m_currentTransform = ToBulletQsTransform(node_->world);
-		}
+		m_currentTransform = ToBulletQsTransform(node_->world);
 		const auto newScale = m_currentTransform.getScale();
 		const auto current = m_rig.getWorldTransform();
 
@@ -287,12 +235,8 @@ namespace Smp
 		const auto world = ToNiTransform(transform, node_->world.scale);
 		node_->world = world;
 
-		std::erase_if(skinWorldTransforms_, [this, &world](SkinWorldTransformSlot& a_slot) {
-			if (auto* skinWorld = ResolveSkinWorldTransform(a_slot)) {
-				*skinWorld = world;
-				return false;
-			}
-			return true;
+		std::erase_if(skinWorldTransforms_, [this](SkinWorldTransformSlot& a_slot) {
+			return ResolveSkinWorldTransform(a_slot) == nullptr;
 		});
 	}
 }

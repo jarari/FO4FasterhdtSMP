@@ -6,8 +6,6 @@
 #include "PrototypePhysicsSystem.h"
 #include "SmpConfig.h"
 
-#include "RE/C/CellAttachDetachEventSource.h"
-
 #include <version.h>
 
 namespace
@@ -70,38 +68,6 @@ namespace
 		}
 	};
 
-	class CellAttachDetachResetSink :
-		public RE::BSTEventSink<RE::CellAttachDetachEvent>
-	{
-	public:
-		static CellAttachDetachResetSink* GetSingleton()
-		{
-			static CellAttachDetachResetSink singleton;
-			return std::addressof(singleton);
-		}
-
-		RE::BSEventNotifyControl ProcessEvent(const RE::CellAttachDetachEvent& a_event, RE::BSTEventSource<RE::CellAttachDetachEvent>*) override
-		{
-			if (a_event.type == RE::CellAttachDetachEvent::EVENT_TYPE::kPreDetach ||
-				a_event.type == RE::CellAttachDetachEvent::EVENT_TYPE::kPostDetach) {
-				ResetRuntimePhysics(a_event.type == RE::CellAttachDetachEvent::EVENT_TYPE::kPreDetach ? "cell-pre-detach" : "cell-post-detach");
-			}
-
-			return RE::BSEventNotifyControl::kContinue;
-		}
-	};
-
-	void RegisterCellAttachDetachSink()
-	{
-		static bool registered = false;
-		if (registered) {
-			return;
-		}
-
-		RE::CellAttachDetachEventSource::CellAttachDetachEventSourceSingleton::GetSingleton().source.RegisterSink(CellAttachDetachResetSink::GetSingleton());
-		registered = true;
-	}
-
 	bool InitializeRuntime()
 	{
 		static bool initialized = false;
@@ -111,7 +77,6 @@ namespace
 
 		Smp::GetLifecycleEventSource().RegisterSink(LifecycleLogSink::GetSingleton());
 		LoadRuntimeConfig();
-		RegisterCellAttachDetachSink();
 		Smp::Fo4PhysicsWorld::GetSingleton()->Register();
 		initialized = true;
 		return true;

@@ -8,12 +8,14 @@
 #include "SmpConfig.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/M/Main.h"
+#include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiPointer.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
 
 #include <optional>
+#include <atomic>
 #include <unordered_map>
 
 namespace Hooks
@@ -70,9 +72,13 @@ namespace Hooks
 	std::mutex               BackupNodeLock;
 	std::vector<std::string> BackupNodeNames;
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
+	std::atomic<std::uint32_t> PreMergeRenameId{ 0xF0000000U };
 	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 
 	using BackupBoneMap = std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>>;
+
+	RE::Actor* ResolveActor(RE::BipedAnim* a_biped);
+	void LogApplySourceNode(const char* a_phase, RE::NiAVObject* a_root, std::string_view a_name);
 
 	struct ScopedApplySkinnedObjectsDepth
 	{
@@ -111,6 +117,245 @@ namespace Hooks
 			spdlog::warn("found '{}' NiStringExtraData on original model object={} but XML path could not be resolved: {}", kPhysicsXmlExtraName, static_cast<void*>(a_object), data);
 		}
 		return std::nullopt;
+	}
+
+	RE::NiPointer<RE::NiAVObject> ClonePhysicsMergeSource(RE::NiNode* a_root)
+	{
+		if (!a_root) {
+			return nullptr;
+		}
+
+		RE::NiCloningProcess cloneProcess;
+		cloneProcess.appendChar = '$';
+		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
+		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
+
+		auto* clone = a_root->CreateClone(cloneProcess);
+		a_root->ProcessClone(cloneProcess);
+		return clone ? static_cast<RE::NiAVObject*>(clone->IsNode()) : nullptr;
+	}
+
+	std::string MakeReferenceArmorRenamePrefix(const std::uint32_t a_id)
+	{
+		char buffer[48]{};
+		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Armor_%08X ", a_id);
+		return buffer;
+	}
+
+	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
+	{
+		if (!a_root || a_name.empty()) {
+			return nullptr;
+		}
+
+		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
+			return a_root->IsNode();
+		}
+
+		auto* node = a_root->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+
+		for (auto& child : node->children) {
+			if (auto* found = FindNodeByName(child.get(), a_name)) {
+				return found;
+			}
+		}
+
+		return nullptr;
+	}
+
+	void CollectNodePointers(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_nodes)
+	{
+		if (!a_root) {
+			return;
+		}
+
+		a_nodes.push_back(a_root);
+
+		auto* node = a_root->IsNode();
+		if (!node) {
+			return;
+		}
+
+		for (auto& child : node->children) {
+			CollectNodePointers(child.get(), a_nodes);
+		}
+	}
+
+	void UpdateNodeWorldFromLocal(RE::NiNode* a_node)
+	{
+		if (!a_node) {
+			return;
+		}
+
+		if (a_node->parent) {
+			a_node->world = a_node->parent->world * a_node->local;
+		} else {
+			a_node->world = a_node->local;
+		}
+
+		for (auto& child : a_node->children) {
+			if (auto* childNode = child ? child->IsNode() : nullptr) {
+				UpdateNodeWorldFromLocal(childNode);
+			}
+		}
+	}
+
+	void RenameMergedNodeTree(RE::NiNode* a_node, const std::string& a_prefix, std::vector<Smp::LifecycleMergedSkeletonNode>* a_renamedNodes)
+	{
+		if (!a_node) {
+			return;
+		}
+
+		const auto originalName = a_node->GetName();
+		if (!originalName.empty()) {
+			auto renamed = a_prefix;
+			renamed += std::string_view(originalName);
+			if (a_renamedNodes) {
+				a_renamedNodes->push_back({
+					.originalName = std::string(originalName),
+					.renamedName = renamed,
+					.node = a_node,
+				});
+			}
+			a_node->name = renamed.c_str();
+		}
+
+		for (auto& child : a_node->children) {
+			if (auto* childNode = child ? child->IsNode() : nullptr) {
+				RenameMergedNodeTree(childNode, a_prefix, a_renamedNodes);
+			}
+		}
+	}
+
+	RE::NiNode* CloneMergedNodeTree(RE::NiNode* a_source, const std::string& a_prefix, std::vector<Smp::LifecycleMergedSkeletonNode>& a_renamedNodes)
+	{
+		if (!a_source) {
+			return nullptr;
+		}
+
+		RE::NiCloningProcess cloneProcess;
+		cloneProcess.appendChar = '$';
+		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
+		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
+
+		auto* cloneObject = a_source->CreateClone(cloneProcess);
+		a_source->ProcessClone(cloneProcess);
+		auto* cloneNode = cloneObject ? cloneObject->IsNode() : nullptr;
+		if (!cloneNode) {
+			return nullptr;
+		}
+
+		RenameMergedNodeTree(a_source, a_prefix, nullptr);
+		RenameMergedNodeTree(cloneNode, a_prefix, std::addressof(a_renamedNodes));
+		return cloneNode;
+	}
+
+	void MergeSourceSkeletonIntoActorPreApply(
+		RE::NiNode* a_destination,
+		RE::NiNode* a_source,
+		RE::NiAVObject* a_destinationRoot,
+		const std::string& a_prefix,
+		std::vector<Smp::LifecycleMergedSkeletonNode>& a_renamedNodes,
+		std::vector<Smp::LifecycleMergedRootNode>& a_mergedRoots)
+	{
+		if (!a_destination || !a_source || !a_destinationRoot) {
+			return;
+		}
+
+		for (auto& child : a_source->children) {
+			auto* sourceChild = child ? child->IsNode() : nullptr;
+			if (!sourceChild) {
+				continue;
+			}
+
+			const auto sourceName = sourceChild->GetName();
+			if (sourceName.empty()) {
+				MergeSourceSkeletonIntoActorPreApply(a_destination, sourceChild, a_destinationRoot, a_prefix, a_renamedNodes, a_mergedRoots);
+				continue;
+			}
+
+			if (auto* destinationChild = FindNodeByName(a_destinationRoot, sourceName)) {
+				MergeSourceSkeletonIntoActorPreApply(destinationChild, sourceChild, a_destinationRoot, a_prefix, a_renamedNodes, a_mergedRoots);
+				continue;
+			}
+
+			auto* clonedChild = CloneMergedNodeTree(sourceChild, a_prefix, a_renamedNodes);
+			if (!clonedChild) {
+				continue;
+			}
+
+			a_destination->AttachChild(clonedChild, false);
+			UpdateNodeWorldFromLocal(clonedChild);
+			a_mergedRoots.push_back({
+				.parent = a_destination,
+				.node = clonedChild,
+			});
+
+			if (Smp::PhysicsNamesEqual(sourceName, "InariTail_01")) {
+				LogApplySourceNode("ArmorApplySkinnedObjects pre-merge clone", clonedChild, sourceName);
+			}
+			spdlog::debug(
+				"pre-merged source skeleton node '{}' as renamed attachment node={} under parent={}",
+				sourceName,
+				static_cast<void*>(clonedChild),
+				static_cast<void*>(a_destination));
+		}
+	}
+
+	void PreMergeArmorSkeleton(RE::BipedAnim* a_biped, RE::NiNode* a_sourceRoot, const bool a_firstPerson, std::vector<Smp::LifecycleMergedSkeletonNode>& a_renamedNodes, std::vector<Smp::LifecycleMergedRootNode>& a_mergedRoots)
+	{
+		auto* actor = ResolveActor(a_biped);
+		auto* actorRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
+		if (!actorRoot && actor) {
+			actorRoot = actor->Get3D();
+		}
+		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
+		if (!actorRootNode || !a_sourceRoot) {
+			return;
+		}
+
+		const auto prefix = MakeReferenceArmorRenamePrefix(PreMergeRenameId.fetch_add(1, std::memory_order_relaxed));
+		UpdateNodeWorldFromLocal(actorRootNode);
+		UpdateNodeWorldFromLocal(a_sourceRoot);
+		MergeSourceSkeletonIntoActorPreApply(actorRootNode, a_sourceRoot, actorRootNode, prefix, a_renamedNodes, a_mergedRoots);
+		spdlog::debug(
+			"pre-merged armor skeleton before ApplySkinnedObjects actor={} source={} root={} renamedNodes={} mergedRoots={} prefix='{}'",
+			static_cast<void*>(actor),
+			static_cast<void*>(a_sourceRoot),
+			static_cast<void*>(actorRootNode),
+			a_renamedNodes.size(),
+			a_mergedRoots.size(),
+			prefix);
+	}
+
+	void LogApplySourceNode(const char* a_phase, RE::NiAVObject* a_root, const std::string_view a_name)
+	{
+		auto* node = FindNodeByName(a_root, a_name);
+		if (!node) {
+			spdlog::info("{} source node '{}' missing root={}", a_phase, a_name, static_cast<void*>(a_root));
+			return;
+		}
+
+		auto* parent = node->parent;
+		const auto parentName = parent ? parent->GetName() : "";
+		const auto& local = node->local.translate;
+		const auto& world = node->world.translate;
+		spdlog::info(
+			"{} source node '{}' node={} parent={} parentName='{}' local=({:.3f},{:.3f},{:.3f}) world=({:.3f},{:.3f},{:.3f})",
+			a_phase,
+			a_name,
+			static_cast<void*>(node),
+			static_cast<void*>(parent),
+			parentName,
+			local.x,
+			local.y,
+			local.z,
+			world.x,
+			world.y,
+			world.z);
 	}
 
 	std::vector<std::string> GetBackupNodeNames()
@@ -313,12 +558,39 @@ namespace Hooks
 	{
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
 		auto selectedXml = FindPhysicsXmlExtraData(originalModelObject);
+		std::vector<RE::NiAVObject*> mergeSearchExclusions;
+		std::vector<Smp::LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
+		std::vector<Smp::LifecycleMergedRootNode> preMergedRootNodes;
 		if (selectedXml) {
+			CollectNodePointers(originalModelObject, mergeSearchExclusions);
 			spdlog::debug(
 				"pre-scanned armor physics XML {} from original model root={} name='{}'",
 				*selectedXml,
 				static_cast<void*>(a_originalModelRoot),
 				a_originalModelRoot ? std::string_view(a_originalModelRoot->GetName()) : std::string_view{});
+			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "Root");
+			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "Pelvis");
+			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "InariTail_01");
+			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "InariTail_02");
+		}
+		auto mergeSourceObject = selectedXml ? ClonePhysicsMergeSource(a_originalModelRoot) : RE::NiPointer<RE::NiAVObject>{};
+		if (mergeSourceObject) {
+			auto* mergeSourceNode = mergeSourceObject->IsNode();
+			spdlog::debug(
+				"preserved armor merge source clone={} name='{}' children={} from original model root={}",
+				static_cast<void*>(mergeSourceObject.get()),
+				std::string_view(mergeSourceObject->GetName()),
+				mergeSourceNode ? mergeSourceNode->children.size() : 0,
+				static_cast<void*>(a_originalModelRoot));
+			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "Root");
+			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "Pelvis");
+			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "InariTail_01");
+			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "InariTail_02");
+		}
+		if (selectedXml) {
+			PreMergeArmorSkeleton(a_biped, a_originalModelRoot, a_firstPerson, preMergedSkeletonNodes, preMergedRootNodes);
+			LogApplySourceNode("ArmorApplySkinnedObjects post-pre-merge original", originalModelObject, "InariTail_01");
+			LogApplySourceNode("ArmorApplySkinnedObjects post-pre-merge original", originalModelObject, "InariTail_02");
 		}
 
 		const auto backupNodeNames = GetBackupNodeNames();
@@ -342,6 +614,10 @@ namespace Hooks
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
 			.sourceObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr,
+			.mergeSourceObject = mergeSourceObject.get(),
+			.mergeSearchExclusions = std::move(mergeSearchExclusions),
+			.preMergedSkeletonNodes = std::move(preMergedSkeletonNodes),
+			.preMergedRootNodes = std::move(preMergedRootNodes),
 			.physicsXmlPath = selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});

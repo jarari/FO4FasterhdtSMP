@@ -1,9 +1,23 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace Smp
 {
+	struct LifecycleMergedSkeletonNode
+	{
+		std::string originalName;
+		std::string renamedName;
+		RE::NiNode* node{ nullptr };
+	};
+
+	struct LifecycleMergedRootNode
+	{
+		RE::NiNode* parent{ nullptr };
+		RE::NiAVObject* node{ nullptr };
+	};
+
 	enum class LifecycleEventType
 	{
 		kArmorApplySkinnedObjects,
@@ -27,6 +41,10 @@ namespace Smp
 		RE::BIPED_OBJECT   bipedObject{ RE::BIPED_OBJECT::kTotal };
 		RE::NiAVObject*    object{ nullptr };
 		RE::NiAVObject*    sourceObject{ nullptr };
+		RE::NiAVObject*    mergeSourceObject{ nullptr };
+		std::vector<RE::NiAVObject*> mergeSearchExclusions;
+		std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
+		std::vector<LifecycleMergedRootNode> preMergedRootNodes;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
 		std::string        physicsXmlPath;

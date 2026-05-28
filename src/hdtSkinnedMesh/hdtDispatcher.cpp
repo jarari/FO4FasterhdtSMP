@@ -67,6 +67,11 @@ namespace hdt
 			return;
 		}
 
+		std::vector<SkinnedMeshBody*> bodies;
+		std::vector<PerVertexShape*> extraVertexShapes;
+		bodies.reserve(static_cast<std::size_t>(pairCount) * 2);
+		extraVertexShapes.reserve(static_cast<std::size_t>(pairCount));
+
 		auto* pairs = a_pairCache->getOverlappingPairArrayPtr();
 		for (int index = 0; index < pairCount; ++index) {
 			auto& pair = pairs[index];
@@ -81,13 +86,41 @@ namespace hdt
 
 			auto* shape0 = skinned0 ? static_cast<SkinnedMeshBody*>(object0) : nullptr;
 			auto* shape1 = skinned1 ? static_cast<SkinnedMeshBody*>(object1) : nullptr;
-			if (shape0 && shape1 && shape0 != shape1 && shape0->canCollideWith(shape1) && shape1->canCollideWith(shape0)) {
+			const auto forwardAllowed = shape0 && shape1 && shape0->canCollideWith(shape1);
+			const auto reverseAllowed = shape0 && shape1 && shape1->canCollideWith(shape0);
+			if (shape0 && shape1 && shape0 != shape1 && forwardAllowed && reverseAllowed) {
 				pairs_.emplace_back(shape0, shape1);
+				bodies.push_back(shape0);
+				bodies.push_back(shape1);
+
+				auto* triangle0 = shape0->shape_ ? shape0->shape_->asPerTriangleShape() : nullptr;
+				auto* triangle1 = shape1->shape_ ? shape1->shape_->asPerTriangleShape() : nullptr;
+				if (triangle0 && triangle1) {
+					extraVertexShapes.push_back(triangle0->verticesCollision_.get());
+					extraVertexShapes.push_back(triangle1->verticesCollision_.get());
+				}
+			}
+		}
+
+		std::ranges::sort(bodies);
+		bodies.erase(std::ranges::unique(bodies).begin(), bodies.end());
+		for (auto* body : bodies) {
+			if (body && body->useBoundingSphere_) {
+				body->internalUpdate();
+			}
+		}
+
+		std::ranges::sort(extraVertexShapes);
+		extraVertexShapes.erase(std::ranges::unique(extraVertexShapes).begin(), extraVertexShapes.end());
+		for (auto* shape : extraVertexShapes) {
+			if (shape) {
+				shape->internalUpdate();
 			}
 		}
 
 		for (const auto& [shape0, shape1] : pairs_) {
-			if (shape0->shape_ && shape1->shape_ && shape0->shape_->tree_.collapseCollideL(std::addressof(shape1->shape_->tree_))) {
+			const auto collapsed = shape0->shape_ && shape1->shape_ && shape0->shape_->tree_.collapseCollideL(std::addressof(shape1->shape_->tree_));
+			if (collapsed) {
 				SkinnedMeshAlgorithm::processCollision(shape0, shape1, this);
 			}
 		}

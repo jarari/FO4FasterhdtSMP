@@ -2,6 +2,7 @@
 
 #include "DefaultBBP.h"
 #include "LifecycleEvents.h"
+#include "RE/N/NiTransform.h"
 
 #include <btBulletDynamicsCommon.h>
 
@@ -94,6 +95,8 @@ namespace Smp
 			std::uint64_t buildGroup{ 0 };
 			std::vector<std::uint64_t> buildGroups;
 			std::vector<std::pair<std::uint64_t, PrototypeBuildDomain>> buildGroupDomains;
+			RE::NiNode* resetParent{ nullptr };
+			std::unique_ptr<RE::NiTransform> resetLocalToParent;
 			std::string boneName;
 			std::unique_ptr<btCollisionShape> shape;
 			std::unique_ptr<btDefaultMotionState> motionState;
@@ -123,17 +126,27 @@ namespace Smp
 			RE::BSTSmartPointer<hdt::SkinnedMeshBody> body;
 		};
 
+		struct PrototypeMergedNode
+		{
+			std::uint64_t buildGroup{ 0 };
+			RE::NiNode* parent{ nullptr };
+			RE::NiPointer<RE::NiAVObject> node;
+		};
+
 		struct PrototypeActorState
 		{
 			RE::Actor* actor{ nullptr };
 			RE::ActorHandle actorHandle;
+			bool firstPerson{ false };
 			std::uint64_t nextBuildGroup{ 0 };
+			std::uint32_t nextArmorRenameId{ 0 };
 			std::uint64_t lastWritebackFrame{ 0 };
 			WritebackSource lastWritebackSource{ WritebackSource::kUnknown };
 			std::uint32_t resetReadFrames{ 0 };
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
 			std::vector<PrototypeConstraint> constraints;
+			std::vector<PrototypeMergedNode> mergedNodes;
 		};
 
 		struct SuspendedActorCandidate
@@ -141,8 +154,8 @@ namespace Smp
 			RE::ActorHandle actorHandle;
 		};
 
-		PrototypeActorState* FindPrototypeStateLocked(RE::Actor* a_actor);
-		PrototypeActorState& GetOrCreatePrototypeStateLocked(RE::Actor* a_actor);
+		PrototypeActorState* FindPrototypeStateLocked(RE::Actor* a_actor, bool a_firstPerson);
+		PrototypeActorState& GetOrCreatePrototypeStateLocked(RE::Actor* a_actor, bool a_firstPerson);
 		bool IsPrototypeStateValidLocked(PrototypeActorState& a_state);
 		void PruneInvalidPrototypeStatesLocked();
 		void EnforceActorBudgetLocked();
@@ -150,15 +163,18 @@ namespace Smp
 		void TryReactivateSuspendedActorsLocked();
 		void ClearPrototypeStateLocked(PrototypeActorState& a_state);
 		bool ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object);
+		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
 		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
 		void ClearAllPrototypeStatesLocked();
 		void BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
 		void BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
+		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state);
 		void LogRootConstraintDiagnosticsLocked(std::string_view a_phase, const PrototypeActorState& a_state);
 		void UpdateMeshDisableStatesLocked(PrototypeActorState& a_state);
+		void ResetStepClockLocked();
 
 		std::mutex lock_;
 		std::unique_ptr<btDefaultCollisionConfiguration> collisionConfiguration_;
@@ -170,6 +186,9 @@ namespace Smp
 		std::uint64_t simulationFrame_{ 1 };
 		int maxSubSteps_{ 4 };
 		float fixedStepSeconds_{ 1.0F / 60.0F };
+		float averageInterval_{ 1.0F / 60.0F };
+		float accumulatedInterval_{ 0.0F };
+		float currentStepSeconds_{ 1.0F / 60.0F };
 		bool useRealTime_{ false };
 		float budgetMs_{ 3.5F };
 		int sampleSize_{ 5 };
