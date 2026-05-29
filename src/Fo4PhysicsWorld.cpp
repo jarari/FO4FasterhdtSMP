@@ -5707,7 +5707,7 @@ namespace Smp
 			}
 		}
 		for (const auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.geometry && IsObjectInTree(a_event.object, prototypeMesh.geometry)) {
+			if (prototypeMesh.domain == a_domain && prototypeMesh.geometry && IsObjectInTree(a_event.object, prototypeMesh.geometry)) {
 				buildGroup = prototypeMesh.buildGroup;
 				break;
 			}
@@ -5717,8 +5717,13 @@ namespace Smp
 				break;
 			}
 			if (prototypeBody.node && IsNodeInTree(a_event.object, prototypeBody.node)) {
-				buildGroup = prototypeBody.buildGroup;
-				break;
+				const auto existingGroup = std::ranges::find_if(prototypeBody.buildGroupDomains, [a_domain](const auto& a_entry) {
+					return a_entry.second == a_domain;
+				});
+				if (existingGroup != prototypeBody.buildGroupDomains.end()) {
+					buildGroup = existingGroup->first;
+					break;
+				}
 			}
 		}
 		for (const auto& matchedBone : matchedBones) {
@@ -5736,8 +5741,6 @@ namespace Smp
 			});
 			if (existingGroup != existing->buildGroupDomains.end()) {
 				buildGroup = existingGroup->first;
-			} else if (!existing->buildGroups.empty()) {
-				buildGroup = existing->buildGroups.front();
 			}
 		}
 		if (buildGroup == 0) {
