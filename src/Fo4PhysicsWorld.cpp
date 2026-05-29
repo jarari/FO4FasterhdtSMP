@@ -958,6 +958,21 @@ namespace
 			return;
 		}
 
+		if (originalRoot) {
+			if (auto directXml = FindDirectPhysicsXmlExtraData(originalRoot)) {
+				AppendHeadCandidate(
+					a_candidates,
+					a_object,
+					*directXml,
+					{},
+					sourceObject,
+					originalRoot,
+					true,
+					isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
+				return;
+			}
+		}
+
 		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(sourceObject)) {
 			AppendHeadCandidate(
 				a_candidates,
@@ -1923,16 +1938,18 @@ namespace
 		const std::string_view a_name,
 		RE::NiAVObject* a_skeletonRoot)
 	{
-		auto* mergedNode = FindMergedSkeletonNode(a_renamedNodes, a_name);
-		if (!mergedNode) {
+		const auto found = std::ranges::find_if(a_renamedNodes, [a_name](const MergedSkeletonNode& a_entry) {
+			return Smp::PhysicsNamesEqual(a_entry.originalName, a_name);
+		});
+		if (found == a_renamedNodes.end()) {
 			return nullptr;
 		}
 
 		if (!a_skeletonRoot) {
-			return mergedNode;
+			return found->node;
 		}
 
-		if (auto* currentNode = FindNodeByName(a_skeletonRoot, mergedNode->GetName())) {
+		if (auto* currentNode = FindNodeByName(a_skeletonRoot, found->renamedName)) {
 			return currentNode;
 		}
 

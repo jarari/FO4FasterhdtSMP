@@ -27,8 +27,8 @@
 #include <Windows.h>
 #include <detours.h>
 
-#include <optional>
 #include <atomic>
+#include <optional>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -102,6 +102,14 @@ namespace Hooks
 	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
+
+	struct PendingPreparedHeadPart
+	{
+		RE::NiPointer<RE::NiAVObject> object;
+		RE::BGSHeadPart* headPart{ nullptr };
+	};
+
+	std::unordered_map<RE::BSFaceGenNiNode*, std::vector<PendingPreparedHeadPart>> PendingPreparedHeadParts;
 
 	struct Fo4HkStringPtr
 	{
@@ -821,6 +829,39 @@ namespace Hooks
 		return resolved.get();
 	}
 
+	void EmitPreparedHeadPartEvent(RE::Actor* a_actor, RE::BSFaceGenNiNode* a_faceNode, RE::NiAVObject* a_object, RE::BGSHeadPart* a_headPart)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		EmitEvent({
+			.type = Smp::LifecycleEventType::kHeadPrepareHeadPart,
+			.actor = a_actor,
+			.object = a_object ? a_object : reinterpret_cast<RE::NiAVObject*>(a_faceNode),
+			.headPart = a_headPart,
+		});
+	}
+
+	void DiscardPendingPreparedHeadPartEvents(RE::BSFaceGenNiNode* a_faceNode)
+	{
+		std::vector<PendingPreparedHeadPart> pending;
+		{
+			std::scoped_lock lock(FaceGenActorLock);
+			auto found = PendingPreparedHeadParts.find(a_faceNode);
+			if (found == PendingPreparedHeadParts.end()) {
+				return;
+			}
+			pending = std::move(found->second);
+			PendingPreparedHeadParts.erase(found);
+		}
+
+		spdlog::debug(
+			"discarded {} pending prepared headpart events after head initialization faceNode={}; full current face node scan will rebuild head physics",
+			pending.size(),
+			static_cast<void*>(a_faceNode));
+	}
+
 	RE::NiAVObject* FindPreparedHeadPartObject(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart)
 	{
 		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(a_faceNode);
@@ -1039,6 +1080,7 @@ namespace Hooks
 	{
 		OriginalActorOnHeadInitialized(a_ref);
 		SeedFaceGenActor(a_ref);
+		DiscardPendingPreparedHeadPartEvents(a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),
@@ -1050,6 +1092,7 @@ namespace Hooks
 	{
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
 		SeedFaceGenActor(a_ref);
+		DiscardPendingPreparedHeadPartEvents(a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),
@@ -1062,16 +1105,23 @@ namespace Hooks
 		OriginalPrepareHeadPart(a_faceNode, a_headPart, a_npc, a_arg4);
 
 		auto* actor = ResolveFaceGenActor(a_faceNode);
+		auto* preparedObject = FindPreparedHeadPartObject(a_faceNode, a_headPart);
 		if (!actor) {
+			std::scoped_lock lock(FaceGenActorLock);
+			PendingPreparedHeadParts[a_faceNode].push_back({
+				.object = preparedObject,
+				.headPart = a_headPart,
+			});
+			spdlog::debug(
+				"queued prepared headpart pending actor resolution faceNode={} object={} headPart={} model='{}'",
+				static_cast<void*>(a_faceNode),
+				static_cast<void*>(preparedObject),
+				static_cast<void*>(a_headPart),
+				a_headPart ? a_headPart->GetModel() : "");
 			return;
 		}
 
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kHeadPrepareHeadPart,
-			.actor = actor,
-			.object = FindPreparedHeadPartObject(a_faceNode, a_headPart),
-			.headPart = a_headPart,
-		});
+		EmitPreparedHeadPartEvent(actor, a_faceNode, preparedObject, a_headPart);
 	}
 
 	void HookedSetFaceGenBoneName(void* a_fmd, std::uint32_t a_boneIdx, RE::BSFixedString* a_boneName)
