@@ -13,8 +13,11 @@
 #include "hdtSkinnedMesh/hdtSkinnedMeshShape.h"
 #include "RE/B/BipedAnim.h"
 #include "RE/B/BGSHeadPart.h"
+#include "RE/B/bhkPickData.h"
 #include "RE/B/BSUtilities.h"
 #include "RE/B/BSTimer.h"
+#include "RE/C/CFilter.h"
+#include "RE/C/COL_LAYER.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkQsTransformf.h"
 #include "RE/H/hkReferencedObject.h"
@@ -26,9 +29,17 @@
 #include "RE/N/NiUpdateData.h"
 #include "RE/P/PlayerCamera.h"
 #include "RE/S/Sky.h"
+#include "RE/T/TESObjectCELL.h"
 #include "RE/T/TESNPC.h"
-#include "RE/T/TESWeather.h"
 #include "RE/U/UI.h"
+
+#include <Windows.h>
+#ifdef min
+#	undef min
+#endif
+#ifdef max
+#	undef max
+#endif
 
 #include <btBulletDynamicsCommon.h>
 
@@ -49,13 +60,12 @@ namespace
 {
 	constexpr float kMinimumStepSeconds = 1.0F / 240.0F;
 	constexpr float kMinimumShapeExtent = 0.01F;
-	constexpr float kPi = 3.14159265358979323846F;
 	constexpr float kGameUnitsPerMeter = 1.0F / 0.01425F;
 	constexpr float kGravityAcceleration = -9.80665F * kGameUnitsPerMeter;
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
 	constexpr std::uint32_t kAttachResetReadFrames = 8;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
-	constexpr std::uint32_t kPendingRebuildMaxWaitFrames = 120;
+	constexpr std::uint64_t kPendingRebuildRetryIntervalFrames = 15;
 	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 	using Clock = std::chrono::steady_clock;
 
@@ -108,6 +118,35 @@ namespace
 		Fo4HkbCharacter characterInstance;
 	};
 	static_assert(offsetof(Fo4BShkbAnimationGraph, characterInstance) == 0x1C8);
+
+	struct Fo4BSFaceGenModelMeshData
+	{
+		std::byte pad00[0x08]{};
+		RE::NiPointer<RE::NiAVObject> faceNode;
+		RE::NiPointer<RE::NiAVObject> geometry;
+		std::byte pad18[0x10]{};
+	};
+	static_assert(offsetof(Fo4BSFaceGenModelMeshData, faceNode) == 0x08);
+	static_assert(sizeof(Fo4BSFaceGenModelMeshData) == 0x28);
+
+	struct Fo4BSFaceGenModel
+	{
+		std::byte pad00[0x10]{};
+		Fo4BSFaceGenModelMeshData* modelMeshData{ nullptr };
+		std::byte pad18[0x08]{};
+	};
+	static_assert(offsetof(Fo4BSFaceGenModel, modelMeshData) == 0x10);
+	static_assert(sizeof(Fo4BSFaceGenModel) == 0x20);
+
+	struct Fo4BSFaceGenModelExtraData :
+		public RE::NiExtraData
+	{
+		Fo4BSFaceGenModel* model{ nullptr };
+		RE::BSFixedString bones[0x80];
+	};
+	static_assert(offsetof(Fo4BSFaceGenModelExtraData, model) == 0x18);
+	static_assert(offsetof(Fo4BSFaceGenModelExtraData, bones) == 0x20);
+	static_assert(sizeof(Fo4BSFaceGenModelExtraData) == 0x420);
 
 	class OwnedCompoundShape :
 		public btCompoundShape
@@ -241,10 +280,15 @@ namespace
 	{
 		RE::NiAVObject* object{ nullptr };
 		std::filesystem::path path;
+		Smp::DefaultBBP::NameMap meshNameMap;
+		RE::NiAVObject* sourceObject{ nullptr };
+		RE::NiNode* sourceRoot{ nullptr };
+		bool preserveMergeSourceNames{ false };
 		Smp::PrototypeBuildDomain domain{ Smp::PrototypeBuildDomain::kHead };
 	};
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
+	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
 
 	float DistanceSquared(const RE::NiPoint3& a_lhs, const RE::NiPoint3& a_rhs)
 	{
@@ -396,10 +440,113 @@ namespace
 		}
 	}
 
-	btVector3 WindDirectionFromGameAngle(const float a_angle)
+	btVector3 WindDirectionFromFo4SkyAngle(const float a_radians)
 	{
-		const auto theta = ((a_angle * 180.0F / 256.0F) - 90.0F) * (kPi / 180.0F);
-		return btVector3(-std::sin(theta), std::cos(theta), 0.0F);
+		return btVector3(std::sin(a_radians), std::cos(a_radians), 0.0F);
+	}
+
+	RE::NiPoint3 ToNiPoint3(const btVector3& a_value)
+	{
+		return RE::NiPoint3(a_value.x(), a_value.y(), a_value.z());
+	}
+
+	btVector3 ToBulletVector(const RE::NiPoint3& a_value)
+	{
+		return btVector3(a_value.x, a_value.y, a_value.z);
+	}
+
+	void ClearWindState(btVector3& a_currentWind, btVector3& a_targetWind, float& a_cooldown, const float a_longCooldown)
+	{
+		a_currentWind.setZero();
+		a_targetWind.setZero();
+		a_cooldown = std::max(a_longCooldown, 0.0F);
+	}
+
+	bool IsWeatherWindSkyValid(const RE::Sky* a_sky)
+	{
+		return a_sky &&
+			a_sky->currentWeather &&
+			a_sky->mode == RE::Sky::Mode::kFull &&
+			!a_sky->flags.any(RE::Sky::Flags::kHideSky);
+	}
+
+	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor)
+	{
+		if (a_actor) {
+			if (auto* root = a_actor->Get3D(false); root) {
+				if (auto* headNode = FindNodeByName(root, "NPC Head [Head]")) {
+					return headNode->world.translate;
+				}
+			}
+			if (auto* root = a_actor->Get3D(); root) {
+				if (auto* headNode = FindNodeByName(root, "NPC Head [Head]")) {
+					return headNode->world.translate;
+				}
+			}
+			auto start = a_actor->GetPosition();
+			start.z += 100.0F;
+			return start;
+		}
+
+		return RE::NiPoint3::ZERO;
+	}
+
+	bool IsActorWeatherWindCellValid(RE::Actor* a_actor)
+	{
+		auto* cell = a_actor ? a_actor->GetParentCell() : nullptr;
+		return cell && cell->IsExterior() && cell->worldSpace;
+	}
+
+	float ResolveActorWindObstructionFactor(RE::Actor* a_actor, const btVector3& a_windDirection, const float a_noWindDistance, const float a_fullWindDistance)
+	{
+		const auto rayDistance = std::max(a_fullWindDistance, 1.0F);
+		const auto noWindDistance = std::clamp(a_noWindDistance, 0.0F, rayDistance);
+		if (!a_actor || a_windDirection.length2() <= SIMD_EPSILON || rayDistance <= 0.0F) {
+			return 1.0F;
+		}
+
+		auto* cell = a_actor->GetParentCell();
+		if (!cell) {
+			return 1.0F;
+		}
+
+		auto upwind = a_windDirection;
+		upwind.normalize();
+		upwind = -upwind;
+
+		const auto start = ResolveWindRayStart(a_actor);
+		const auto end = ToNiPoint3(ToBulletVector(start) + (upwind * rayDistance));
+
+		RE::bhkPickData pickData;
+		RE::CFilter filter{};
+		filter.SetCollisionLayer(RE::COL_LAYER::kLOS);
+		pickData.castQuery.filterData.collisionFilterInfo = filter.filter;
+		pickData.SetStartEnd(start, end);
+		[[maybe_unused]] auto* pickedObject = cell->Pick(pickData);
+
+		if (pickData.pickFailed || !pickData.HasHit()) {
+			return 1.0F;
+		}
+
+		const auto hitDistance = std::clamp(pickData.GetHitFraction(), 0.0F, 1.0F) * rayDistance;
+		if (hitDistance <= noWindDistance) {
+			return 0.0F;
+		}
+		if (rayDistance <= noWindDistance) {
+			return 1.0F;
+		}
+		return std::clamp((hitDistance - noWindDistance) / (rayDistance - noWindDistance), 0.0F, 1.0F);
+	}
+
+	float StableWindVariation(const std::string_view a_name)
+	{
+		std::uint32_t hash = 2166136261U;
+		for (const auto ch : a_name) {
+			hash ^= static_cast<std::uint8_t>(ch);
+			hash *= 16777619U;
+		}
+		const auto normalized = static_cast<float>(hash % 1000U) / 999.0F;
+		return 0.85F + (normalized * 0.30F);
 	}
 
 	bool IsAttachCandidate(const Smp::LifecycleEventType a_type)
@@ -430,7 +577,8 @@ namespace
 
 	bool IsHeadCandidate(const Smp::LifecycleEventType a_type)
 	{
-		return a_type == Smp::LifecycleEventType::kActorHeadInitialized;
+		return a_type == Smp::LifecycleEventType::kActorHeadInitialized ||
+			a_type == Smp::LifecycleEventType::kHeadPrepareHeadPart;
 	}
 
 	bool IsPlayerFirstPersonView()
@@ -491,42 +639,6 @@ namespace
 		return result;
 	}
 
-	bool IsCharacterCustomizationMenuName(const std::string_view a_menuName)
-	{
-		return a_menuName == "looksmenu";
-	}
-
-	std::optional<std::filesystem::path> FindPhysicsXmlExtraData(RE::NiAVObject* a_object)
-	{
-		if (!a_object || !a_object->extra) {
-			return std::nullopt;
-		}
-
-		for (auto* extra : *a_object->extra) {
-			auto* stringExtra = netimmerse_cast<RE::NiStringExtraData*>(extra);
-			if (!stringExtra) {
-				continue;
-			}
-
-			const std::string_view name(stringExtra->name);
-			const auto data = Smp::ConfigPaths::Trim(std::string(std::string_view(stringExtra->data)));
-			if (data.empty()) {
-				continue;
-			}
-
-			if (!Smp::PhysicsNamesEqual(name, kPhysicsXmlExtraName)) {
-				continue;
-			}
-
-			if (auto path = Smp::ConfigPaths::ResolveExistingConfigPath(data, true)) {
-				return path;
-			}
-			spdlog::warn("found '{}' NiStringExtraData on object={} but XML path could not be resolved: {}", kPhysicsXmlExtraName, static_cast<void*>(a_object), data);
-		}
-
-		return std::nullopt;
-	}
-
 	std::optional<std::filesystem::path> FindDirectPhysicsXmlExtraData(RE::NiAVObject* a_object)
 	{
 		if (!a_object || !a_object->extra) {
@@ -558,6 +670,63 @@ namespace
 		return std::nullopt;
 	}
 
+	RE::NiNode* ResolveFaceGenOriginalRoot(RE::NiAVObject* a_object)
+	{
+		if (!a_object || !a_object->extra) {
+			return nullptr;
+		}
+
+		for (auto* extra : *a_object->extra) {
+			if (!extra || !Smp::PhysicsNamesEqual(std::string_view(extra->name), "FMD")) {
+				continue;
+			}
+
+			auto* fmd = static_cast<Fo4BSFaceGenModelExtraData*>(extra);
+			auto* meshData = fmd->model ? fmd->model->modelMeshData : nullptr;
+			auto* faceNode = meshData ? meshData->faceNode.get() : nullptr;
+			if (auto* root = faceNode ? faceNode->IsNode() : nullptr) {
+				return root;
+			}
+		}
+
+		return nullptr;
+	}
+
+	void AppendHeadCandidate(
+		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates,
+		RE::NiAVObject* a_object,
+		std::filesystem::path a_path,
+		Smp::DefaultBBP::NameMap a_meshNameMap,
+		RE::NiAVObject* a_sourceObject,
+		RE::NiNode* a_sourceRoot,
+		const bool a_preserveMergeSourceNames,
+		const Smp::PrototypeBuildDomain a_domain)
+	{
+		if (!a_object || a_path.empty()) {
+			return;
+		}
+
+		const auto normalizedPath = Smp::ConfigPaths::LowerString(a_path.string());
+		const auto duplicate = std::ranges::any_of(a_candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
+			return a_candidate.object == a_object &&
+				a_candidate.domain == a_domain &&
+				Smp::ConfigPaths::LowerString(a_candidate.path.string()) == normalizedPath;
+		});
+		if (duplicate) {
+			return;
+		}
+
+		a_candidates.push_back({
+			.object = a_object,
+			.path = std::move(a_path),
+			.meshNameMap = std::move(a_meshNameMap),
+			.sourceObject = a_sourceObject,
+			.sourceRoot = a_sourceRoot,
+			.preserveMergeSourceNames = a_preserveMergeSourceNames,
+			.domain = a_domain,
+		});
+	}
+
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(const Smp::LifecycleEvent& a_event)
 	{
 		if (!a_event.physicsXmlPath.empty()) {
@@ -579,9 +748,6 @@ namespace
 			if (parent == a_event.destinationRoot) {
 				break;
 			}
-		}
-		if (ancestorDepth >= kMaxAttachAncestorScanDepth) {
-			spdlog::warn("stopped armor XML ancestor scan after {} parents for attached object={}", kMaxAttachAncestorScanDepth, static_cast<void*>(a_event.object));
 		}
 		if (auto selection = FindArmorPhysicsXml(a_event.sourceObject)) {
 			spdlog::debug("resolved armor physics XML from source object={} for attached object={}", static_cast<void*>(a_event.sourceObject), static_cast<void*>(a_event.object));
@@ -658,6 +824,31 @@ namespace
 			return biped.get();
 		}
 		return a_event.actor->GetBiped().get();
+	}
+
+	bool HasEquippedHairSlotObject(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+
+		Smp::LifecycleEvent event{
+			.type = Smp::LifecycleEventType::kArmorAttachSkinnedObject,
+			.actor = a_actor,
+			.firstPerson = false,
+		};
+		auto* biped = ResolveEventBiped(event);
+		if (!biped) {
+			return false;
+		}
+
+		for (const auto slot : { RE::BIPED_OBJECT::kHairTop, RE::BIPED_OBJECT::kHairLong }) {
+			auto* bipObject = biped->GetBipObject(slot);
+			if (bipObject && bipObject->partClone) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	bool HasArmorBuildCandidateObject(
@@ -752,12 +943,31 @@ namespace
 		}
 
 		const auto isHair = a_parentIsHair || IsHairSubtree(a_object, a_hairKeys);
+		auto* originalRoot = ResolveFaceGenOriginalRoot(a_object);
+		auto* sourceObject = originalRoot ? static_cast<RE::NiAVObject*>(originalRoot) : a_object;
 		if (auto directXml = FindDirectPhysicsXmlExtraData(a_object)) {
-			a_candidates.push_back({
-				.object = a_object,
-				.path = *directXml,
-				.domain = isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead,
-			});
+			AppendHeadCandidate(
+				a_candidates,
+				a_object,
+				*directXml,
+				{},
+				sourceObject,
+				originalRoot ? originalRoot : a_object->IsNode(),
+				originalRoot != nullptr,
+				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
+			return;
+		}
+
+		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(sourceObject)) {
+			AppendHeadCandidate(
+				a_candidates,
+				a_object,
+				defaultBbp->physicsXml,
+				std::move(defaultBbp->meshNameMap),
+				sourceObject,
+				originalRoot ? originalRoot : sourceObject->IsNode(),
+				originalRoot != nullptr,
+				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 			return;
 		}
 
@@ -773,7 +983,7 @@ namespace
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object)
 	{
-		if (auto directXml = FindPhysicsXmlExtraData(a_object)) {
+		if (auto directXml = FindDirectPhysicsXmlExtraData(a_object)) {
 			return ArmorPhysicsXmlSelection{ .path = *directXml };
 		}
 
@@ -873,13 +1083,6 @@ namespace
 		return Smp::FindMatchingPhysicsName(a_meshNames, geometryName).has_value();
 	}
 
-	bool ContainsNode(const std::vector<std::pair<RE::NiNode*, std::string>>& a_nodes, RE::NiNode* a_node)
-	{
-		return std::ranges::find_if(a_nodes, [a_node](const auto& a_entry) {
-			return a_entry.first == a_node;
-		}) != a_nodes.end();
-	}
-
 	struct MatchedSkinBone
 	{
 		struct SkinWorldTransformSlot
@@ -919,6 +1122,13 @@ namespace
 	{
 		char buffer[48]{};
 		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Armor_%08X ", a_id);
+		return buffer;
+	}
+
+	std::string MakeReferenceHeadRenamePrefix(const std::uint32_t a_id)
+	{
+		char buffer[48]{};
+		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Head_%08X ", a_id);
 		return buffer;
 	}
 
@@ -978,15 +1188,6 @@ namespace
 		});
 	}
 
-	RE::NiTransform* ResolveSkinWorldTransform(const MatchedSkinBone::SkinWorldTransformSlot& a_slot)
-	{
-		if (!a_slot.skin || a_slot.index >= a_slot.skin->worldTransforms.size()) {
-			return nullptr;
-		}
-
-		return a_slot.skin->worldTransforms[a_slot.index];
-	}
-
 	bool RebindSkinBoneSlot(RE::BSSkin::Instance* a_skin, const std::uint32_t a_index, RE::NiNode* a_node)
 	{
 		if (!a_skin || !a_node || a_index >= a_skin->bones.size()) {
@@ -1006,8 +1207,22 @@ namespace
 			return nullptr;
 		}
 
-		auto* object = RE::BSUtilities::GetObjectByName(a_root, RE::BSFixedString(a_name), true, true);
-		return object ? object->IsNode() : nullptr;
+		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
+			return a_root->IsNode();
+		}
+
+		auto* node = a_root->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+
+		for (auto& child : node->children) {
+			if (auto* found = FindNodeByName(child.get(), a_name)) {
+				return found;
+			}
+		}
+
+		return nullptr;
 	}
 
 	bool IsExcludedMergeSearchObject(
@@ -1117,6 +1332,56 @@ namespace
 		}
 
 		return false;
+	}
+
+	bool StartsWithInsensitive(const std::string_view a_value, const std::string_view a_prefix)
+	{
+		return a_value.size() >= a_prefix.size() &&
+			_memicmp(a_value.data(), a_prefix.data(), a_prefix.size()) == 0;
+	}
+
+	bool IsArmorAutoRenameNode(RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return false;
+		}
+
+		const auto name = std::string_view(a_object->GetName());
+		constexpr std::string_view prefix = "hdtSSEPhysics_AutoRename_Armor_";
+		return StartsWithInsensitive(name, prefix);
+	}
+
+	bool IsTrackedMergedObject(const std::vector<RE::NiAVObject*>& a_trackedObjects, RE::NiAVObject* a_object)
+	{
+		return std::ranges::find(a_trackedObjects, a_object) != a_trackedObjects.end();
+	}
+
+	void CollectStaleArmorMergedNodes(
+		RE::NiNode* a_parent,
+		const std::vector<RE::NiAVObject*>& a_trackedObjects,
+		std::vector<std::pair<RE::NiNode*, RE::NiAVObject*>>& a_result)
+	{
+		if (!a_parent) {
+			return;
+		}
+
+		for (auto& child : a_parent->children) {
+			auto* object = child.get();
+			if (!object) {
+				continue;
+			}
+
+			if (IsArmorAutoRenameNode(object)) {
+				if (!IsTrackedMergedObject(a_trackedObjects, object)) {
+					a_result.push_back({ a_parent, object });
+				}
+				continue;
+			}
+
+			if (auto* node = object->IsNode()) {
+				CollectStaleArmorMergedNodes(node, a_trackedObjects, a_result);
+			}
+		}
 	}
 
 	const Smp::PhysicsBoneDescriptor* FindBoneDescriptor(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
@@ -1285,10 +1550,35 @@ namespace
 		});
 	}
 
+	bool IsReadableMemory(const void* a_address, const std::size_t a_minSize = 1)
+	{
+		if (!a_address || a_minSize == 0) {
+			return false;
+		}
+
+		MEMORY_BASIC_INFORMATION info{};
+		if (VirtualQuery(a_address, std::addressof(info), sizeof(info)) == 0) {
+			return false;
+		}
+
+		if (info.State != MEM_COMMIT || (info.Protect & PAGE_GUARD) != 0 || (info.Protect & PAGE_NOACCESS) != 0) {
+			return false;
+		}
+
+		const auto base = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+		const auto address = reinterpret_cast<std::uintptr_t>(a_address);
+		const auto offset = address >= base ? address - base : 0;
+		return offset < info.RegionSize && a_minSize <= (info.RegionSize - offset);
+	}
+
 	const char* HkStringPtrData(const Fo4HkStringPtr& a_string)
 	{
 		const auto pointer = a_string.stringAndFlag & ~static_cast<std::uintptr_t>(1);
-		return pointer != 0 ? reinterpret_cast<const char*>(pointer) : nullptr;
+		auto* data = pointer != 0 ? reinterpret_cast<const char*>(pointer) : nullptr;
+		if (!IsReadableMemory(data)) {
+			return nullptr;
+		}
+		return strnlen_s(data, 256) > 0 ? data : nullptr;
 	}
 
 	RE::NiTransform ToNiTransform(const RE::hkQsTransformf& a_transform)
@@ -1499,78 +1789,6 @@ namespace
 			a_node->world.scale);
 	}
 
-	void LogReferencePoseNode(const std::string_view a_phase, const std::string_view a_boneName, RE::NiNode* a_node)
-	{
-		if (!a_node) {
-			spdlog::info("prototype reference pose {} bone='{}' node=null", a_phase, a_boneName);
-			return;
-		}
-
-		const auto* parent = a_node->parent;
-		const auto parentName = parent ? parent->GetName() : "";
-		const auto& local = a_node->local;
-		const auto& world = a_node->world;
-		spdlog::info(
-			"prototype reference pose {} bone='{}' node={} parent={} parentName='{}' "
-			"local=({:.3f},{:.3f},{:.3f}) localScale={:.3f} "
-			"localRot=(({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f})) "
-			"world=({:.3f},{:.3f},{:.3f}) worldScale={:.3f} "
-			"worldRot=(({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f}))",
-			a_phase,
-			a_boneName,
-			static_cast<void*>(a_node),
-			static_cast<const void*>(parent),
-			parentName,
-			local.translate.x,
-			local.translate.y,
-			local.translate.z,
-			local.scale,
-			local.rotate.entry[0][0],
-			local.rotate.entry[0][1],
-			local.rotate.entry[0][2],
-			local.rotate.entry[1][0],
-			local.rotate.entry[1][1],
-			local.rotate.entry[1][2],
-			local.rotate.entry[2][0],
-			local.rotate.entry[2][1],
-			local.rotate.entry[2][2],
-			world.translate.x,
-			world.translate.y,
-			world.translate.z,
-			world.scale,
-			world.rotate.entry[0][0],
-			world.rotate.entry[0][1],
-			world.rotate.entry[0][2],
-			world.rotate.entry[1][0],
-			world.rotate.entry[1][1],
-			world.rotate.entry[1][2],
-			world.rotate.entry[2][0],
-			world.rotate.entry[2][1],
-			world.rotate.entry[2][2]);
-	}
-
-	void LogReferencePoseNodes(const std::string_view a_phase, RE::NiNode* a_root)
-	{
-		if (!a_root) {
-			spdlog::info("prototype reference pose {} root=null", a_phase);
-			return;
-		}
-
-		static constexpr std::array<std::string_view, 6> targetBones{
-			"Root",
-			"Pelvis",
-			"InariTail_01",
-			"InariTail_02",
-			"InariTail_03",
-			"InariTail_04",
-		};
-		static const std::vector<RE::NiAVObject*> emptyExclusions;
-		for (const auto boneName : targetBones) {
-			auto* node = FindNodeByNameExcludingSubtrees(a_root, boneName, nullptr, nullptr, nullptr, emptyExclusions);
-			LogReferencePoseNode(a_phase, boneName, node);
-		}
-	}
-
 	void RenameMergedNodeTree(RE::NiNode* a_node, const std::string& a_prefix, std::vector<MergedSkeletonNode>* a_renamedNodes)
 	{
 		if (!a_node) {
@@ -1598,6 +1816,22 @@ namespace
 		}
 	}
 
+	RE::NiPointer<RE::NiAVObject> CloneNodeExact(RE::NiNode* a_source)
+	{
+		if (!a_source) {
+			return nullptr;
+		}
+
+		RE::NiCloningProcess cloneProcess;
+		cloneProcess.appendChar = '$';
+		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
+		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
+
+		auto* cloneObject = a_source->CreateClone(cloneProcess);
+		a_source->ProcessClone(cloneProcess);
+		return cloneObject ? static_cast<RE::NiAVObject*>(cloneObject->IsNode()) : nullptr;
+	}
+
 	RE::NiNode* CloneMergedNodeTree(RE::NiNode* a_source, const std::string& a_prefix, std::vector<MergedSkeletonNode>& a_renamedNodes)
 	{
 		if (!a_source) {
@@ -1616,7 +1850,6 @@ namespace
 			return nullptr;
 		}
 
-		RenameMergedNodeTree(a_source, a_prefix, nullptr);
 		RenameMergedNodeTree(cloneNode, a_prefix, std::addressof(a_renamedNodes));
 		return cloneNode;
 	}
@@ -1644,6 +1877,9 @@ namespace
 			}
 
 			const auto sourceName = sourceChild->GetName();
+			if (Smp::PhysicsNamesEqual(sourceName, "BSFaceGenNiNodeSkinned")) {
+				continue;
+			}
 			if (sourceName.empty()) {
 				MergeSourceSkeletonIntoActor(a_destination, sourceChild, a_destinationRoot, a_excludedSourceRoot, a_excludedAttachedRoot, a_excludedOriginalRoot, a_excludedObjects, a_prefix, a_renamedNodes, a_mergedRoots);
 				continue;
@@ -1662,9 +1898,6 @@ namespace
 
 			a_destination->AttachChild(clonedChild, false);
 			UpdateNodeWorldFromLocal(clonedChild);
-			if (Smp::PhysicsNamesEqual(sourceName, "InariTail_01")) {
-				LogNodePlacement("prototype merge post-resolve placement", sourceName, clonedChild);
-			}
 			a_mergedRoots.push_back({
 				.parent = a_destination,
 				.node = clonedChild,
@@ -1685,6 +1918,27 @@ namespace
 		return found == a_renamedNodes.end() ? nullptr : found->node;
 	}
 
+	RE::NiNode* FindCurrentMergedSkeletonNode(
+		const std::vector<MergedSkeletonNode>& a_renamedNodes,
+		const std::string_view a_name,
+		RE::NiAVObject* a_skeletonRoot)
+	{
+		auto* mergedNode = FindMergedSkeletonNode(a_renamedNodes, a_name);
+		if (!mergedNode) {
+			return nullptr;
+		}
+
+		if (!a_skeletonRoot) {
+			return mergedNode;
+		}
+
+		if (auto* currentNode = FindNodeByName(a_skeletonRoot, mergedNode->GetName())) {
+			return currentNode;
+		}
+
+		return nullptr;
+	}
+
 	RE::NiNode* FindNodeByMergedSuffix(RE::NiAVObject* a_root, const std::string_view a_name)
 	{
 		if (!a_root || a_name.empty()) {
@@ -1693,8 +1947,14 @@ namespace
 
 		const auto objectName = std::string_view(a_root->GetName());
 		if (!objectName.empty()) {
-			constexpr std::string_view prefix = "hdtSSEPhysics_AutoRename_Armor_";
-			if (objectName.starts_with(prefix) && objectName.size() > a_name.size()) {
+			constexpr std::array prefixes{
+				std::string_view("hdtSSEPhysics_AutoRename_Armor_"),
+				std::string_view("hdtSSEPhysics_AutoRename_Head_"),
+			};
+			const auto hasMergedPrefix = std::ranges::any_of(prefixes, [objectName](const std::string_view a_prefix) {
+				return objectName.starts_with(a_prefix);
+			});
+			if (hasMergedPrefix && objectName.size() > a_name.size()) {
 				const auto suffix = objectName.substr(objectName.size() - a_name.size());
 				if (Smp::PhysicsNamesEqual(suffix, a_name)) {
 					return a_root->IsNode();
@@ -1726,11 +1986,29 @@ namespace
 		a_roots.clear();
 	}
 
+	std::vector<RE::NiAVObject*> BuildSkeletonLookupExclusions(
+		const std::vector<RE::NiAVObject*>& a_baseExclusions,
+		const std::vector<MergedRootNode>& a_mergedRoots)
+	{
+		auto exclusions = a_baseExclusions;
+		exclusions.reserve(exclusions.size() + a_mergedRoots.size());
+		for (const auto& root : a_mergedRoots) {
+			if (root.node) {
+				exclusions.push_back(root.node.get());
+			}
+		}
+		return exclusions;
+	}
+
 	void ResolveExplicitXmlBonesFromMergedSkeleton(
 		std::vector<MatchedSkinBone>& a_matchedBones,
 		const std::vector<std::string>& a_boneNames,
 		const std::vector<MergedSkeletonNode>& a_renamedNodes,
-		RE::NiAVObject* a_skeletonRoot)
+		RE::NiAVObject* a_skeletonRoot,
+		RE::NiAVObject* a_attachedObject,
+		RE::NiAVObject* a_sourceObject,
+		RE::NiAVObject* a_mergeSourceObject,
+		const std::vector<RE::NiAVObject*>& a_excludedObjects)
 	{
 		if (!a_skeletonRoot) {
 			return;
@@ -1741,20 +2019,16 @@ namespace
 				continue;
 			}
 
-			auto* skeletonNode = FindMergedSkeletonNode(a_renamedNodes, boneName);
-			const auto resolvedFromMergedNode = skeletonNode != nullptr;
-			if (skeletonNode && !IsNodeInTree(a_skeletonRoot, skeletonNode)) {
-				if (auto* currentNode = FindNodeByName(a_skeletonRoot, skeletonNode->GetName())) {
-					skeletonNode = currentNode;
-				} else {
-					skeletonNode = nullptr;
-				}
-			}
+			auto* skeletonNode = FindCurrentMergedSkeletonNode(a_renamedNodes, boneName, a_skeletonRoot);
+			bool resolvedFromMergedNode = skeletonNode != nullptr;
 			if (!skeletonNode) {
-				skeletonNode = FindNodeByName(a_skeletonRoot, boneName);
-			}
-			if (!skeletonNode) {
-				skeletonNode = FindNodeByMergedSuffix(a_skeletonRoot, boneName);
+				skeletonNode = FindNodeByNameExcludingSubtrees(
+					a_skeletonRoot,
+					boneName,
+					a_attachedObject,
+					a_sourceObject,
+					a_mergeSourceObject,
+					a_excludedObjects);
 			}
 			if (!skeletonNode) {
 				continue;
@@ -1763,9 +2037,6 @@ namespace
 			if (auto* existingByNode = FindMatchedSkinBone(a_matchedBones, skeletonNode)) {
 				existingByNode->name = boneName;
 				existingByNode->resolvedFromSkeleton = true;
-				if (Smp::PhysicsNamesEqual(boneName, "InariTail_01")) {
-					LogNodePlacement("prototype explicit XML post-resolve placement", boneName, skeletonNode);
-				}
 				continue;
 			}
 
@@ -1781,9 +2052,6 @@ namespace
 				}
 				existingByName->name = boneName;
 				existingByName->resolvedFromSkeleton = true;
-				if (Smp::PhysicsNamesEqual(boneName, "InariTail_01")) {
-					LogNodePlacement("prototype explicit XML post-resolve placement", boneName, skeletonNode);
-				}
 				continue;
 			}
 
@@ -1797,9 +2065,50 @@ namespace
 				boneName,
 				resolvedFromMergedNode ? "merged attachment" : "actor skeleton",
 				static_cast<void*>(skeletonNode));
-			if (Smp::PhysicsNamesEqual(boneName, "InariTail_01")) {
-				LogNodePlacement("prototype explicit XML post-resolve placement", boneName, skeletonNode);
+		}
+	}
+
+	void ResolveMatchedSkinBonesFromSkeleton(
+		std::vector<MatchedSkinBone>& a_matchedBones,
+		const std::vector<MergedSkeletonNode>& a_renamedNodes,
+		RE::NiAVObject* a_skeletonRoot,
+		RE::NiAVObject* a_attachedObject,
+		RE::NiAVObject* a_sourceObject,
+		RE::NiAVObject* a_mergeSourceObject,
+		const std::vector<RE::NiAVObject*>& a_excludedObjects)
+	{
+		if (!a_skeletonRoot) {
+			return;
+		}
+
+		for (auto& matchedBone : a_matchedBones) {
+			if (matchedBone.name.empty()) {
+				continue;
 			}
+
+			auto* skeletonNode = FindCurrentMergedSkeletonNode(a_renamedNodes, matchedBone.name, a_skeletonRoot);
+			bool resolvedFromMergedNode = skeletonNode != nullptr;
+			if (!skeletonNode) {
+				skeletonNode = FindNodeByNameExcludingSubtrees(
+					a_skeletonRoot,
+					matchedBone.name,
+					a_attachedObject,
+					a_sourceObject,
+					a_mergeSourceObject,
+					a_excludedObjects);
+			}
+			if (!skeletonNode || skeletonNode == matchedBone.node) {
+				continue;
+			}
+
+			spdlog::debug(
+				"matched skin bone '{}' resolved from {} node={} instead of attached runtime node={}",
+				matchedBone.name,
+				resolvedFromMergedNode ? "merged attachment" : "actor skeleton",
+				static_cast<void*>(skeletonNode),
+				static_cast<void*>(matchedBone.node));
+			matchedBone.node = skeletonNode;
+			matchedBone.resolvedFromSkeleton = true;
 		}
 	}
 
@@ -1969,101 +2278,6 @@ namespace
 			a_body.getAngularVelocity().x(),
 			a_body.getAngularVelocity().y(),
 			a_body.getAngularVelocity().z());
-	}
-
-	void LogBtTransform(const char* a_label, const btTransform& a_transform)
-	{
-		const auto origin = a_transform.getOrigin();
-		const auto rotation = a_transform.getRotation();
-		const auto& basis = a_transform.getBasis();
-		spdlog::info(
-			"{} origin=({:.3f},{:.3f},{:.3f}) rot=({:.3f},{:.3f},{:.3f},{:.3f}) basis=(({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f}),({:.3f},{:.3f},{:.3f}))",
-			a_label,
-			origin.x(),
-			origin.y(),
-			origin.z(),
-			rotation.x(),
-			rotation.y(),
-			rotation.z(),
-			rotation.w(),
-			basis[0].x(),
-			basis[0].y(),
-			basis[0].z(),
-			basis[1].x(),
-			basis[1].y(),
-			basis[1].z(),
-			basis[2].x(),
-			basis[2].y(),
-			basis[2].z());
-	}
-
-	void LogConstraintFrameDiagnostic(
-		const Smp::PhysicsConstraintDescriptor& a_descriptor,
-		RE::NiNode* a_nodeA,
-		RE::NiNode* a_nodeB,
-		const hdt::btQsTransform& a_nodeTransformA,
-		const hdt::btQsTransform& a_nodeTransformB,
-		const btTransform& a_nodeFrameA,
-		const btTransform& a_nodeFrameB,
-		const btTransform& a_frameA,
-		const btTransform& a_frameB,
-		const btTransform& a_rigToLocalA,
-		const btTransform& a_rigToLocalB)
-	{
-		if (!Smp::PhysicsNamesEqual(a_descriptor.name, "InariTail_01_to_InariTail_02")) {
-			return;
-		}
-
-		const auto nodeClosureA = (a_nodeTransformA * hdt::btQsTransform(a_nodeFrameA)).asTransform();
-		const auto nodeClosureB = (a_nodeTransformB * hdt::btQsTransform(a_nodeFrameB)).asTransform();
-		const auto nodeTransformA = a_nodeTransformA.asTransform();
-		const auto nodeTransformB = a_nodeTransformB.asTransform();
-		const auto rigClosureA = (nodeTransformA * a_rigToLocalA.inverse()) * a_frameA;
-		const auto rigClosureB = (nodeTransformB * a_rigToLocalB.inverse()) * a_frameB;
-		const auto nodeDelta = nodeClosureB.getOrigin() - nodeClosureA.getOrigin();
-		const auto rigDelta = rigClosureB.getOrigin() - rigClosureA.getOrigin();
-		const auto nodeBLocal = a_nodeB ? ToBulletQsTransform(a_nodeB->local) : hdt::btQsTransform::getIdentity();
-		const auto nodeBLocalFromA = (a_nodeTransformA * nodeBLocal).asTransform();
-		const auto nodeBParentName = a_nodeB && a_nodeB->parent ? a_nodeB->parent->GetName() : "";
-
-		spdlog::info(
-			"prototype constraint frame diagnostic '{}' bodyA='{}' bodyB='{}' nodeA={} nodeB={} nodeBParent='{}' nodeDelta=({:.3f},{:.3f},{:.3f}) rigDelta=({:.3f},{:.3f},{:.3f}) useLinearReferenceFrameA={} frameMode={}",
-			a_descriptor.name,
-			a_descriptor.bodyA,
-			a_descriptor.bodyB,
-			static_cast<void*>(a_nodeA),
-			static_cast<void*>(a_nodeB),
-			nodeBParentName,
-			nodeDelta.x(),
-			nodeDelta.y(),
-			nodeDelta.z(),
-			rigDelta.x(),
-			rigDelta.y(),
-			rigDelta.z(),
-			a_descriptor.useLinearReferenceFrameA,
-			static_cast<int>(a_descriptor.frameMode));
-		LogBtTransform("prototype constraint nodeTransformA", nodeTransformA);
-		LogBtTransform("prototype constraint nodeTransformB", nodeTransformB);
-		LogBtTransform("prototype constraint nodeFrameA", a_nodeFrameA);
-		LogBtTransform("prototype constraint nodeFrameB", a_nodeFrameB);
-		LogBtTransform("prototype constraint nodeClosureA=A*nodeFrameA", nodeClosureA);
-		LogBtTransform("prototype constraint nodeClosureB=B*nodeFrameB", nodeClosureB);
-		LogBtTransform("prototype constraint frameA", a_frameA);
-		LogBtTransform("prototype constraint frameB", a_frameB);
-		LogBtTransform("prototype constraint rigClosureA=bodyA*frameA", rigClosureA);
-		LogBtTransform("prototype constraint rigClosureB=bodyB*frameB", rigClosureB);
-		LogBtTransform("prototype constraint nodeB.local", nodeBLocal.asTransform());
-		LogBtTransform("prototype constraint A*nodeB.local", nodeBLocalFromA);
-	}
-
-	bool ShouldLogPrototypeBoneDiagnostic(const std::string& a_boneName)
-	{
-		return Smp::PhysicsNamesEqual(a_boneName, "Root") ||
-			Smp::PhysicsNamesEqual(a_boneName, "Pelvis") ||
-			Smp::PhysicsNamesEqual(a_boneName, "InariTail_01") ||
-			Smp::PhysicsNamesEqual(a_boneName, "InariTail_02") ||
-			Smp::PhysicsNamesEqual(a_boneName, "InariTail_03") ||
-			Smp::PhysicsNamesEqual(a_boneName, "InariTail_04");
 	}
 
 	void ResetBulletRigidBody(btRigidBody& a_body, const btTransform& a_transform)
@@ -2606,25 +2820,11 @@ namespace
 		const btTransform& a_rigToLocalA,
 		const btTransform& a_rigToLocalB,
 		const hdt::btQsTransform& a_nodeTransformA,
-		const hdt::btQsTransform& a_nodeTransformB,
-		RE::NiNode* a_nodeA,
-		RE::NiNode* a_nodeB)
+		const hdt::btQsTransform& a_nodeTransformB)
 	{
 		auto [nodeFrameA, nodeFrameB] = CalculateConstraintFrames(a_descriptor, a_nodeTransformA, a_nodeTransformB);
 		const auto frameA = a_rigToLocalA * nodeFrameA;
 		const auto frameB = a_rigToLocalB * nodeFrameB;
-		LogConstraintFrameDiagnostic(
-			a_descriptor,
-			a_nodeA,
-			a_nodeB,
-			a_nodeTransformA,
-			a_nodeTransformB,
-			nodeFrameA,
-			nodeFrameB,
-			frameA,
-			frameB,
-			a_rigToLocalA,
-			a_rigToLocalB);
 
 		switch (a_descriptor.kind) {
 		case Smp::PhysicsConstraintKind::kConeTwist:
@@ -2759,6 +2959,7 @@ namespace Smp
 			a_settings.smp.unclampedResets,
 			a_settings.smp.unclampedResetAngle);
 		disableFirstPersonViewPhysics_ = a_settings.smp.disableFirstPersonViewPhysics;
+		disableSMPHairWhenWigEquipped_ = a_settings.smp.disableSMPHairWhenWigEquipped;
 		enableNpcPhysics_ = a_settings.smp.enableNpcPhysics;
 		autoAdjustMaxActors_ = a_settings.smp.autoAdjustMaxActors;
 		maxActiveActors_ = static_cast<std::size_t>(std::max(a_settings.smp.maxActiveActors, 1));
@@ -2777,6 +2978,10 @@ namespace Smp
 		windStrength_ = std::max(a_settings.wind.windStrength, 0.0F);
 		windDistanceForNoWind_ = std::max(a_settings.wind.distanceForNoWind, 0.0F);
 		windDistanceForMaxWind_ = std::max(a_settings.wind.distanceForMaxWind, windDistanceForNoWind_);
+		windWeatherShortCooldownSeconds_ = std::max(a_settings.wind.weatherShortCooldownSeconds, 0.0F);
+		windWeatherLongCooldownSeconds_ = std::max(a_settings.wind.weatherLongCooldownSeconds, windWeatherShortCooldownSeconds_);
+		windSmoothingSamples_ = std::max(a_settings.wind.smoothingSamples, 1);
+		randomizePerBoneWind_ = a_settings.wind.randomizePerBoneWind;
 		windDirection_ = btVector3(a_settings.wind.directionX, a_settings.wind.directionY, a_settings.wind.directionZ);
 		if (windDirection_.length2() > SIMD_EPSILON) {
 			windDirection_.normalize();
@@ -2824,6 +3029,10 @@ namespace Smp
 		float remainingTimeStep = 0.0F;
 		{
 			std::scoped_lock lock(lock_);
+			if (loadingPhysicsSuspended_) {
+				ResumeFromLoadingMenuLocked();
+				return;
+			}
 			if (characterCustomizationMenuDepth_ > 0) {
 				ResetStepClockLocked();
 				return;
@@ -2852,19 +3061,15 @@ namespace Smp
 	{
 		std::scoped_lock lock(lock_);
 		if (!dynamicsWorld_ || a_deltaSeconds <= 0.0F) {
-			if (diagnosticFrameBudget_ > 0) {
-				spdlog::info(
-					"prototype physics step skipped dynamicsWorld={} delta={}",
-					static_cast<void*>(dynamicsWorld_.get()),
-					a_deltaSeconds);
-			}
 			return;
 		}
 
 		PruneInvalidPrototypeStatesLocked();
 		TryReactivateSuspendedActorsLocked();
-		if (diagnosticFrameBudget_ > 0 && prototypeActors_.empty()) {
-			spdlog::info("prototype physics step has no active actors after pruning");
+		TryReactivateSuspendedPrototypeStatesLocked();
+		if ((!pendingActorRebuilds_.empty() || !pendingHeadRebuilds_.empty()) && simulationFrame_ >= nextPendingRebuildFrame_) {
+			nextPendingRebuildFrame_ = simulationFrame_ + kPendingRebuildRetryIntervalFrames;
+			SchedulePendingRebuildTaskLocked();
 		}
 
 		if (disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView()) {
@@ -2878,9 +3083,6 @@ namespace Smp
 			}
 			if (suspendedPlayer) {
 				ResetStepClockLocked();
-				if (diagnosticFrameBudget_ > 0) {
-					spdlog::info("prototype player physics step suspended in first-person view");
-				}
 				return;
 			}
 		}
@@ -2894,30 +3096,7 @@ namespace Smp
 			const auto readDelta = actorState.resetReadFrames > 0 ? 0.0F : a_deltaSeconds;
 			for (auto& prototypeBody : actorState.bodies) {
 				if (prototypeBody.bone) {
-					const bool logThisBody = diagnosticFrameBudget_ > 0 && ShouldLogPrototypeBoneDiagnostic(prototypeBody.boneName);
-					if (logThisBody) {
-						LogPrototypeTransformDiagnostic(
-							"pre-read",
-							actorState.actor,
-							prototypeBody.boneName,
-							prototypeBody.node,
-							prototypeBody.bone->m_rig);
-					}
 					prototypeBody.bone->readTransform(readDelta);
-					if (resettingRead && logThisBody) {
-						spdlog::info(
-							"prototype bone diagnostic reset-read reset current-pose body actor={} bone='{}'",
-							static_cast<void*>(actorState.actor),
-							prototypeBody.boneName);
-					}
-					if (logThisBody) {
-						LogPrototypeTransformDiagnostic(
-							"post-read",
-							actorState.actor,
-							prototypeBody.boneName,
-							prototypeBody.node,
-							prototypeBody.bone->m_rig);
-					}
 				}
 			}
 			if (actorState.resetReadFrames > 0) {
@@ -2929,12 +3108,6 @@ namespace Smp
 					dynamicsWorld_->clearForces();
 				}
 				ResetStepClockLocked();
-				if (diagnosticFrameBudget_ > 0) {
-					spdlog::info(
-						"prototype physics reset-read frame actor={} remaining={}",
-						static_cast<void*>(actorState.actor),
-						actorState.resetReadFrames);
-				}
 				return;
 			}
 		}
@@ -2942,11 +3115,6 @@ namespace Smp
 		const auto fixedStepSeconds = std::clamp(currentStepSeconds_, kMinimumStepSeconds, fixedStepSeconds_);
 		const auto maximumStepSeconds = std::max(fixedStepSeconds, fixedStepSeconds * static_cast<float>(std::max(maxSubSteps_, 1)));
 		const auto clampedDelta = std::clamp(a_deltaSeconds, kMinimumStepSeconds, maximumStepSeconds);
-		for (const auto& actorState : prototypeActors_) {
-			if (diagnosticFrameBudget_ > 115) {
-				LogRootConstraintDiagnosticsLocked("pre-step", actorState);
-			}
-		}
 
 		const auto translationOffset = ApplyTranslationOffset(*dynamicsWorld_);
 		for (auto& actorState : prototypeActors_) {
@@ -2969,20 +3137,9 @@ namespace Smp
 			dispatcher_->clearAllManifold();
 		}
 		for (auto& actorState : prototypeActors_) {
-			if (diagnosticFrameBudget_ > 115) {
-				LogRootConstraintDiagnosticsLocked("post-step", actorState);
-			}
 			for (auto& prototypeBody : actorState.bodies) {
 				if (prototypeBody.bone) {
 					prototypeBody.bone->internalUpdate();
-					if (diagnosticFrameBudget_ > 0 && ShouldLogPrototypeBoneDiagnostic(prototypeBody.boneName)) {
-						LogPrototypeTransformDiagnostic(
-							"post-step",
-							actorState.actor,
-							prototypeBody.boneName,
-							prototypeBody.node,
-							prototypeBody.bone->m_rig);
-					}
 				}
 			}
 			for (auto& prototypeMesh : actorState.meshes) {
@@ -2995,40 +3152,6 @@ namespace Smp
 		++simulationFrame_;
 		if (simulationFrame_ == 0) {
 			simulationFrame_ = 1;
-		}
-		if (diagnosticFrameBudget_ > 0) {
-			if (diagnosticFrameBudget_ == 120) {
-				spdlog::info(
-					"prototype physics step entered delta={} activeActors={} dynamicsWorld={}",
-					a_deltaSeconds,
-					prototypeActors_.size(),
-					static_cast<void*>(dynamicsWorld_.get()));
-			}
-			--diagnosticFrameBudget_;
-			if ((diagnosticFrameBudget_ % 30) == 0) {
-				std::size_t dynamicBodies = 0;
-				std::size_t kinematicBodies = 0;
-				std::size_t constraints = 0;
-				for (const auto& actorState : prototypeActors_) {
-					constraints += actorState.constraints.size();
-					for (const auto& prototypeBody : actorState.bodies) {
-						if (!prototypeBody.bone) {
-							continue;
-						}
-						if (prototypeBody.bone->m_rig.isStaticOrKinematicObject()) {
-							++kinematicBodies;
-						} else {
-							++dynamicBodies;
-						}
-					}
-				}
-				spdlog::info(
-					"prototype physics step diagnostic frame={} dynamicBodies={} kinematicBodies={} constraints={}",
-					simulationFrame_,
-					dynamicBodies,
-					kinematicBodies,
-					constraints);
-			}
 		}
 	}
 
@@ -3109,6 +3232,7 @@ namespace Smp
 
 		std::vector<RE::BSFixedString> activeTags;
 		std::vector<DisableGroup> disableGroups;
+		const auto disableHairForWig = disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_state.actor);
 
 		for (auto& prototypeMesh : a_state.meshes) {
 			auto* body = prototypeMesh.body.get();
@@ -3117,6 +3241,10 @@ namespace Smp
 			}
 
 			body->disabled_ = false;
+			if (disableHairForWig && prototypeMesh.domain == PrototypeBuildDomain::kHair) {
+				body->disabled_ = true;
+				continue;
+			}
 			if (body->disableTag_.empty()) {
 				for (const auto& tag : body->tags_) {
 					if (std::ranges::find(activeTags, tag) == activeTags.end()) {
@@ -3163,8 +3291,9 @@ namespace Smp
 
 	void Fo4PhysicsWorld::UpdateWindLocked()
 	{
-		currentWind_.setZero();
 		if (!windEnabled_ || windStrength_ <= 0.0F) {
+			currentWind_.setZero();
+			targetWind_.setZero();
 			return;
 		}
 
@@ -3172,40 +3301,53 @@ namespace Smp
 		auto strength = windStrength_;
 		if (windUseWeather_) {
 			const auto* sky = RE::Sky::GetSingleton();
-			if (!sky) {
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* cell = player ? player->GetParentCell() : nullptr;
+			if (!IsWeatherWindSkyValid(sky) || !player || !cell || !cell->IsExterior() || !cell->worldSpace) {
+				ClearWindState(currentWind_, targetWind_, windWeatherCooldown_, windWeatherLongCooldownSeconds_);
 				return;
 			}
 
-			auto angle = sky->windAngle;
-			if (sky->currentWeather) {
-				const auto index = static_cast<std::size_t>(RE::TESWeather::WeatherData::kWindDir);
-				angle = static_cast<float>(sky->currentWeather->weatherData[index]);
+			windWeatherCooldown_ -= currentStepSeconds_;
+			if (windWeatherCooldown_ <= 0.0F) {
+				direction = WindDirectionFromFo4SkyAngle(sky->windAngle);
+				strength *= std::max(sky->windSpeed, 0.0F);
+				targetWind_ = direction * strength * kGameUnitsPerMeter;
+				windWeatherCooldown_ = windWeatherShortCooldownSeconds_;
 			}
-
-			direction = WindDirectionFromGameAngle(angle);
-			strength *= std::max(sky->windSpeed, 0.0F);
+		} else {
+			targetWind_ = direction * strength * kGameUnitsPerMeter;
 		}
 
-		currentWind_ = direction * strength * kGameUnitsPerMeter;
+		const auto smoothingSamples = static_cast<float>(std::max(windSmoothingSamples_, 1));
+		if (smoothingSamples <= 1.0F) {
+			currentWind_ = targetWind_;
+		} else {
+			currentWind_ += (targetWind_ - currentWind_) / smoothingSamples;
+		}
 	}
 
 	void Fo4PhysicsWorld::ApplyWindForcesLocked()
 	{
 		if (currentWind_.length2() <= SIMD_EPSILON) {
+			for (auto& actorState : prototypeActors_) {
+				actorState.currentWindFactor = 0.0F;
+			}
 			return;
 		}
 
-		const auto* player = RE::PlayerCharacter::GetSingleton();
 		for (auto& actorState : prototypeActors_) {
-			float actorWindScale = 1.0F;
-			if (player && actorState.actor) {
-				const auto distance = std::sqrt(DistanceSquared(actorState.actor->GetPosition(), player->GetPosition()));
-				if (distance <= windDistanceForNoWind_) {
-					actorWindScale = 0.0F;
-				} else if (windDistanceForMaxWind_ > windDistanceForNoWind_ && distance < windDistanceForMaxWind_) {
-					actorWindScale = (distance - windDistanceForNoWind_) / (windDistanceForMaxWind_ - windDistanceForNoWind_);
-				}
+			if (windUseWeather_ && !IsActorWeatherWindCellValid(actorState.actor)) {
+				actorState.currentWindFactor = 0.0F;
+				continue;
 			}
+
+			const auto targetActorWindScale = ResolveActorWindObstructionFactor(actorState.actor, currentWind_, windDistanceForNoWind_, windDistanceForMaxWind_);
+			actorState.currentWindFactor += (targetActorWindScale - actorState.currentWindFactor) / static_cast<float>(std::max(windSmoothingSamples_, 1));
+			if (std::abs(actorState.currentWindFactor - targetActorWindScale) <= 0.001F) {
+				actorState.currentWindFactor = targetActorWindScale;
+			}
+			const auto actorWindScale = std::clamp(actorState.currentWindFactor, 0.0F, 1.0F);
 			if (actorWindScale <= 0.0F) {
 				continue;
 			}
@@ -3216,7 +3358,10 @@ namespace Smp
 					continue;
 				}
 
-				prototypeBody.bone->m_rig.applyCentralForce(actorWind * prototypeBody.bone->m_windFactor);
+				const auto boneWind = randomizePerBoneWind_ ?
+					actorWind * StableWindVariation(prototypeBody.boneName) :
+					actorWind;
+				prototypeBody.bone->m_rig.applyCentralForce(boneWind * prototypeBody.bone->m_windFactor);
 			}
 		}
 	}
@@ -3246,9 +3391,13 @@ namespace Smp
 
 		std::size_t bodyCount = 0;
 		std::size_t meshCount = 0;
+		std::size_t activeActors = 0;
 		for (const auto& actorState : prototypeActors_) {
 			bodyCount += actorState.bodies.size();
 			meshCount += actorState.meshes.size();
+			if (actorState.HasRuntime()) {
+				++activeActors;
+			}
 		}
 
 		const auto totalMs = averageStepMs_ + averageWritebackMs_;
@@ -3256,7 +3405,7 @@ namespace Smp
 			if (totalMs > budgetMs_ && currentMaxActiveActors_ > 1) {
 				--currentMaxActiveActors_;
 			} else if (totalMs < budgetMs_ && currentMaxActiveActors_ < maxActiveActors_) {
-				const auto averagePerActor = prototypeActors_.empty() ? 0.0F : totalMs / static_cast<float>(prototypeActors_.size());
+				const auto averagePerActor = activeActors > 0 ? totalMs / static_cast<float>(activeActors) : 0.0F;
 				const auto headroom = budgetMs_ - totalMs;
 				const auto canAdd = averagePerActor > 0.0F ? static_cast<std::size_t>(std::max(headroom / averagePerActor, 0.0F)) : 2U;
 				currentMaxActiveActors_ += std::clamp<std::size_t>(canAdd, 0, 2);
@@ -3270,7 +3419,7 @@ namespace Smp
 		if (totalMs > budgetMs_) {
 			spdlog::debug(
 				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms writeback={:.3f}ms writes(cellJobs/postAnim)={}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
-				prototypeActors_.size(),
+				activeActors,
 				currentMaxActiveActors_,
 				maxActiveActors_,
 				bodyCount,
@@ -3286,7 +3435,7 @@ namespace Smp
 		} else {
 			spdlog::trace(
 				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms writeback={:.3f}ms writes(cellJobs/postAnim)={}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
-				prototypeActors_.size(),
+				activeActors,
 				currentMaxActiveActors_,
 				maxActiveActors_,
 				bodyCount,
@@ -3330,7 +3479,7 @@ namespace Smp
 		bool skippedDuplicate = false;
 		{
 			std::scoped_lock lock(lock_);
-			if (characterCustomizationMenuDepth_ > 0) {
+			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
 				ResetStepClockLocked();
 				return;
 			}
@@ -3340,14 +3489,6 @@ namespace Smp
 			for (auto& actorState : prototypeActors_) {
 				if (!CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					skippedDuplicate = true;
-					if (diagnosticFrameBudget_ > 0) {
-						spdlog::info(
-							"prototype writeback skipped duplicate source={} frame={} actor={} previousSource={}",
-							WritebackSourceName(a_source),
-							simulationFrame_,
-							static_cast<void*>(actorState.actor),
-							WritebackSourceName(actorState.lastWritebackSource));
-					}
 					continue;
 				}
 				actorState.lastWritebackFrame = simulationFrame_;
@@ -3357,28 +3498,9 @@ namespace Smp
 						continue;
 					}
 
-					const bool logThisBody = diagnosticFrameBudget_ > 0 && ShouldLogPrototypeBoneDiagnostic(prototypeBody.boneName);
-					if (logThisBody) {
-						const auto phase = WritebackPhaseName("pre-writeback", a_source);
-						LogPrototypeTransformDiagnostic(
-							phase,
-							actorState.actor,
-							prototypeBody.boneName,
-							prototypeBody.node,
-							prototypeBody.bone->m_rig);
-					}
 					if (!prototypeBody.bone->m_rig.isKinematicObject()) {
 						prototypeBody.bone->writeTransform();
 						wroteAny = true;
-					}
-					if (logThisBody) {
-						const auto phase = WritebackPhaseName("post-writeback", a_source);
-						LogPrototypeTransformDiagnostic(
-							phase,
-							actorState.actor,
-							prototypeBody.boneName,
-							prototypeBody.node,
-							prototypeBody.bone->m_rig);
 					}
 				}
 			}
@@ -3393,7 +3515,7 @@ namespace Smp
 		bool skippedDuplicate = false;
 		{
 			std::scoped_lock lock(lock_);
-			if (characterCustomizationMenuDepth_ > 0) {
+			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
 				ResetStepClockLocked();
 				return;
 			}
@@ -3413,40 +3535,13 @@ namespace Smp
 							continue;
 						}
 
-						const bool logThisBody = diagnosticFrameBudget_ > 0 && ShouldLogPrototypeBoneDiagnostic(prototypeBody.boneName);
-						if (logThisBody) {
-							const auto phase = WritebackPhaseName("pre-writeback", a_source);
-							LogPrototypeTransformDiagnostic(
-								phase,
-								actorState.actor,
-								prototypeBody.boneName,
-								prototypeBody.node,
-								prototypeBody.bone->m_rig);
-						}
 						if (!prototypeBody.bone->m_rig.isKinematicObject()) {
 							prototypeBody.bone->writeTransform();
 							wroteAny = true;
 						}
-						if (logThisBody) {
-							const auto phase = WritebackPhaseName("post-writeback", a_source);
-							LogPrototypeTransformDiagnostic(
-								phase,
-								actorState.actor,
-								prototypeBody.boneName,
-								prototypeBody.node,
-								prototypeBody.bone->m_rig);
-						}
 					}
 				} else {
 					skippedDuplicate = true;
-					if (diagnosticFrameBudget_ > 0) {
-						spdlog::info(
-							"prototype writeback skipped duplicate source={} frame={} actor={} previousSource={}",
-							WritebackSourceName(a_source),
-							simulationFrame_,
-							static_cast<void*>(actorState.actor),
-							WritebackSourceName(actorState.lastWritebackSource));
-					}
 				}
 			}
 		}
@@ -3471,9 +3566,6 @@ namespace Smp
 		customizationCloseReloadQueued_ = std::ranges::any_of(pendingActorRebuilds_, [](const PendingActorRebuild& a_pending) {
 			return !a_pending.armorRecords.empty();
 		});
-		if (!pendingActorRebuilds_.empty() || !pendingHeadRebuilds_.empty()) {
-			SchedulePendingRebuildTaskLocked();
-		}
 	}
 
 	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>*)
@@ -3487,7 +3579,7 @@ namespace Smp
 					if (actorState.actor != a_event.actor) {
 						continue;
 					}
-					if (characterCustomizationMenuDepth_ > 0 || HasPendingArmorRecordRebuildLocked(a_event.actor)) {
+					if (characterCustomizationMenuDepth_ > 0 || HasPendingArmorRecordRebuildLocked(a_event.actor) || !actorState.armorRecords.empty()) {
 						SuspendPrototypeRuntimeLocked(actorState);
 						preservedForCustomization = true;
 						continue;
@@ -3498,10 +3590,10 @@ namespace Smp
 					actorState.actorHandle.reset();
 				}
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+					return !a_state.actor && !a_state.HasRuntime();
 				});
 				if (preservedForCustomization) {
-					spdlog::debug("physics world preserved actor state for null Set3D during character customization actor={}", static_cast<void*>(a_event.actor));
+					spdlog::debug("physics world preserved actor state for null Set3D actor={} because SMP armor records are pending or customization is active", static_cast<void*>(a_event.actor));
 				} else if (clearedActorState) {
 					spdlog::debug("physics world cleared actor state for null Set3D actor={}", static_cast<void*>(a_event.actor));
 				} else {
@@ -3539,17 +3631,57 @@ namespace Smp
 					return RE::BSEventNotifyControl::kContinue;
 				}
 				bool clearedGroups = a_event.object ? ClearPrototypeGroupsForObjectLocked(*actorState, a_event.object) : false;
-				if (!clearedGroups) {
-					if (a_event.type == LifecycleEventType::kArmorDetachBegin) {
+				std::uint32_t prunedStaleMergedNodes = 0;
+				if (a_event.type == LifecycleEventType::kArmorDetachBegin) {
+					std::vector<RE::NiAVObject*> trackedMergedObjects;
+					trackedMergedObjects.reserve(actorState->mergedNodes.size());
+					for (const auto& mergedNode : actorState->mergedNodes) {
+						if (mergedNode.node) {
+							trackedMergedObjects.push_back(mergedNode.node.get());
+						}
+					}
+
+					auto* actorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
+					if (!actorRoot && a_event.actor) {
+						actorRoot = a_event.actor->Get3D();
+					}
+					std::vector<std::pair<RE::NiNode*, RE::NiAVObject*>> staleMergedNodes;
+					CollectStaleArmorMergedNodes(actorRoot ? actorRoot->IsNode() : nullptr, trackedMergedObjects, staleMergedNodes);
+					for (const auto& [parent, object] : staleMergedNodes) {
+						if (!parent || !object) {
+							continue;
+						}
 						spdlog::debug(
-							"ignored armor detach candidate {} actor={} object={} because it did not match an active prototype group",
+							"pruning stale untracked armor merge node '{}'={} parent={} during {} actor={} detachObject={}",
+							std::string_view(object->GetName()),
+							static_cast<void*>(object),
+							static_cast<void*>(parent),
 							ToString(a_event.type),
 							static_cast<void*>(a_event.actor),
 							static_cast<void*>(a_event.object));
+						parent->DetachChild(object);
+						++prunedStaleMergedNodes;
 					}
 				}
+				if (!clearedGroups) {
+					if (a_event.type == LifecycleEventType::kArmorDetachBegin) {
+						spdlog::debug(
+							"ignored armor detach candidate {} actor={} object={} because it did not match an active prototype group; prunedStaleMergedNodes={}",
+							ToString(a_event.type),
+							static_cast<void*>(a_event.actor),
+							static_cast<void*>(a_event.object),
+							prunedStaleMergedNodes);
+					}
+				} else if (prunedStaleMergedNodes > 0) {
+					spdlog::debug(
+						"armor detach {} actor={} object={} cleared active prototype group and pruned {} stale merged nodes",
+						ToString(a_event.type),
+						static_cast<void*>(a_event.actor),
+						static_cast<void*>(a_event.object),
+						prunedStaleMergedNodes);
+				}
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+					return !a_state.runtimeSuspended && !a_state.HasRuntime();
 				});
 			}
 			spdlog::debug(
@@ -3565,7 +3697,7 @@ namespace Smp
 				if (actorState.actor != a_event.actor) {
 					continue;
 				}
-				if (characterCustomizationMenuDepth_ > 0 || HasPendingArmorRecordRebuildLocked(a_event.actor)) {
+				if (characterCustomizationMenuDepth_ > 0 || HasPendingArmorRecordRebuildLocked(a_event.actor) || !actorState.armorRecords.empty()) {
 					SuspendPrototypeRuntimeLocked(actorState);
 					preservedForCustomization = true;
 					continue;
@@ -3576,7 +3708,7 @@ namespace Smp
 				actorState.actorHandle.reset();
 			}
 			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+				return !a_state.actor && !a_state.HasRuntime();
 			});
 			const auto deferForCustomization =
 				characterCustomizationMenuDepth_ > 0 ||
@@ -3613,12 +3745,13 @@ namespace Smp
 		} else if (IsHeadCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
 			PruneInvalidPrototypeStatesLocked();
-			MarkPendingHeadRebuildLocked(a_event.actor);
+			MarkPendingHeadRebuildLocked(a_event);
 			ResetStepClockLocked();
 			spdlog::debug(
-				"queued head physics rebuild candidate {} actor={} for deferred main-frame processing",
+				"queued head physics rebuild candidate {} actor={} object={} for deferred main-frame processing",
 				ToString(a_event.type),
-				static_cast<void*>(a_event.actor));
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_event.object));
 		}
 
 		return RE::BSEventNotifyControl::kContinue;
@@ -3627,8 +3760,29 @@ namespace Smp
 	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
 	{
 		const auto menuName = LowerMenuName(a_event.menuName);
-		const auto isCustomizationMenu = IsCharacterCustomizationMenuName(menuName);
-		if (!isCustomizationMenu) {
+		if (menuName == "loadingmenu") {
+			std::scoped_lock lock(lock_);
+			if (a_event.opening) {
+				++loadingMenuDepth_;
+				loadingPhysicsSuspended_ = true;
+				ResetStepClockLocked();
+				if (dynamicsWorld_) {
+					dynamicsWorld_->clearForces();
+				}
+				spdlog::debug("loading menu '{}' opened; prototype physics suspended until game resumes", std::string_view(a_event.menuName));
+			} else {
+				if (loadingMenuDepth_ > 0) {
+					--loadingMenuDepth_;
+				}
+				spdlog::debug(
+					"loading menu '{}' closed; prototype physics reset will run when game resumes depth={}",
+					std::string_view(a_event.menuName),
+					loadingMenuDepth_);
+			}
+			return RE::BSEventNotifyControl::kContinue;
+		}
+
+		if (menuName != "looksmenu") {
 			return RE::BSEventNotifyControl::kContinue;
 		}
 
@@ -3652,6 +3806,20 @@ namespace Smp
 			}
 			if (characterCustomizationMenuDepth_ == 0) {
 				ReloadPrototypeStatesForCustomizationMenuLocked();
+				std::vector<RE::Actor*> actors;
+				for (const auto& actorState : prototypeActors_) {
+					if (actorState.actor && std::ranges::find(actors, actorState.actor) == actors.end()) {
+						actors.push_back(actorState.actor);
+					}
+				}
+				for (auto* actor : actors) {
+					MarkPendingHeadRebuildLocked(LifecycleEvent{
+						.type = LifecycleEventType::kActorHeadInitialized,
+						.actor = actor,
+						.object = actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()) : nullptr,
+						.firstPerson = false,
+					});
+				}
 				customizationCloseReloadQueued_ = false;
 			}
 			ResetStepClockLocked();
@@ -3711,6 +3879,9 @@ namespace Smp
 		pendingActorRebuilds_.clear();
 		pendingHeadRebuilds_.clear();
 		pendingRebuildTaskQueued_ = false;
+		nextPendingRebuildFrame_ = 1;
+		loadingMenuDepth_ = 0;
+		loadingPhysicsSuspended_ = false;
 		candidateEvents_ = 0;
 		simulationFrame_ = 1;
 		currentMaxActiveActors_ = maxActiveActors_;
@@ -3723,7 +3894,9 @@ namespace Smp
 		postAnimationWritebacks_ = 0;
 		duplicateCellJobsWritebacks_ = 0;
 		duplicatePostAnimationWritebacks_ = 0;
-		diagnosticFrameBudget_ = 0;
+		currentWind_.setZero();
+		targetWind_.setZero();
+		windWeatherCooldown_ = 0.0F;
 		characterCustomizationMenuDepth_ = 0;
 		customizationCloseReloadQueued_ = false;
 	}
@@ -3734,6 +3907,19 @@ namespace Smp
 		if (!InitializeLocked()) {
 			return;
 		}
+
+		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
+			if (const auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
+				actorState && actorState->HasRuntime()) {
+				spdlog::debug(
+					"skipping generic {} rebuild for actor={} firstPerson={} because direct armor physics is already active",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					a_event.firstPerson);
+				return;
+			}
+		}
+
 		PruneInvalidPrototypeStatesLocked();
 
 		const auto deferForCustomization =
@@ -3762,10 +3948,43 @@ namespace Smp
 			static_cast<void*>(a_event.object));
 
 		if (!IsPrototypeCandidateLocked(a_event, true)) {
+			auto armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
+			if (!armorRecords.empty()) {
+				spdlog::debug(
+					"captured {} suspended armor records for skipped prototype physics candidate {} actor={}",
+					armorRecords.size(),
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor));
+				SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords));
+			}
 			return;
 		}
 
 		BuildPrototypeForEventLocked(a_event);
+		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
+			const auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
+			if (!actorState || !actorState->HasRuntime()) {
+				auto armorRecords = actorState ? actorState->armorRecords : std::vector<PrototypeArmorRecord>{};
+				if (armorRecords.empty()) {
+					armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
+				}
+				const auto hasBiped = ResolveEventBiped(a_event) != nullptr;
+				if (!armorRecords.empty() || !hasBiped) {
+					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords));
+					spdlog::debug(
+						"queued retry for {} actor={} firstPerson={} because initial generic actor build found no active runtime",
+						ToString(a_event.type),
+						static_cast<void*>(a_event.actor),
+						a_event.firstPerson);
+				} else {
+					spdlog::debug(
+						"skipping pending retry for {} actor={} firstPerson={} because ready biped scan found no SMP armor records",
+						ToString(a_event.type),
+						static_cast<void*>(a_event.actor),
+						a_event.firstPerson);
+				}
+			}
+		}
 	}
 
 	void Fo4PhysicsWorld::BuildPrototypeForEventLocked(const LifecycleEvent& a_event)
@@ -3841,7 +4060,7 @@ namespace Smp
 				if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
 					ClearPrototypeStateLocked(*actorState);
 					std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-						return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+						return !a_state.runtimeSuspended && !a_state.HasRuntime();
 					});
 				}
 
@@ -3858,7 +4077,7 @@ namespace Smp
 					static_cast<void*>(a_event.object),
 					built);
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+					return !a_state.runtimeSuspended && !a_state.HasRuntime();
 				});
 				return;
 			}
@@ -3894,7 +4113,7 @@ namespace Smp
 			if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
 				ClearPrototypeStateLocked(*actorState);
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+					return !a_state.runtimeSuspended && !a_state.HasRuntime();
 				});
 			}
 		}
@@ -3912,7 +4131,7 @@ namespace Smp
 			.sourceRoot = a_event.sourceRoot,
 		});
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+			return !a_state.runtimeSuspended && !a_state.HasRuntime();
 		});
 	}
 
@@ -3926,27 +4145,55 @@ namespace Smp
 		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(faceNode);
 
 		auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
-		ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
-		ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+		const auto faceNodeChanged = actorState.faceNode && actorState.faceNode.get() != faceObject;
+		if (faceNodeChanged) {
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+			actorState.nextHeadRenameId = 0;
+			spdlog::debug(
+				"cleared stale head/hair prototype physics after face node replacement actor={} oldFaceNode={} newFaceNode={}",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(actorState.faceNode.get()),
+				static_cast<void*>(faceObject));
+		}
+		actorState.faceNode = faceObject;
+
+		const auto touchedHeadPart = a_event.type == LifecycleEventType::kHeadPrepareHeadPart;
+		const auto touchedObjectValid = !touchedHeadPart || !a_event.object || IsObjectInTree(faceObject, a_event.object);
+		if (!touchedHeadPart) {
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+		} else if (touchedObjectValid && a_event.object) {
+			ClearPrototypeGroupsForObjectLocked(actorState, a_event.object);
+		} else {
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
+			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+			spdlog::debug(
+				"discarded stale touched headpart object for actor={} object={} faceNode={}; rebuilding full current face node",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_event.object),
+				static_cast<void*>(faceObject));
+		}
 
 		const auto hairKeys = BuildHairHeadpartKeys(a_event.actor);
 		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
-		CollectHeadPhysicsXmlSelections(faceObject, hairKeys, candidates);
+		const auto headPartIsHair = a_event.headPart && a_event.headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
+		CollectHeadPhysicsXmlSelections(touchedHeadPart && touchedObjectValid && a_event.object ? a_event.object : faceObject, hairKeys, candidates, headPartIsHair);
 		if (candidates.empty()) {
 			spdlog::debug(
-				"head physics candidate {} actor={} faceNode={} found no direct XML-tagged head/hair subtrees hairKeys={}",
+				"head physics candidate {} actor={} faceNode={} object={} found no XML/defaultBBP head/hair subtrees hairKeys={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(faceNode),
+				static_cast<void*>(a_event.object),
 				hairKeys.size());
 			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+				return !a_state.runtimeSuspended && !a_state.HasRuntime();
 			});
 			return;
 		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
-		const Smp::DefaultBBP::NameMap emptyMeshNameMap;
 		std::uint32_t built = 0;
 		for (const auto& candidate : candidates) {
 			const auto selectedXml = candidate.path.string();
@@ -3968,7 +4215,21 @@ namespace Smp
 
 			auto scopedEvent = a_event;
 			scopedEvent.object = candidate.object;
-			BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, emptyMeshNameMap, candidate.domain);
+			scopedEvent.sourceObject = candidate.sourceObject;
+			scopedEvent.sourceRoot = candidate.sourceRoot;
+			scopedEvent.mergeSourceObject = candidate.sourceObject;
+			scopedEvent.preserveMergeSourceNames = candidate.preserveMergeSourceNames;
+			scopedEvent.mergeRenamePrefix = MakeReferenceHeadRenamePrefix(actorState.nextHeadRenameId++);
+			const auto clearedOverlappingBones = ClearPrototypeGroupsForBoneNamesLocked(actorState, selectedSummary->boneNames, candidate.domain);
+			if (clearedOverlappingBones) {
+				spdlog::debug(
+					"cleared stale {} headpart build groups for actor={} object={} before rebuilding XML {}",
+					PrototypeDomainName(candidate.domain),
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(candidate.object),
+					selectedXml);
+			}
+			BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			++built;
 		}
 
@@ -3980,7 +4241,7 @@ namespace Smp
 			built,
 			hairKeys.size());
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+			return !a_state.runtimeSuspended && !a_state.HasRuntime();
 		});
 	}
 
@@ -4011,13 +4272,17 @@ namespace Smp
 			return false;
 		}
 
-		if (FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) == nullptr && prototypeActors_.size() >= currentMaxActiveActors_) {
+		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+			return a_state.HasRuntime();
+		}));
+		if (FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) == nullptr && activeActors >= currentMaxActiveActors_) {
 			spdlog::debug(
 				"skipping prototype physics candidate {} for actor={} because active actor budget is full ({}/{})",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
-				prototypeActors_.size(),
+				activeActors,
 				currentMaxActiveActors_);
+			SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
 			return false;
 		}
 
@@ -4031,6 +4296,7 @@ namespace Smp
 					static_cast<void*>(a_event.actor),
 					distanceSquared,
 					maxDistanceSquared);
+				SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
 				return false;
 			}
 		}
@@ -4077,6 +4343,17 @@ namespace Smp
 			root = resolvedActor->Get3D();
 		}
 		if (!root) {
+			if (!a_state.armorRecords.empty()) {
+				if (!a_state.runtimeSuspended || a_state.HasRuntime()) {
+					spdlog::debug(
+						"suspending prototype physics state for actor={} firstPerson={} with no current 3D; preserved armorRecords={}",
+						static_cast<void*>(a_state.actor),
+						a_state.firstPerson,
+						a_state.armorRecords.size());
+					SuspendPrototypeRuntimeLocked(a_state);
+				}
+				return true;
+			}
 			spdlog::debug(
 				"dropping prototype physics state for actor={} firstPerson={} with no current 3D",
 				static_cast<void*>(a_state.actor),
@@ -4095,13 +4372,15 @@ namespace Smp
 				const auto distanceSquared = DistanceSquared(a_state.actor->GetPosition(), player->GetPosition());
 				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
 				if (distanceSquared > maxDistanceSquared) {
-					spdlog::debug(
-						"dropping prototype physics state for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
-						static_cast<void*>(a_state.actor),
-						distanceSquared,
-						maxDistanceSquared);
-					SuspendActorCandidateLocked(a_state.actor);
-					return false;
+					if (!a_state.runtimeSuspended || a_state.HasRuntime()) {
+						spdlog::debug(
+							"soft-suspending prototype physics state for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
+							static_cast<void*>(a_state.actor),
+							distanceSquared,
+							maxDistanceSquared);
+						SuspendPrototypeRuntimeLocked(a_state);
+					}
+					return true;
 				}
 			}
 		}
@@ -4120,28 +4399,38 @@ namespace Smp
 		}
 
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+			return !a_state.actor && !a_state.HasRuntime();
 		});
 	}
 
 	void Fo4PhysicsWorld::EnforceActorBudgetLocked()
 	{
-		if (prototypeActors_.size() <= currentMaxActiveActors_) {
+		auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+			return a_state.HasRuntime();
+		}));
+		if (activeActors <= currentMaxActiveActors_) {
 			return;
 		}
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
-		while (prototypeActors_.size() > currentMaxActiveActors_) {
+		while (activeActors > currentMaxActiveActors_) {
 			auto victim = prototypeActors_.end();
 			auto victimDistanceSquared = -1.0F;
 			for (auto it = prototypeActors_.begin(); it != prototypeActors_.end(); ++it) {
+				if (!it->HasRuntime()) {
+					continue;
+				}
+				auto resolvedActor = it->actorHandle.get();
+				if (!resolvedActor || resolvedActor.get() != it->actor) {
+					continue;
+				}
 				if (player && it->actor == player) {
 					continue;
 				}
 
 				auto distanceSquared = std::numeric_limits<float>::max();
-				if (player && it->actor) {
-					distanceSquared = DistanceSquared(it->actor->GetPosition(), player->GetPosition());
+				if (player) {
+					distanceSquared = DistanceSquared(resolvedActor->GetPosition(), player->GetPosition());
 				}
 
 				if (victim == prototypeActors_.end() || distanceSquared > victimDistanceSquared) {
@@ -4155,25 +4444,36 @@ namespace Smp
 			}
 
 			spdlog::debug(
-				"dropping prototype physics state for actor={} because active actor budget shrank to {}",
+				"soft-suspending prototype physics state for actor={} because active actor budget shrank to {}",
 				static_cast<void*>(victim->actor),
 				currentMaxActiveActors_);
-			SuspendActorCandidateLocked(victim->actor);
-			ClearPrototypeStateLocked(*victim);
-			prototypeActors_.erase(victim);
+			SuspendPrototypeRuntimeLocked(*victim);
+			--activeActors;
 		}
 	}
 
-	void Fo4PhysicsWorld::SuspendActorCandidateLocked(RE::Actor* a_actor)
+	void Fo4PhysicsWorld::SuspendActorCandidateLocked(
+		RE::Actor* a_actor,
+		const bool a_firstPerson,
+		std::vector<PrototypeArmorRecord> a_armorRecords)
 	{
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!a_actor || a_actor == player || !enableNpcPhysics_) {
 			return;
 		}
 
+		for (auto& record : a_armorRecords) {
+			record.preMergedSkeletonNodes.clear();
+			record.preMergedRootNodes.clear();
+		}
+
 		for (auto& candidate : suspendedActors_) {
 			const auto resolvedActor = candidate.actorHandle.get();
 			if (resolvedActor && resolvedActor.get() == a_actor) {
+				if (!a_armorRecords.empty()) {
+					candidate.firstPerson = a_firstPerson;
+					candidate.armorRecords = std::move(a_armorRecords);
+				}
 				return;
 			}
 		}
@@ -4183,8 +4483,16 @@ namespace Smp
 			return;
 		}
 
-		suspendedActors_.push_back({ .actorHandle = handle });
-		spdlog::debug("suspended prototype physics candidate actor={} until distance/budget allows rebuild", static_cast<void*>(a_actor));
+		suspendedActors_.push_back({
+			.actorHandle = handle,
+			.firstPerson = a_firstPerson,
+			.armorRecords = std::move(a_armorRecords),
+		});
+		spdlog::debug(
+			"suspended prototype physics candidate actor={} firstPerson={} armorRecords={} until distance/budget allows rebuild",
+			static_cast<void*>(a_actor),
+			a_firstPerson,
+			suspendedActors_.back().armorRecords.size());
 	}
 
 	void Fo4PhysicsWorld::TryReactivateSuspendedActorsLocked()
@@ -4200,7 +4508,10 @@ namespace Smp
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		for (auto it = suspendedActors_.begin(); it != suspendedActors_.end();) {
-			if (prototypeActors_.size() >= currentMaxActiveActors_) {
+			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+			return a_state.HasRuntime();
+			}));
+			if (activeActors >= currentMaxActiveActors_) {
 				return;
 			}
 
@@ -4211,12 +4522,37 @@ namespace Smp
 			}
 
 			auto* actor = resolvedActor.get();
-			if (!actor || FindPrototypeStateLocked(actor, false)) {
+			auto* existingState = actor ? FindPrototypeStateLocked(actor, it->firstPerson) : nullptr;
+			if (!actor) {
+				it = suspendedActors_.erase(it);
+				continue;
+			}
+			if (existingState) {
+				if (existingState->runtimeSuspended && !it->armorRecords.empty()) {
+					for (auto& record : it->armorRecords) {
+						auto existingRecord = std::ranges::find_if(existingState->armorRecords, [&](const PrototypeArmorRecord& a_record) {
+							return a_record.bipedObject == record.bipedObject;
+						});
+						if (existingRecord != existingState->armorRecords.end()) {
+							*existingRecord = std::move(record);
+						} else {
+							existingState->armorRecords.push_back(std::move(record));
+						}
+					}
+					spdlog::debug(
+						"merged suspended armor records into soft-suspended prototype state actor={} firstPerson={} armorRecords={}",
+						static_cast<void*>(actor),
+						it->firstPerson,
+						existingState->armorRecords.size());
+				}
 				it = suspendedActors_.erase(it);
 				continue;
 			}
 
-			auto* root = actor->Get3D();
+			auto* root = actor->Get3D(it->firstPerson);
+			if (!root && !it->firstPerson) {
+				root = actor->Get3D();
+			}
 			if (!root) {
 				++it;
 				continue;
@@ -4231,13 +4567,94 @@ namespace Smp
 				}
 			}
 
-			spdlog::debug("reactivating suspended prototype physics candidate actor={} root={}", static_cast<void*>(actor), static_cast<void*>(root));
+			if (!it->armorRecords.empty()) {
+				if (!RebuildPendingArmorRecordsLocked(actor, it->firstPerson, it->armorRecords)) {
+					++it;
+					continue;
+				}
+
+				spdlog::debug(
+					"reactivated suspended prototype physics candidate actor={} firstPerson={} from preserved armor records",
+					static_cast<void*>(actor),
+					it->firstPerson);
+				it = suspendedActors_.erase(it);
+				continue;
+			}
+
+			spdlog::debug(
+				"reactivating suspended prototype physics candidate actor={} root={} firstPerson={}",
+				static_cast<void*>(actor),
+				static_cast<void*>(root),
+				it->firstPerson);
 			BuildPrototypeForEventLocked({
 				.type = LifecycleEventType::kActorSet3D,
 				.actor = actor,
+				.biped = actor->GetBiped(it->firstPerson).get(),
 				.object = root,
+				.firstPerson = it->firstPerson,
 			});
-			it = suspendedActors_.erase(it);
+			if (FindPrototypeStateLocked(actor, it->firstPerson)) {
+				it = suspendedActors_.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+
+	void Fo4PhysicsWorld::TryReactivateSuspendedPrototypeStatesLocked()
+	{
+		if (!enableNpcPhysics_) {
+			return;
+		}
+
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		for (auto& actorState : prototypeActors_) {
+			if (!actorState.runtimeSuspended || actorState.actor == player || actorState.armorRecords.empty()) {
+				continue;
+			}
+
+			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+			return a_state.HasRuntime();
+			}));
+			if (activeActors >= currentMaxActiveActors_) {
+				return;
+			}
+
+			auto resolvedActor = actorState.actorHandle.get();
+			if (!resolvedActor || resolvedActor.get() != actorState.actor) {
+				continue;
+			}
+
+			auto* actor = resolvedActor.get();
+			auto* root = actor->Get3D(actorState.firstPerson);
+			if (!root && !actorState.firstPerson) {
+				root = actor->Get3D();
+			}
+			if (!root) {
+				continue;
+			}
+
+			if (player && maxActorDistance_ > 0.0F) {
+				const auto distanceSquared = DistanceSquared(actor->GetPosition(), player->GetPosition());
+				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
+				if (distanceSquared > maxDistanceSquared) {
+					continue;
+				}
+			}
+
+			auto armorRecords = actorState.armorRecords;
+			if (!RebuildPendingArmorRecordsLocked(actor, actorState.firstPerson, armorRecords)) {
+				if (actorState.HasRuntime()) {
+					actorState.runtimeSuspended = false;
+				}
+				continue;
+			}
+
+			actorState.runtimeSuspended = false;
+			spdlog::debug(
+				"reactivated soft-suspended prototype physics state actor={} firstPerson={} from preserved armor records",
+				static_cast<void*>(actor),
+				actorState.firstPerson);
 		}
 	}
 
@@ -4255,7 +4672,6 @@ namespace Smp
 		for (auto& pending : pendingActorRebuilds_) {
 			auto resolvedActor = pending.actorHandle.get();
 			if (resolvedActor && resolvedActor.get() == a_actor && pending.firstPerson == a_firstPerson) {
-				pending.waitFrames = 0;
 				for (auto& record : a_armorRecords) {
 					auto existing = std::ranges::find_if(pending.armorRecords, [&](const PrototypeArmorRecord& a_pendingRecord) {
 						return a_pendingRecord.bipedObject == record.bipedObject;
@@ -4284,22 +4700,22 @@ namespace Smp
 			pendingActorRebuilds_.back().armorRecords.size());
 	}
 
-	void Fo4PhysicsWorld::MarkPendingHeadRebuildLocked(RE::Actor* a_actor)
+	void Fo4PhysicsWorld::MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event)
 	{
-		if (!a_actor) {
+		if (!a_event.actor) {
 			return;
 		}
 
-		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_event.actor);
 		if (!handle) {
 			return;
 		}
 
 		for (auto& pending : pendingHeadRebuilds_) {
 			auto resolvedActor = pending.actorHandle.get();
-			if (resolvedActor && resolvedActor.get() == a_actor) {
+			if (resolvedActor && resolvedActor.get() == a_event.actor && pending.type == a_event.type && pending.object.get() == a_event.object) {
 				pending.frameDelay = std::max(pending.frameDelay, kHeadInitializedRebuildDelayFrames);
-				pending.waitFrames = 0;
+				pending.headPart = a_event.headPart;
 				SchedulePendingRebuildTaskLocked();
 				return;
 			}
@@ -4307,6 +4723,9 @@ namespace Smp
 
 		pendingHeadRebuilds_.push_back({
 			.actorHandle = handle,
+			.type = a_event.type,
+			.object = a_event.object,
+			.headPart = a_event.headPart,
 			.frameDelay = kHeadInitializedRebuildDelayFrames,
 		});
 		SchedulePendingRebuildTaskLocked();
@@ -4361,6 +4780,41 @@ namespace Smp
 			const auto resolvedActor = a_pending.actorHandle.get();
 			return resolvedActor && resolvedActor.get() == a_actor;
 		});
+	}
+
+	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event)
+	{
+		std::vector<PrototypeArmorRecord> records;
+		auto appendRecord = [&](const RE::BIPED_OBJECT a_bipedObject, const ArmorPhysicsXmlSelection& a_selection) {
+			if (a_bipedObject == RE::BIPED_OBJECT::kTotal || a_selection.path.empty()) {
+				return;
+			}
+			const auto duplicate = std::ranges::any_of(records, [a_bipedObject](const PrototypeArmorRecord& a_record) {
+				return a_record.bipedObject == a_bipedObject;
+			});
+			if (duplicate) {
+				return;
+			}
+			records.push_back({
+				.bipedObject = a_bipedObject,
+				.physicsXmlPath = a_selection.path.string(),
+				.meshNameMap = a_selection.meshNameMap,
+			});
+		};
+
+		if (IsArmorAttachCandidate(a_event.type)) {
+			if (auto selection = FindArmorPhysicsXml(a_event)) {
+				appendRecord(a_event.bipedObject, *selection);
+			}
+			return records;
+		}
+
+		std::vector<ArmorPhysicsXmlBuildCandidate> candidates;
+		CollectEquippedArmorPhysicsXmlSelections(a_event, candidates);
+		for (const auto& candidate : candidates) {
+			appendRecord(candidate.bipedObject, candidate.selection);
+		}
+		return records;
 	}
 
 	void Fo4PhysicsWorld::RecordPrototypeArmorLocked(
@@ -4500,15 +4954,6 @@ namespace Smp
 
 			if (!it->armorRecords.empty()) {
 				if (!RebuildPendingArmorRecordsLocked(actor, it->firstPerson, it->armorRecords)) {
-					if (++it->waitFrames >= kPendingRebuildMaxWaitFrames) {
-						spdlog::debug(
-							"dropping pending customization resume for actor={} firstPerson={} because armor clones did not become ready after {} queued attempts",
-							static_cast<void*>(actor),
-							it->firstPerson,
-							it->waitFrames);
-						it = pendingActorRebuilds_.erase(it);
-						continue;
-					}
 					++it;
 					continue;
 				}
@@ -4516,7 +4961,8 @@ namespace Smp
 				continue;
 			}
 
-			if (FindPrototypeStateLocked(actor, it->firstPerson)) {
+			if (auto* existingState = FindPrototypeStateLocked(actor, it->firstPerson);
+				existingState && (!existingState->runtimeSuspended || existingState->HasRuntime())) {
 				it = pendingActorRebuilds_.erase(it);
 				continue;
 			}
@@ -4526,27 +4972,21 @@ namespace Smp
 				root = actor->Get3D();
 			}
 			if (!root) {
-				if (++it->waitFrames >= kPendingRebuildMaxWaitFrames) {
-					spdlog::debug(
-						"dropping pending prototype physics rebuild for actor={} firstPerson={} because 3D did not become available after {} queued task frames",
-						static_cast<void*>(actor),
-						it->firstPerson,
-						it->waitFrames);
-					it = pendingActorRebuilds_.erase(it);
-					continue;
-				}
 				++it;
 				continue;
 			}
-			it->waitFrames = 0;
-
+			auto* biped = actor->GetBiped(it->firstPerson).get();
+			if (!biped && !it->firstPerson) {
+				biped = actor->GetBiped().get();
+			}
 			const LifecycleEvent rebuildEvent{
 				.type = LifecycleEventType::kActorSet3D,
 				.actor = actor,
-				.biped = actor->GetBiped(it->firstPerson).get(),
+				.biped = biped,
 				.object = root,
 				.firstPerson = it->firstPerson,
 			};
+			auto discoveredRecords = rebuildEvent.biped ? CollectSuspendedArmorRecordsLocked(rebuildEvent) : std::vector<PrototypeArmorRecord>{};
 			if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
 				spdlog::debug(
 					"processing pending prototype physics rebuild for actor={} root={} firstPerson={}",
@@ -4555,14 +4995,27 @@ namespace Smp
 					it->firstPerson);
 				BuildPrototypeForEventLocked(rebuildEvent);
 			}
-			if (!FindPrototypeStateLocked(actor, it->firstPerson)) {
-				spdlog::debug(
-					"consumed pending prototype physics rebuild for actor={} root={} firstPerson={} without creating state",
-					static_cast<void*>(actor),
-					static_cast<void*>(root),
-					it->firstPerson);
+			const auto* rebuiltState = FindPrototypeStateLocked(actor, it->firstPerson);
+			const auto rebuiltRuntime = rebuiltState && rebuiltState->HasRuntime();
+			if (rebuiltRuntime) {
+				it = pendingActorRebuilds_.erase(it);
+				continue;
 			}
-			it = pendingActorRebuilds_.erase(it);
+			if (!discoveredRecords.empty()) {
+				it->armorRecords = std::move(discoveredRecords);
+				++it;
+				continue;
+			}
+			if (rebuildEvent.biped) {
+				spdlog::debug(
+					"dropping pending prototype physics rebuild for actor={} firstPerson={} because ready biped scan found no SMP armor records",
+					static_cast<void*>(actor),
+					it->firstPerson);
+				it = pendingActorRebuilds_.erase(it);
+				continue;
+			}
+
+			++it;
 		}
 	}
 
@@ -4600,25 +5053,15 @@ namespace Smp
 			}
 			auto* faceNode = actor->GetFaceNodeSkinned();
 			if (!root || !faceNode) {
-				if (++it->waitFrames >= kPendingRebuildMaxWaitFrames) {
-					spdlog::debug(
-						"dropping pending head physics rebuild for actor={} because root={} faceNode={} did not become available after {} queued task frames",
-						static_cast<void*>(actor),
-						static_cast<void*>(root),
-						static_cast<void*>(faceNode),
-						it->waitFrames);
-					it = pendingHeadRebuilds_.erase(it);
-					continue;
-				}
 				++it;
 				continue;
 			}
-			it->waitFrames = 0;
 
 			const LifecycleEvent headEvent{
-				.type = LifecycleEventType::kActorHeadInitialized,
+				.type = it->type,
 				.actor = actor,
-				.object = reinterpret_cast<RE::NiAVObject*>(faceNode),
+				.object = it->object ? it->object.get() : reinterpret_cast<RE::NiAVObject*>(faceNode),
+				.headPart = it->headPart,
 				.firstPerson = false,
 			};
 			if (IsPrototypeCandidateLocked(headEvent, false)) {
@@ -4641,7 +5084,7 @@ namespace Smp
 
 		std::uint32_t suspendedStates = 0;
 		for (auto& actorState : prototypeActors_) {
-			if (actorState.bodies.empty() && actorState.meshes.empty() && actorState.constraints.empty()) {
+			if (!actorState.HasRuntime()) {
 				continue;
 			}
 			SuspendPrototypeRuntimeLocked(actorState);
@@ -4702,7 +5145,7 @@ namespace Smp
 		}
 
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty() && a_state.armorRecords.empty();
+			return !a_state.actor && !a_state.HasRuntime() && a_state.armorRecords.empty();
 		});
 		ResetStepClockLocked();
 		spdlog::debug(
@@ -4781,6 +5224,7 @@ namespace Smp
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.resetReadFrames = 0;
+		a_state.runtimeSuspended = true;
 		spdlog::debug(
 			"suspended prototype runtime for actor={} bodies={} meshes={} constraints={} preservedMergedNodes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
@@ -4864,9 +5308,13 @@ namespace Smp
 		a_state.mergedNodes.clear();
 		a_state.nextBuildGroup = 0;
 		a_state.nextArmorRenameId = 0;
+		a_state.nextHeadRenameId = 0;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.resetReadFrames = 0;
+		a_state.currentWindFactor = 1.0F;
+		a_state.runtimeSuspended = false;
+		a_state.faceNode = nullptr;
 	}
 
 	bool Fo4PhysicsWorld::ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object)
@@ -5079,8 +5527,34 @@ namespace Smp
 		suspendedActors_.clear();
 	}
 
+	void Fo4PhysicsWorld::ResumeFromLoadingMenuLocked()
+	{
+		std::size_t resetBodies = 0;
+		for (auto& actorState : prototypeActors_) {
+			actorState.lastWritebackFrame = 0;
+			actorState.lastWritebackSource = WritebackSource::kUnknown;
+			actorState.resetReadFrames = std::max(actorState.resetReadFrames, kAttachResetReadFrames);
+			actorState.currentWindFactor = 1.0F;
+			for (auto& prototypeBody : actorState.bodies) {
+				if (!prototypeBody.bone) {
+					continue;
+				}
+				prototypeBody.bone->readTransform(0.0F);
+				++resetBodies;
+			}
+		}
+		if (dynamicsWorld_) {
+			dynamicsWorld_->clearForces();
+		}
+		loadingPhysicsSuspended_ = false;
+		loadingMenuDepth_ = 0;
+		ResetStepClockLocked();
+		spdlog::debug("loading menu resume reset {} prototype physics bodies to current node poses", resetBodies);
+	}
+
 	void Fo4PhysicsWorld::BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, const PrototypeBuildDomain a_domain)
 	{
+		a_state.runtimeSuspended = false;
 		auto meshNames = BuildMeshMatchNames(a_summary, a_meshNameMap);
 		if (a_summary.boneNames.empty() && meshNames.empty()) {
 			spdlog::debug("prototype physics XML has no named bones or mesh descriptors to match");
@@ -5100,7 +5574,11 @@ namespace Smp
 		std::vector<MergedSkeletonNode> mergedSkeletonNodes;
 		std::vector<MergedRootNode> mergedRootNodes;
 		std::vector<SavedNodeLocalPose> savedBuildPoses;
-		const auto mergePrefix = MakeReferenceArmorRenamePrefix(a_state.nextArmorRenameId++);
+		RE::NiPointer<RE::NiAVObject> preservedSourceClone;
+		const auto mergePrefix = !a_event.mergeRenamePrefix.empty() ? a_event.mergeRenamePrefix :
+			(a_domain == PrototypeBuildDomain::kHead || a_domain == PrototypeBuildDomain::kHair) ?
+				MakeReferenceHeadRenamePrefix(a_state.nextHeadRenameId++) :
+				MakeReferenceArmorRenamePrefix(a_state.nextArmorRenameId++);
 		if (!a_event.preMergedSkeletonNodes.empty()) {
 			mergedSkeletonNodes.reserve(a_event.preMergedSkeletonNodes.size());
 			for (const auto& preMerged : a_event.preMergedSkeletonNodes) {
@@ -5133,27 +5611,58 @@ namespace Smp
 		auto* mergeSourceObject = a_event.mergeSourceObject ? a_event.mergeSourceObject : a_event.sourceObject;
 		if (actorRootNode) {
 			if (a_event.preMergedSkeletonNodes.empty()) {
-			if (auto* sourceRoot = mergeSourceObject ? mergeSourceObject->IsNode() : a_event.sourceRoot) {
-				UpdateNodeWorldFromLocal(sourceRoot);
-				MergeSourceSkeletonIntoActor(actorRootNode, sourceRoot, actorRootNode, sourceRoot, a_event.object, a_event.sourceObject, a_event.mergeSearchExclusions, mergePrefix, mergedSkeletonNodes, mergedRootNodes);
-			}
+				auto* sourceRoot = mergeSourceObject ? mergeSourceObject->IsNode() : a_event.sourceRoot;
+				if (sourceRoot && a_event.preserveMergeSourceNames) {
+					preservedSourceClone = CloneNodeExact(sourceRoot);
+					if (auto* clonedRoot = preservedSourceClone ? preservedSourceClone->IsNode() : nullptr) {
+						sourceRoot = clonedRoot;
+					}
+				}
+				if (sourceRoot) {
+					UpdateNodeWorldFromLocal(sourceRoot);
+					MergeSourceSkeletonIntoActor(
+						actorRootNode,
+						sourceRoot,
+						actorRootNode,
+						sourceRoot,
+						a_event.object,
+						a_event.sourceObject,
+						a_event.mergeSearchExclusions,
+						mergePrefix,
+						mergedSkeletonNodes,
+						mergedRootNodes);
+				}
 			}
 		}
 		if (actorRootNode) {
-			LogReferencePoseNodes("before-havok-reference", actorRootNode);
 			if (!ApplyHavokReferencePose(a_event.actor, actorRootNode, savedBuildPoses)) {
 				UpdateTransformUpDown(actorRootNode, true);
 				spdlog::debug(
 					"prototype physics build used current actor pose because Havok reference pose was unavailable actor={} root={}",
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(actorRootNode));
-				LogReferencePoseNodes("after-current-pose-fallback", actorRootNode);
-			} else {
-				LogReferencePoseNodes("after-havok-reference", actorRootNode);
 			}
 		}
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
-		ResolveExplicitXmlBonesFromMergedSkeleton(matchedBones, a_summary.boneNames, mergedSkeletonNodes, actorRootNode ? static_cast<RE::NiAVObject*>(actorRootNode) : skeletonSearchRoot);
+		auto* skeletonLookupRoot = actorRootNode ? static_cast<RE::NiAVObject*>(actorRootNode) : skeletonSearchRoot;
+		const auto skeletonLookupExclusions = BuildSkeletonLookupExclusions(a_event.mergeSearchExclusions, mergedRootNodes);
+		ResolveExplicitXmlBonesFromMergedSkeleton(
+			matchedBones,
+			a_summary.boneNames,
+			mergedSkeletonNodes,
+			skeletonLookupRoot,
+			a_event.object,
+			a_event.sourceObject,
+			mergeSourceObject,
+			skeletonLookupExclusions);
+		ResolveMatchedSkinBonesFromSkeleton(
+			matchedBones,
+			mergedSkeletonNodes,
+			skeletonLookupRoot,
+			a_event.object,
+			a_event.sourceObject,
+			mergeSourceObject,
+			skeletonLookupExclusions);
 		RebindMatchedSkinSlots(matchedBones, mergedSkeletonNodes, a_event.object, skeletonSearchRoot);
 		if (matchedBones.empty()) {
 			spdlog::debug(
@@ -5162,7 +5671,6 @@ namespace Smp
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
 			RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
-			LogReferencePoseNodes("after-restore-empty-match", actorRootNode);
 			DetachMergedRootNodes(mergedRootNodes);
 			return;
 		}
@@ -5302,26 +5810,6 @@ namespace Smp
 				++dynamicBodies;
 			}
 			bone->readTransform(0.0F);
-			if (Smp::PhysicsNamesEqual(matchedBone.name, "InariTail_01") ||
-				Smp::PhysicsNamesEqual(matchedBone.name, "InariTail_02")) {
-				const auto bodyOrigin = bone->m_rig.getWorldTransform().getOrigin();
-				const auto bodyRotation = bone->m_rig.getWorldTransform().getRotation();
-				LogNodePlacement("prototype initial body source placement", matchedBone.name, matchedBone.node);
-				spdlog::info(
-					"prototype initial body placement bone='{}' bodyWorld=({:.3f},{:.3f},{:.3f}) bodyRot=({:.3f},{:.3f},{:.3f},{:.3f}) centerOfMass=({:.3f},{:.3f},{:.3f}) mass={:.3f}",
-					matchedBone.name,
-					bodyOrigin.x(),
-					bodyOrigin.y(),
-					bodyOrigin.z(),
-					bodyRotation.x(),
-					bodyRotation.y(),
-					bodyRotation.z(),
-					bodyRotation.w(),
-					boneDescriptor.centerOfMassTransform.origin.x,
-					boneDescriptor.centerOfMassTransform.origin.y,
-					boneDescriptor.centerOfMassTransform.origin.z,
-					mass);
-			}
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 			// hdtSMP bones are solver/constraint bodies; mesh collisions are handled by the custom dispatcher.
 			dynamicsWorld_->addRigidBody(std::addressof(bone->m_rig), 0, 0);
@@ -5354,20 +5842,8 @@ namespace Smp
 		BuildPrototypeConstraintsLocked(a_state, a_summary, buildGroup, a_domain);
 		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
 		ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
-		LogReferencePoseNodes("after-restore-build", actorRootNode);
 		a_state.resetReadFrames = std::max(a_state.resetReadFrames, kAttachResetReadFrames);
 		ResetStepClockLocked();
-		spdlog::info(
-			"prepared {} prototype physics buildGroup={} createdBodies={} dynamicBodies={} kinematicBodies={} matchedXMLBones={} actor={} actorBodies={} activeActors={}",
-			PrototypeDomainName(a_domain),
-			buildGroup,
-			created,
-			dynamicBodies,
-			kinematicBodies,
-			matchedBones.size(),
-			static_cast<void*>(a_state.actor),
-			a_state.bodies.size(),
-			prototypeActors_.size());
 		spdlog::debug(
 			"prototype matched bone placement actorRoot={} attachedObject={} underActorRoot={} underAttachedObject={} matchedXMLBones={}",
 			static_cast<void*>(actorRoot),
@@ -5375,7 +5851,6 @@ namespace Smp
 			matchedUnderActorRoot,
 			matchedUnderAttachedObject,
 			matchedBones.size());
-		diagnosticFrameBudget_ = 120;
 	}
 
 	void Fo4PhysicsWorld::ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, const std::uint64_t a_buildGroup)
@@ -5385,42 +5860,13 @@ namespace Smp
 				std::ranges::find(a_body.buildGroups, a_buildGroup) != a_body.buildGroups.end();
 		};
 
-		std::uint32_t resetBodies = 0;
 		for (auto& body : a_state.bodies) {
 			if (!isInBuildGroup(body) || !body.bone || !body.node) {
 				continue;
 			}
 
-			const auto oldTransform = body.bone->m_rig.getWorldTransform();
 			body.bone->readTransform(0.0F);
-			const auto resetTransform = body.bone->m_rig.getWorldTransform();
-			if (ShouldLogPrototypeBoneDiagnostic(body.boneName)) {
-				const auto oldOrigin = oldTransform.getOrigin();
-				const auto newOrigin = resetTransform.getOrigin();
-				const auto& nodeOrigin = body.node->world.translate;
-				spdlog::info(
-					"prototype current-pose reset body actor={} buildGroup={} bone='{}' oldBody=({:.3f},{:.3f},{:.3f}) nodeWorld=({:.3f},{:.3f},{:.3f}) newBody=({:.3f},{:.3f},{:.3f})",
-					static_cast<void*>(a_state.actor),
-					a_buildGroup,
-					body.boneName,
-					oldOrigin.x(),
-					oldOrigin.y(),
-					oldOrigin.z(),
-					nodeOrigin.x,
-					nodeOrigin.y,
-					nodeOrigin.z,
-					newOrigin.x(),
-					newOrigin.y(),
-					newOrigin.z());
-			}
-			++resetBodies;
 		}
-
-		spdlog::info(
-			"prototype current-pose reset actor={} buildGroup={} resetBodies={}",
-			static_cast<void*>(a_state.actor),
-			a_buildGroup,
-			resetBodies);
 	}
 
 	void Fo4PhysicsWorld::BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, const std::uint64_t a_buildGroup, const PrototypeBuildDomain a_domain)
@@ -5681,45 +6127,47 @@ namespace Smp
 			++created;
 		}
 
-		spdlog::info(
-			"created {} {} prototype skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
-			created,
-			PrototypeDomainName(a_domain),
-			static_cast<void*>(a_state.actor),
-			extractionSource,
-			extraction.stats.decodedMeshes,
-			extraction.stats.geometries,
-			extraction.stats.skinnedGeometries,
-			extraction.stats.matchedGeometries,
-			extraction.stats.decodedVertices,
-			extraction.stats.decodedTriangles,
-			skippedExisting,
-			skippedEmpty,
-			skippedMissingBones,
-			skippedMissingBoneData,
-			sanitizedBadBoneMeshes,
-			skippedMissingTriangleIndices,
-			skippedInvalidTriangleIndices,
-			skippedNoColliders,
-			unresolvedCanCollideBones,
-			unresolvedNoCollideBones,
-			unresolvedWeightThresholds,
-			extraction.stats.nullBones,
-			extraction.stats.nonNodeBones,
-			extraction.stats.missingBoneData,
-			extraction.stats.unsupportedGeometryClasses,
-			extraction.stats.missingRendererData,
-			extraction.stats.missingVertexBuffer,
-			extraction.stats.missingIndexBuffer,
-			extraction.stats.missingCpuVertexData,
-			extraction.stats.invalidCpuVertexData,
-			extraction.stats.pendingVertexCopies,
-			extraction.stats.missingCpuIndexData,
-			extraction.stats.invalidCpuIndexData,
-			extraction.stats.pendingIndexCopies,
-			extraction.stats.undersizedVertexBuffers,
-			extraction.stats.undersizedIndexBuffers,
-			extraction.stats.badBoneIndices);
+		if (a_domain != PrototypeBuildDomain::kArmor) {
+			spdlog::info(
+				"created {} {} prototype skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
+				created,
+				PrototypeDomainName(a_domain),
+				static_cast<void*>(a_state.actor),
+				extractionSource,
+				extraction.stats.decodedMeshes,
+				extraction.stats.geometries,
+				extraction.stats.skinnedGeometries,
+				extraction.stats.matchedGeometries,
+				extraction.stats.decodedVertices,
+				extraction.stats.decodedTriangles,
+				skippedExisting,
+				skippedEmpty,
+				skippedMissingBones,
+				skippedMissingBoneData,
+				sanitizedBadBoneMeshes,
+				skippedMissingTriangleIndices,
+				skippedInvalidTriangleIndices,
+				skippedNoColliders,
+				unresolvedCanCollideBones,
+				unresolvedNoCollideBones,
+				unresolvedWeightThresholds,
+				extraction.stats.nullBones,
+				extraction.stats.nonNodeBones,
+				extraction.stats.missingBoneData,
+				extraction.stats.unsupportedGeometryClasses,
+				extraction.stats.missingRendererData,
+				extraction.stats.missingVertexBuffer,
+				extraction.stats.missingIndexBuffer,
+				extraction.stats.missingCpuVertexData,
+				extraction.stats.invalidCpuVertexData,
+				extraction.stats.pendingVertexCopies,
+				extraction.stats.missingCpuIndexData,
+				extraction.stats.invalidCpuIndexData,
+				extraction.stats.pendingIndexCopies,
+				extraction.stats.undersizedVertexBuffers,
+				extraction.stats.undersizedIndexBuffers,
+				extraction.stats.badBoneIndices);
+		}
 	}
 
 	void Fo4PhysicsWorld::BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const std::uint64_t a_buildGroup, const PrototypeBuildDomain a_domain)
@@ -5758,15 +6206,6 @@ namespace Smp
 			});
 			if (existing != a_state.constraints.end()) {
 				++skippedExisting;
-				if (diagnosticFrameBudget_ > 0) {
-					spdlog::info(
-						"skipping duplicate {} prototype constraint '{}' for buildGroup={} bodies '{}'/'{}'",
-						PrototypeDomainName(a_domain),
-						descriptor.name,
-						a_buildGroup,
-						descriptor.bodyA,
-						descriptor.bodyB);
-				}
 				continue;
 			}
 
@@ -5777,9 +6216,7 @@ namespace Smp
 				bodyA->bone->m_rigToLocal,
 				bodyB->bone->m_rigToLocal,
 				bodyA->bone->m_currentTransform,
-				bodyB->bone->m_currentTransform,
-				bodyA->node,
-				bodyB->node);
+				bodyB->bone->m_currentTransform);
 			if (!constraint) {
 				++skippedInvalid;
 				continue;
@@ -5800,12 +6237,12 @@ namespace Smp
 			++created;
 		}
 
-		if (created > 0 || skippedMissingBodies > 0 || skippedExisting > 0 || skippedSelfConstraints > 0 || skippedKinematicPairs > 0 || skippedInvalid > 0) {
-		spdlog::info(
-			"created {} {} prototype Bullet constraints for actor={} buildGroup={}; actor constraints={} skippedMissingBodies={} skippedExisting={} skippedSelfConstraints={} skippedKinematicPairs={} skippedInvalid={}",
-			created,
-			PrototypeDomainName(a_domain),
-			static_cast<void*>(a_state.actor),
+		if (a_domain != PrototypeBuildDomain::kArmor && (created > 0 || skippedMissingBodies > 0 || skippedExisting > 0 || skippedSelfConstraints > 0 || skippedKinematicPairs > 0 || skippedInvalid > 0)) {
+			spdlog::info(
+				"created {} {} prototype Bullet constraints for actor={} buildGroup={}; actor constraints={} skippedMissingBodies={} skippedExisting={} skippedSelfConstraints={} skippedKinematicPairs={} skippedInvalid={}",
+				created,
+				PrototypeDomainName(a_domain),
+				static_cast<void*>(a_state.actor),
 				a_buildGroup,
 				a_state.constraints.size(),
 				skippedMissingBodies,

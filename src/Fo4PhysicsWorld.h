@@ -157,34 +157,46 @@ namespace Smp
 			bool firstPerson{ false };
 			std::uint64_t nextBuildGroup{ 0 };
 			std::uint32_t nextArmorRenameId{ 0 };
+			std::uint32_t nextHeadRenameId{ 0 };
 			std::uint64_t lastWritebackFrame{ 0 };
 			WritebackSource lastWritebackSource{ WritebackSource::kUnknown };
 			std::uint32_t resetReadFrames{ 0 };
+			float currentWindFactor{ 1.0F };
+			bool runtimeSuspended{ false };
+			RE::NiPointer<RE::NiAVObject> faceNode;
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
 			std::vector<PrototypeConstraint> constraints;
 			std::vector<PrototypeMergedNode> mergedNodes;
 			std::vector<PrototypeArmorRecord> armorRecords;
+
+			[[nodiscard]] bool HasRuntime() const
+			{
+				return !bodies.empty() || !meshes.empty() || !constraints.empty();
+			}
 		};
 
 		struct SuspendedActorCandidate
 		{
 			RE::ActorHandle actorHandle;
+			bool firstPerson{ false };
+			std::vector<PrototypeArmorRecord> armorRecords;
 		};
 
 		struct PendingActorRebuild
 		{
 			RE::ActorHandle actorHandle;
 			bool firstPerson{ false };
-			std::uint32_t waitFrames{ 0 };
 			std::vector<PrototypeArmorRecord> armorRecords;
 		};
 
 		struct PendingHeadRebuild
 		{
 			RE::ActorHandle actorHandle;
+			LifecycleEventType type{ LifecycleEventType::kActorHeadInitialized };
+			RE::NiPointer<RE::NiAVObject> object;
+			RE::BGSHeadPart* headPart{ nullptr };
 			std::uint32_t frameDelay{ 0 };
-			std::uint32_t waitFrames{ 0 };
 		};
 
 		PrototypeActorState* FindPrototypeStateLocked(RE::Actor* a_actor, bool a_firstPerson);
@@ -192,13 +204,15 @@ namespace Smp
 		bool IsPrototypeStateValidLocked(PrototypeActorState& a_state);
 		void PruneInvalidPrototypeStatesLocked();
 		void EnforceActorBudgetLocked();
-		void SuspendActorCandidateLocked(RE::Actor* a_actor);
+		void SuspendActorCandidateLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
 		void TryReactivateSuspendedActorsLocked();
+		void TryReactivateSuspendedPrototypeStatesLocked();
 		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
-		void MarkPendingHeadRebuildLocked(RE::Actor* a_actor);
+		void MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event);
 		void SchedulePendingRebuildTaskLocked();
 		bool HasActiveOrPendingActorRebuildLocked(RE::Actor* a_actor);
 		bool HasPendingArmorRecordRebuildLocked(RE::Actor* a_actor);
+		std::vector<PrototypeArmorRecord> CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event);
 		void RecordPrototypeArmorLocked(
 			PrototypeActorState& a_state,
 			RE::BIPED_OBJECT a_bipedObject,
@@ -219,6 +233,7 @@ namespace Smp
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
 		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
 		void ClearAllPrototypeStatesLocked();
+		void ResumeFromLoadingMenuLocked();
 		void BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
 		void BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
@@ -253,7 +268,6 @@ namespace Smp
 		std::uint32_t postAnimationWritebacks_{ 0 };
 		std::uint32_t duplicateCellJobsWritebacks_{ 0 };
 		std::uint32_t duplicatePostAnimationWritebacks_{ 0 };
-		std::uint32_t diagnosticFrameBudget_{ 0 };
 		int solverIterations_{ 10 };
 		float solverErp_{ 0.2F };
 		bool disableFirstPersonViewPhysics_{ false };
@@ -265,16 +279,26 @@ namespace Smp
 		bool windEnabled_{ false };
 		bool windUseWeather_{ false };
 		float windStrength_{ 0.0F };
+		bool disableSMPHairWhenWigEquipped_{ true };
 		float windDistanceForNoWind_{ 50.0F };
 		float windDistanceForMaxWind_{ 3000.0F };
+		float windWeatherCooldown_{ 0.0F };
+		float windWeatherShortCooldownSeconds_{ 0.5F };
+		float windWeatherLongCooldownSeconds_{ 5.0F };
+		int windSmoothingSamples_{ 8 };
+		bool randomizePerBoneWind_{ true };
 		btVector3 windDirection_{ 1.0F, 0.0F, 0.0F };
 		btVector3 currentWind_{ 0.0F, 0.0F, 0.0F };
+		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };
 		std::string prototypePhysicsXml_;
 		std::vector<PrototypeActorState> prototypeActors_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
+		std::uint64_t nextPendingRebuildFrame_{ 1 };
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
+		std::uint32_t loadingMenuDepth_{ 0 };
+		bool loadingPhysicsSuspended_{ false };
 		bool customizationCloseReloadQueued_{ false };
 		bool pendingRebuildTaskQueued_{ false };
 		bool registered_{ false };

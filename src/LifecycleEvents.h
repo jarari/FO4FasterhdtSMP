@@ -28,6 +28,7 @@ namespace Smp
 		kActorLoad3D,
 		kActorSet3D,
 		kActorHeadInitialized,
+		kHeadPrepareHeadPart,
 		kActorUpdate3DModel,
 		kActorReset3D
 	};
@@ -42,15 +43,18 @@ namespace Smp
 		RE::NiAVObject*    object{ nullptr };
 		RE::NiAVObject*    sourceObject{ nullptr };
 		RE::NiAVObject*    mergeSourceObject{ nullptr };
+		RE::BGSHeadPart*   headPart{ nullptr };
 		std::vector<RE::NiAVObject*> mergeSearchExclusions;
 		std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
 		std::vector<LifecycleMergedRootNode> preMergedRootNodes;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
+		std::string        mergeRenamePrefix;
 		std::string        physicsXmlPath;
 		bool               firstPerson{ false };
 		bool               queue3DTasks{ false };
 		bool               queueDetach{ false };
+		bool               preserveMergeSourceNames{ false };
 	};
 
 	RE::BSTEventSource<LifecycleEvent>& GetLifecycleEventSource();

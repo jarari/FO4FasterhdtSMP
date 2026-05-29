@@ -29,6 +29,7 @@ namespace Smp
 		int maxActiveActors{ 4 };
 		float maxActorDistance{ 3000.0F };
 		bool enablePrototypeDiagnostics{ false };
+		bool disableSMPHairWhenWigEquipped{ true };
 		std::string prototypePhysicsXml;
 		std::vector<std::string> backupNodeByName;
 	};
@@ -36,13 +37,17 @@ namespace Smp
 	struct WindSettings
 	{
 		bool enabled{ false };
-		bool useWeather{ false };
-		float windStrength{ 0.0F };
+		bool useWeather{ true };
+		float windStrength{ 2.0F };
 		float directionX{ 1.0F };
 		float directionY{ 0.0F };
 		float directionZ{ 0.0F };
 		float distanceForNoWind{ 50.0F };
 		float distanceForMaxWind{ 3000.0F };
+		float weatherShortCooldownSeconds{ 0.5F };
+		float weatherLongCooldownSeconds{ 5.0F };
+		int smoothingSamples{ 8 };
+		bool randomizePerBoneWind{ true };
 	};
 
 	struct RuntimeSettings

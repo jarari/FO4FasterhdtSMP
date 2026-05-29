@@ -32,6 +32,8 @@ namespace Smp
 			return "ActorSet3D";
 		case LifecycleEventType::kActorHeadInitialized:
 			return "ActorHeadInitialized";
+		case LifecycleEventType::kHeadPrepareHeadPart:
+			return "HeadPrepareHeadPart";
 		case LifecycleEventType::kActorUpdate3DModel:
 			return "ActorUpdate3DModel";
 		case LifecycleEventType::kActorReset3D:

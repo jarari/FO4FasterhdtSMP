@@ -1,21 +1,28 @@
 # FO4 Faster HDT-SMP Physics XML Guide
 
-This guide describes the physics XML format currently parsed by this Fallout 4 port. The format is intentionally close to FSMP/HDT-SMP XML, but only the elements described here should be considered supported for armor and hair authoring.
+This guide describes the XML format and runtime behavior currently implemented by this Fallout 4 port. The format is close to FSMP/HDT-SMP XML, but only the elements described here should be treated as supported.
 
 ## File Placement
 
-Physics XML files are resolved from the plugin config paths:
+Physics XML files are resolved from these candidates:
 
-- `Data/F4SE/Plugins/FO4FasterHdtSMP/`
-- `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/` for legacy compatibility
+- The path exactly as written.
+- `Data/<path>` when the XML path is relative.
+- `Data/F4SE/Plugins/FO4FasterHdtSMP/<path>`.
+- `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/<path>` for legacy migration.
 
-Armor XML can be selected in three ways:
+Paths must end in `.xml`.
 
-- Add `NiStringExtraData` named `HDT Skinned Mesh Physics Object` to the armor NIF object or a nearby parent. Its string data should be the XML path.
-- Add a shape-to-file entry in `defaultBBPs.xml`.
-- Set `<prototypePhysicsXml>` in `configs.xml` as a fallback while testing.
+## XML Selection
 
-Hair and head-part XML currently require direct `NiStringExtraData` named `HDT Skinned Mesh Physics Object` on the head/hair subtree. `defaultBBPs.xml` is armor-oriented and is not the recommended discovery path for hair.
+Armor XML can be selected through:
+
+- `NiStringExtraData` named `HDT Skinned Mesh Physics Object` on the armor object.
+- The same extra data on a nearby attach ancestor, source object, source root, or destination root.
+- A shape-to-file match in `defaultBBPs.xml`.
+- `<prototypePhysicsXml>` in `configs.xml` as a test fallback.
+
+Head and hair XML are discovered from the actor face/head subtree after head initialization and headpart preparation. Direct `NiStringExtraData` is preferred. `defaultBBPs.xml` can also match the original FaceGen/source geometry. Hair candidates are classified with the actor hair headpart model/editor keys; other face candidates are treated as head physics.
 
 ## Minimal Structure
 
@@ -28,7 +35,7 @@ Every physics XML file needs a `<system>` root:
 </system>
 ```
 
-Names in XML must match the actual FO4 skin bone and geometry names from the NIF. A `<bone>` name should match a skinned bone node. A `<per-vertex-shape>` or `<per-triangle-shape>` name should match a `BSTriShape` geometry name.
+Names in XML must match FO4 NIF names. `<bone>` names match skinned `NiNode` names. `<per-vertex-shape>` and `<per-triangle-shape>` names match `BSTriShape` geometry names, or a `defaultBBPs.xml` remap alias.
 
 ## Recommended Starter XML
 
@@ -71,9 +78,7 @@ Names in XML must match the actual FO4 skin bone and geometry names from the NIF
     <linearUpperLimit x="0" y="0" z="0" />
     <angularLowerLimit x="-0.35" y="-0.35" z="-0.35" />
     <angularUpperLimit x="0.35" y="0.35" z="0.35" />
-    <linearStiffness x="0" y="0" z="0" />
     <angularStiffness x="8" y="8" z="8" />
-    <linearDamping x="0" y="0" z="0" />
     <angularDamping x="0.35" y="0.35" z="0.35" />
   </generic-constraint>
 </system>
@@ -83,21 +88,21 @@ Replace `ArmorRoot`, `ArmorCloth01`, `ArmorCloth02`, and `ArmorTriShapeName` wit
 
 ## Bones
 
-`<bone-default>` supplies inherited defaults for later `<bone>` entries. A named `<bone-default name="...">` can be used as a template and then referenced with `<bone template="...">`.
+`<bone-default>` supplies inherited defaults. A named `<bone-default name="...">` can be referenced by `<bone template="...">`. Named defaults can use `extends="OtherTemplate"`.
 
 Supported bone fields:
 
-- `<mass>`: `0` or lower creates a kinematic anchor body. Positive mass creates a simulated body.
-- `<linearDamping>` and `<angularDamping>`: reduce velocity and rotation.
-- `<friction>`, `<rollingFriction>`, `<restitution>`: Bullet rigid body material values.
+- `<mass>`: `0` or lower creates a kinematic anchor. Positive mass creates a simulated body.
+- `<linearDamping>` and `<angularDamping>`.
+- `<friction>`, `<rollingFriction>`, `<restitution>`.
 - `<gravity-factor>`: clamped from `0.0` to `1.0`.
-- `<wind-factor>`: `0.0` disables wind response for that bone.
-- `<margin-multiplier>`: collision margin scale used by skinned mesh collision.
-- `<collision-filter>`: parsed, reserved for filtering behavior.
-- `<localInertia>` or `<inertia x="..." y="..." z="..." />`: optional explicit inertia.
-- `<centerOfMassTransform>`: moves/rotates the body relative to the node.
-- `<can-collide-with-bone>` and `<no-collide-with-bone>`: bone collision allow/deny lists.
-- `<shape>`: rigid body collision shape.
+- `<wind-factor>`: `0.0` disables wind force for that bone.
+- `<margin-multiplier>`: scales rigid-body collision margin.
+- `<collision-filter>`: parsed and stored.
+- `<localInertia>` or `<inertia x="..." y="..." z="..." />`.
+- `<centerOfMassTransform>` with `<origin>`, `<basis>`, or `<basis-axis-angle>`.
+- `<can-collide-with-bone>` and `<no-collide-with-bone>`.
+- `<shape>`.
 
 Example:
 
@@ -157,7 +162,7 @@ Named shapes can be reused:
 </bone>
 ```
 
-Compound shapes are also parsed:
+Compound shapes are parsed:
 
 ```xml
 <shape type="compound">
@@ -174,21 +179,23 @@ Compound shapes are also parsed:
 
 ## Mesh Collision
 
-Use mesh collision when the simulated bones should collide against the actual skinned armor or hair surface.
+Use mesh collision when simulated bones should collide against the actual skinned armor, head, or hair surface.
 
-`<per-vertex-shape>` builds colliders from vertices. It is cheaper and is a good first choice.
+`<per-vertex-shape>` builds colliders from decoded vertices and is the safest first choice.
 
-`<per-triangle-shape>` builds triangle colliders from the mesh index buffer. It is more detailed but requires readable CPU index data.
+`<per-triangle-shape>` builds triangle colliders from the decoded index buffer. It is more detailed, but it is skipped when CPU index data is unavailable or invalid.
 
 Supported mesh fields:
 
-- `<margin>`: collision margin.
-- `<penetration>`: penetration tolerance. The misspelled `<prenetration>` is also accepted for compatibility.
+- `<margin>`.
+- `<penetration>`. The misspelled `<prenetration>` is also accepted.
 - `<shared>`: `public`, `internal`, `external`, or `private`.
 - `<tag>`, `<can-collide-with-tag>`, `<no-collide-with-tag>`.
 - `<can-collide-with-bone>`, `<no-collide-with-bone>`.
-- `<weight-threshold bone="...">`: ignores weak vertex influence for a specific bone.
+- `<weight-threshold bone="...">`.
 - `<disable-tag>` and `<disable-priority>`.
+
+Mesh bodies with a `disable-tag` are disabled when another active mesh body advertises that tag. If multiple mesh bodies share the same disable tag, the highest `<disable-priority>` stays enabled.
 
 Example:
 
@@ -203,11 +210,11 @@ Example:
 
 ## Constraints
 
-Constraints connect two XML bodies. `bodyA` and `bodyB` must resolve to parsed bones.
+Constraints connect two parsed bone bodies. `bodyA` and `bodyB` must resolve to XML bone names.
 
 ### Generic Constraint
 
-This is the recommended default constraint for armor cloth strips and hair chains.
+Generic constraints are the recommended default for armor cloth strips and hair chains.
 
 ```xml
 <generic-constraint name="Hair01 To Hair02" bodyA="Hair01" bodyB="Hair02">
@@ -230,11 +237,9 @@ Supported frame modes:
 - `<frameInB>...</frameInB>`
 - `<frameInLerp>...</frameInLerp>`
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`
-- Lowercase dashed forms like `<a-with-x-point-to-b />`
+- Lowercase dashed forms such as `<a-with-x-point-to-b />`
 
-Supported generic fields include linear/angular limits, stiffness, damping, equilibrium, bounce, motors, servo motors, target velocity, max motor force, and ERP/CFM fields.
-
-Non-Hookean fields are parsed but currently not applied by the FO4 Bullet constraint path.
+Supported generic fields include linear/angular limits, stiffness, damping, equilibrium, bounce, motors, servo motors, target velocity, max motor force, and ERP/CFM fields. Non-Hookean fields are parsed and warned about, but the current FO4 Bullet path does not apply them.
 
 ### Cone Twist Constraint
 
@@ -250,7 +255,7 @@ Non-Hookean fields are parsed but currently not applied by the FO4 Bullet constr
 </conetwist-constraint>
 ```
 
-Aliases such as `<coneLimit>`, `<planeLimit>`, `<twistLimit>`, `<limitX>`, `<limitY>`, and `<limitZ>` are also parsed.
+Aliases such as `<coneLimit>`, `<planeLimit>`, `<twistLimit>`, `<limitX>`, `<limitY>`, and `<limitZ>` are parsed.
 
 ### Stiff Spring Constraint
 
@@ -264,56 +269,66 @@ Aliases such as `<coneLimit>`, `<planeLimit>`, `<twistLimit>`, `<limitX>`, `<lim
 </stiffspring-constraint>
 ```
 
-## Templates
+Constraint defaults are supported with `<generic-constraint-default>`, `<conetwist-constraint-default>`, and `<stiffspring-constraint-default>`. Constraint defaults also support `extends="OtherTemplate"`.
 
-Templates reduce repetition:
+## defaultBBPs.xml
+
+`defaultBBPs.xml` uses a `<default-bbps>` root.
 
 ```xml
-<bone-default name="HairDynamic">
-  <mass>0.08</mass>
-  <linearDamping>0.3</linearDamping>
-  <angularDamping>0.5</angularDamping>
-</bone-default>
-
-<bone name="Hair01" template="HairDynamic" />
-<bone name="Hair02" template="HairDynamic" />
-
-<generic-constraint-default name="SoftJoint">
-  <frameInLerp />
-  <linearLowerLimit x="0" y="0" z="0" />
-  <linearUpperLimit x="0" y="0" z="0" />
-  <angularLowerLimit x="-0.25" y="-0.25" z="-0.25" />
-  <angularUpperLimit x="0.25" y="0.25" z="0.25" />
-</generic-constraint-default>
-
-<generic-constraint template="SoftJoint" bodyA="Hair01" bodyB="Hair02" />
+<default-bbps>
+  <map shape="ArmorTriShapeName" file="my-armor.xml" />
+</default-bbps>
 ```
 
-Named defaults can use `extends="OtherTemplate"`.
+`<map>` selects an XML file when a geometry with the matching shape name is found.
 
-## Armor Workflow
+`<remap>` can alias real geometry names to an XML descriptor name:
 
-1. Find the exact `BSTriShape` geometry name and skin bone names in the armor NIF.
+```xml
+<default-bbps>
+  <map shape="SharedClothShape" file="shared-cloth.xml" />
+
+  <remap target="SharedClothShape">
+    <requires>ArmorBody</requires>
+    <source priority="10">ArmorCloth_L</source>
+    <source priority="20">ArmorCloth_R</source>
+  </remap>
+</default-bbps>
+```
+
+When all `<requires>` shapes exist and one of the `<source>` shapes is present, the target shape can match the XML mesh descriptor. Higher-priority source entries are considered first.
+
+## Runtime Notes
+
+- XML summaries are cached and reloaded when the file timestamp changes.
+- Bodies are matched from skin bones on matched geometry. If XML has mesh descriptors, all skin bones from matched geometry can be considered.
+- The runtime skips suspicious skin instances, missing CPU vertex/index buffers, invalid triangle indices, unresolved bones, and duplicate/self/kinematic-only constraints.
+- Bone transforms are reset/read for several frames after rebuilds to avoid exploding from stale poses.
+- Loading screens suspend physics and reset bodies to current node poses on resume.
+- LooksMenu suspends active prototype states and reloads armor records after customization closes.
+- If `<disable1stPersonViewPhysics>` is true, first-person player physics is skipped/suspended.
+- If `<disableSMPHairWhenWigEquipped>` is true, hair-domain mesh bodies are disabled while hair biped slots are occupied.
+- Wind applies only when global wind is enabled and each bone has `<wind-factor>` greater than zero. Weather wind requires a valid exterior sky/weather state and uses LOS obstruction from the actor head area.
+
+## Authoring Workflow
+
+1. Find exact `BSTriShape` geometry names and skin bone names in the NIF.
 2. Create one kinematic root bone with `<mass>0</mass>`.
 3. Create dynamic bones for the moving chain or cloth section.
-4. Add one mesh collision descriptor for the armor geometry.
-5. Connect the bones with generic constraints.
+4. Add one mesh collision descriptor for the geometry.
+5. Connect bones with generic constraints.
 6. Add direct `NiStringExtraData` or a `defaultBBPs.xml` map.
 7. Start with small angular limits and increase only after the chain is stable.
 
-## Hair Workflow
-
-1. Find the hair head-part model and its skinned hair geometry.
-2. Put `NiStringExtraData` named `HDT Skinned Mesh Physics Object` on the hair subtree.
-3. Use a kinematic root near the scalp and dynamic bones down the hair chain.
-4. Use low mass and higher angular damping than armor.
-5. Prefer `<per-vertex-shape>` first; use `<per-triangle-shape>` only if needed.
+For hair, prefer direct `NiStringExtraData` on the hair/headpart subtree, low mass, higher damping, and `<per-vertex-shape>` before trying triangle collision.
 
 ## Troubleshooting
 
 - If nothing builds, verify the XML has a `<system>` root and that the selected XML path resolves.
+- If a defaultBBP match fails, check the real geometry name and any remap `<requires>` entries.
 - If bodies build but constraints do not, check `bodyA` and `bodyB` names.
-- If mesh collision is missing, check that the mesh name matches the actual `BSTriShape` name and that the mesh has skin data.
+- If mesh collision is missing, check the `BSTriShape` name, skin data, and CPU vertex/index availability.
 - If per-triangle collision is skipped, the CPU index buffer may not be readable.
 - If a body appears offset, adjust `<centerOfMassTransform>`.
 - If motion explodes, reduce angular limits, reduce mass, increase damping, or use a kinematic root.

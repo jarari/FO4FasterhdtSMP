@@ -1,21 +1,28 @@
 # FO4 Faster HDT-SMP 물리 XML 가이드
 
-이 문서는 현재 Fallout 4 포트에서 실제로 파싱하고 런타임에서 사용하는 물리 XML 형식을 설명합니다. 형식은 FSMP/HDT-SMP XML과 비슷하지만, 아머와 헤어 제작에서는 이 문서에 있는 요소를 우선 지원 범위로 보면 됩니다.
+이 문서는 현재 Fallout 4 포트가 실제로 구현한 XML 형식과 런타임 동작을 설명합니다. 형식은 FSMP/HDT-SMP XML과 가깝지만, 여기 적힌 요소만 지원 범위로 보는 것이 안전합니다.
 
 ## 파일 위치
 
-물리 XML은 플러그인 설정 경로에서 검색됩니다.
+물리 XML은 다음 후보 경로에서 해석됩니다.
 
-- `Data/F4SE/Plugins/FO4FasterHdtSMP/`
-- 레거시 호환용 `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/`
+- XML에 적힌 경로 그대로.
+- 상대 경로일 때 `Data/<path>`.
+- `Data/F4SE/Plugins/FO4FasterHdtSMP/<path>`.
+- 마이그레이션 호환용 `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/<path>`.
 
-아머 XML은 다음 방법으로 선택할 수 있습니다.
+경로는 `.xml`로 끝나야 합니다.
 
-- 아머 NIF 오브젝트나 가까운 부모 노드에 `HDT Skinned Mesh Physics Object` 이름의 `NiStringExtraData`를 추가합니다. 문자열 데이터에는 XML 경로를 넣습니다.
-- `defaultBBPs.xml`에 쉐이프 이름과 XML 파일 매핑을 추가합니다.
-- 테스트 중에는 `configs.xml`의 `<prototypePhysicsXml>`에 fallback XML을 지정할 수 있습니다.
+## XML 선택 방식
 
-헤어와 헤드파트 XML은 현재 헤드/헤어 서브트리에 직접 붙은 `HDT Skinned Mesh Physics Object` `NiStringExtraData`가 필요합니다. `defaultBBPs.xml`은 아머 중심 경로이므로 헤어에는 권장하지 않습니다.
+아머 XML은 다음 방식으로 선택할 수 있습니다.
+
+- 아머 오브젝트의 `HDT Skinned Mesh Physics Object` 이름 `NiStringExtraData`.
+- 가까운 attach 조상, source object, source root, destination root에 붙은 같은 extra data.
+- `defaultBBPs.xml`의 shape-to-file 매핑.
+- 테스트 fallback인 `configs.xml`의 `<prototypePhysicsXml>`.
+
+헤드와 헤어 XML은 head 초기화와 headpart 준비 이후 actor face/head 서브트리에서 찾습니다. 직접 붙은 `NiStringExtraData`가 우선입니다. `defaultBBPs.xml`도 원본 FaceGen/source 지오메트리에 매칭될 수 있습니다. 헤어 후보는 actor hair headpart의 모델/에디터 키로 분류되고, 나머지 face 후보는 head 물리로 취급됩니다.
 
 ## 기본 구조
 
@@ -28,7 +35,7 @@
 </system>
 ```
 
-XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이름과 맞아야 합니다. `<bone>` 이름은 스킨 본 노드와 맞아야 하고, `<per-vertex-shape>` 또는 `<per-triangle-shape>` 이름은 `BSTriShape` 지오메트리 이름과 맞아야 합니다.
+XML 이름은 FO4 NIF 이름과 맞아야 합니다. `<bone>` 이름은 스킨된 `NiNode` 이름과 맞습니다. `<per-vertex-shape>`와 `<per-triangle-shape>` 이름은 `BSTriShape` 지오메트리 이름 또는 `defaultBBPs.xml` remap alias와 맞습니다.
 
 ## 시작용 XML
 
@@ -71,9 +78,7 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
     <linearUpperLimit x="0" y="0" z="0" />
     <angularLowerLimit x="-0.35" y="-0.35" z="-0.35" />
     <angularUpperLimit x="0.35" y="0.35" z="0.35" />
-    <linearStiffness x="0" y="0" z="0" />
     <angularStiffness x="8" y="8" z="8" />
-    <linearDamping x="0" y="0" z="0" />
     <angularDamping x="0.35" y="0.35" z="0.35" />
   </generic-constraint>
 </system>
@@ -83,21 +88,21 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 
 ## 본
 
-`<bone-default>`는 뒤에 오는 `<bone>` 항목의 기본값을 제공합니다. `<bone-default name="...">`로 이름 있는 템플릿을 만들고 `<bone template="...">`에서 참조할 수 있습니다.
+`<bone-default>`는 뒤에 오는 `<bone>`의 기본값을 제공합니다. 이름이 있는 `<bone-default name="...">`는 `<bone template="...">`로 참조할 수 있습니다. 이름 있는 기본값은 `extends="OtherTemplate"`로 다른 기본값을 상속할 수 있습니다.
 
 지원되는 본 필드:
 
-- `<mass>`: `0` 이하이면 키네마틱 앵커 바디가 됩니다. 양수이면 시뮬레이션 바디가 됩니다.
-- `<linearDamping>`와 `<angularDamping>`: 이동 속도와 회전을 감쇠합니다.
-- `<friction>`, `<rollingFriction>`, `<restitution>`: Bullet 리지드 바디 재질 값입니다.
+- `<mass>`: `0` 이하이면 kinematic anchor, 양수이면 시뮬레이션 바디입니다.
+- `<linearDamping>`과 `<angularDamping>`.
+- `<friction>`, `<rollingFriction>`, `<restitution>`.
 - `<gravity-factor>`: `0.0`부터 `1.0`까지로 제한됩니다.
-- `<wind-factor>`: `0.0`이면 해당 본은 바람 영향을 받지 않습니다.
-- `<margin-multiplier>`: 스킨 메시 충돌에서 쓰는 충돌 마진 배율입니다.
-- `<collision-filter>`: 파싱은 되지만 현재는 필터링용 예약 값에 가깝습니다.
-- `<localInertia>` 또는 `<inertia x="..." y="..." z="..." />`: 선택적 명시 관성 값입니다.
-- `<centerOfMassTransform>`: 노드 기준으로 바디의 중심과 회전을 이동합니다.
-- `<can-collide-with-bone>`과 `<no-collide-with-bone>`: 본 충돌 허용/차단 목록입니다.
-- `<shape>`: 리지드 바디 충돌 쉐이프입니다.
+- `<wind-factor>`: `0.0`이면 해당 본에 바람 힘을 적용하지 않습니다.
+- `<margin-multiplier>`: rigid body 충돌 margin을 배율로 조정합니다.
+- `<collision-filter>`: 파싱해서 저장합니다.
+- `<localInertia>` 또는 `<inertia x="..." y="..." z="..." />`.
+- `<centerOfMassTransform>`과 그 안의 `<origin>`, `<basis>`, `<basis-axis-angle>`.
+- `<can-collide-with-bone>`과 `<no-collide-with-bone>`.
+- `<shape>`.
 
 예시:
 
@@ -111,7 +116,7 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 </bone>
 ```
 
-## 충돌 쉐이프
+## 충돌 Shape
 
 지원되는 `<shape>` 타입:
 
@@ -145,7 +150,7 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 </shape>
 ```
 
-이름 있는 쉐이프는 재사용할 수 있습니다.
+이름 있는 shape은 재사용할 수 있습니다.
 
 ```xml
 <shape name="SmallSphere" type="sphere">
@@ -157,7 +162,7 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 </bone>
 ```
 
-복합 쉐이프도 파싱됩니다.
+복합 shape도 파싱됩니다.
 
 ```xml
 <shape type="compound">
@@ -174,21 +179,23 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 
 ## 메시 충돌
 
-시뮬레이션 본이 실제 스킨 아머나 헤어 표면과 충돌해야 할 때 메시 충돌을 사용합니다.
+시뮬레이션 본이 실제 스킨된 아머, 헤드, 헤어 표면과 충돌해야 할 때 메시 충돌을 사용합니다.
 
-`<per-vertex-shape>`는 정점 기반 콜라이더를 만듭니다. 비용이 낮아서 먼저 시도하기 좋습니다.
+`<per-vertex-shape>`는 디코딩된 정점으로 콜라이더를 만들며, 가장 먼저 시도하기 좋은 방식입니다.
 
-`<per-triangle-shape>`는 메시 인덱스 버퍼의 삼각형으로 콜라이더를 만듭니다. 더 자세하지만 CPU에서 읽을 수 있는 인덱스 데이터가 필요합니다.
+`<per-triangle-shape>`는 디코딩된 index buffer로 triangle collider를 만듭니다. 더 정밀하지만 CPU index 데이터가 없거나 유효하지 않으면 건너뜁니다.
 
 지원되는 메시 필드:
 
-- `<margin>`: 충돌 마진입니다.
-- `<penetration>`: 관통 허용 값입니다. 호환성을 위해 오타인 `<prenetration>`도 허용됩니다.
+- `<margin>`.
+- `<penetration>`. 호환성을 위해 오타 형태인 `<prenetration>`도 허용합니다.
 - `<shared>`: `public`, `internal`, `external`, `private`.
 - `<tag>`, `<can-collide-with-tag>`, `<no-collide-with-tag>`.
 - `<can-collide-with-bone>`, `<no-collide-with-bone>`.
-- `<weight-threshold bone="...">`: 특정 본의 약한 정점 영향도를 무시합니다.
+- `<weight-threshold bone="...">`.
 - `<disable-tag>`와 `<disable-priority>`.
+
+`disable-tag`가 있는 mesh body는 다른 활성 mesh body가 같은 tag를 가지고 있을 때 비활성화됩니다. 같은 disable tag를 가진 mesh body가 여러 개이면 `<disable-priority>`가 가장 높은 하나만 유지됩니다.
 
 예시:
 
@@ -203,11 +210,11 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 
 ## 제약
 
-제약은 XML 바디 두 개를 연결합니다. `bodyA`와 `bodyB`는 파싱된 본 이름으로 해석되어야 합니다.
+제약은 파싱된 본 바디 두 개를 연결합니다. `bodyA`와 `bodyB`는 XML 본 이름으로 해석되어야 합니다.
 
 ### Generic Constraint
 
-아머 천 조각이나 헤어 체인에는 기본적으로 이 제약을 권장합니다.
+Generic constraint는 아머 천 조각과 헤어 체인의 기본 선택지입니다.
 
 ```xml
 <generic-constraint name="Hair01 To Hair02" bodyA="Hair01" bodyB="Hair02">
@@ -224,17 +231,15 @@ XML의 이름은 NIF 안의 실제 FO4 스킨 본 이름과 지오메트리 이�
 </generic-constraint>
 ```
 
-지원되는 프레임 모드:
+지원되는 frame 모드:
 
 - `<frameInA>...</frameInA>`
 - `<frameInB>...</frameInB>`
 - `<frameInLerp>...</frameInLerp>`
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`
-- `<a-with-x-point-to-b />` 같은 소문자 대시 표기
+- `<a-with-x-point-to-b />` 같은 소문자 dash 표기
 
-Generic 제약은 선형/각도 제한, stiffness, damping, equilibrium, bounce, motor, servo motor, target velocity, max motor force, ERP/CFM 필드를 지원합니다.
-
-Non-Hookean 필드는 파싱되지만 현재 FO4 Bullet 제약 경로에서는 적용되지 않습니다.
+Generic field는 linear/angular limit, stiffness, damping, equilibrium, bounce, motor, servo motor, target velocity, max motor force, ERP/CFM을 포함합니다. Non-Hookean field는 파싱하고 경고하지만, 현재 FO4 Bullet 경로에서는 적용하지 않습니다.
 
 ### Cone Twist Constraint
 
@@ -250,7 +255,7 @@ Non-Hookean 필드는 파싱되지만 현재 FO4 Bullet 제약 경로에서는 �
 </conetwist-constraint>
 ```
 
-`<coneLimit>`, `<planeLimit>`, `<twistLimit>`, `<limitX>`, `<limitY>`, `<limitZ>` 같은 별칭도 파싱됩니다.
+`<coneLimit>`, `<planeLimit>`, `<twistLimit>`, `<limitX>`, `<limitY>`, `<limitZ>` 같은 alias도 파싱됩니다.
 
 ### Stiff Spring Constraint
 
@@ -264,56 +269,66 @@ Non-Hookean 필드는 파싱되지만 현재 FO4 Bullet 제약 경로에서는 �
 </stiffspring-constraint>
 ```
 
-## 템플릿
+Constraint 기본값은 `<generic-constraint-default>`, `<conetwist-constraint-default>`, `<stiffspring-constraint-default>`로 만들 수 있습니다. Constraint 기본값도 `extends="OtherTemplate"`를 지원합니다.
 
-템플릿을 쓰면 반복을 줄일 수 있습니다.
+## defaultBBPs.xml
+
+`defaultBBPs.xml`은 `<default-bbps>` 루트를 사용합니다.
 
 ```xml
-<bone-default name="HairDynamic">
-  <mass>0.08</mass>
-  <linearDamping>0.3</linearDamping>
-  <angularDamping>0.5</angularDamping>
-</bone-default>
-
-<bone name="Hair01" template="HairDynamic" />
-<bone name="Hair02" template="HairDynamic" />
-
-<generic-constraint-default name="SoftJoint">
-  <frameInLerp />
-  <linearLowerLimit x="0" y="0" z="0" />
-  <linearUpperLimit x="0" y="0" z="0" />
-  <angularLowerLimit x="-0.25" y="-0.25" z="-0.25" />
-  <angularUpperLimit x="0.25" y="0.25" z="0.25" />
-</generic-constraint-default>
-
-<generic-constraint template="SoftJoint" bodyA="Hair01" bodyB="Hair02" />
+<default-bbps>
+  <map shape="ArmorTriShapeName" file="my-armor.xml" />
+</default-bbps>
 ```
 
-이름 있는 기본값은 `extends="OtherTemplate"`로 다른 템플릿을 상속할 수 있습니다.
+`<map>`은 일치하는 shape 이름의 지오메트리가 발견되면 XML 파일을 선택합니다.
 
-## 아머 제작 흐름
+`<remap>`은 실제 지오메트리 이름을 XML descriptor 이름으로 alias할 수 있습니다.
 
-1. 아머 NIF에서 정확한 `BSTriShape` 지오메트리 이름과 스킨 본 이름을 찾습니다.
-2. `<mass>0</mass>`인 키네마틱 루트 본을 하나 만듭니다.
-3. 움직일 체인이나 천 부분에 동적 본을 만듭니다.
-4. 아머 지오메트리에 대한 메시 충돌 descriptor를 하나 추가합니다.
+```xml
+<default-bbps>
+  <map shape="SharedClothShape" file="shared-cloth.xml" />
+
+  <remap target="SharedClothShape">
+    <requires>ArmorBody</requires>
+    <source priority="10">ArmorCloth_L</source>
+    <source priority="20">ArmorCloth_R</source>
+  </remap>
+</default-bbps>
+```
+
+모든 `<requires>` shape이 있고 `<source>` 중 하나가 있으면 target shape이 XML mesh descriptor와 매칭될 수 있습니다. priority가 높은 source가 먼저 고려됩니다.
+
+## 런타임 참고
+
+- XML summary는 캐시되며 파일 timestamp가 바뀌면 다시 로드됩니다.
+- Body는 매칭된 지오메트리의 skin bone에서 찾습니다. XML에 mesh descriptor가 있으면 매칭된 지오메트리의 모든 skin bone이 후보가 될 수 있습니다.
+- 의심스러운 skin instance, CPU vertex/index buffer 누락, 잘못된 triangle index, 해석되지 않은 본, 중복/self/kinematic-only constraint는 건너뜁니다.
+- Rebuild 직후에는 오래된 pose 폭주를 줄이기 위해 몇 프레임 동안 본 transform을 reset/read합니다.
+- Loading screen 중에는 물리를 중지하고 resume 시 현재 node pose로 body를 리셋합니다.
+- LooksMenu 중에는 활성 prototype state를 중지하고 닫힌 뒤 armor record를 다시 로드합니다.
+- `<disable1stPersonViewPhysics>`가 true이면 1인칭 player physics를 건너뛰거나 중지합니다.
+- `<disableSMPHairWhenWigEquipped>`가 true이면 hair biped slot에 wig가 있을 때 hair-domain mesh body를 비활성화합니다.
+- Wind는 전역 wind가 켜져 있고 각 본의 `<wind-factor>`가 0보다 클 때만 적용됩니다. Weather wind는 유효한 exterior sky/weather 상태가 필요하며 actor 머리 주변에서 LOS obstruction을 계산합니다.
+
+## 제작 흐름
+
+1. NIF에서 정확한 `BSTriShape` 지오메트리 이름과 skin bone 이름을 찾습니다.
+2. `<mass>0</mass>`인 kinematic root bone을 하나 만듭니다.
+3. 움직일 chain 또는 천 영역에 dynamic bone을 만듭니다.
+4. 지오메트리에 대한 mesh collision descriptor를 하나 추가합니다.
 5. 본들을 generic constraint로 연결합니다.
-6. 직접 `NiStringExtraData`를 넣거나 `defaultBBPs.xml` 매핑을 추가합니다.
-7. 처음에는 작은 각도 제한으로 시작하고, 안정된 뒤에만 범위를 늘립니다.
+6. 직접 `NiStringExtraData`를 추가하거나 `defaultBBPs.xml` map을 추가합니다.
+7. 처음에는 작은 angular limit로 시작하고, 안정된 뒤에만 범위를 늘립니다.
 
-## 헤어 제작 흐름
-
-1. 헤어 헤드파트 모델과 스킨된 헤어 지오메트리를 찾습니다.
-2. 헤어 서브트리에 `HDT Skinned Mesh Physics Object` 이름의 `NiStringExtraData`를 넣습니다.
-3. 두피 쪽에는 키네마틱 루트를 두고, 아래 체인에는 동적 본을 둡니다.
-4. 아머보다 낮은 mass와 높은 angular damping을 우선 사용합니다.
-5. 먼저 `<per-vertex-shape>`를 사용하고, 꼭 필요할 때만 `<per-triangle-shape>`를 사용합니다.
+헤어는 hair/headpart 서브트리에 직접 `NiStringExtraData`를 붙이는 방식을 우선하고, 낮은 mass와 높은 damping을 사용하며, triangle collision보다 `<per-vertex-shape>`를 먼저 시도하는 것이 좋습니다.
 
 ## 문제 해결
 
-- 아무것도 생성되지 않으면 XML에 `<system>` 루트가 있는지, XML 경로가 실제로 해석되는지 확인합니다.
-- 바디는 생성되지만 제약이 생성되지 않으면 `bodyA`와 `bodyB` 이름을 확인합니다.
-- 메시 충돌이 없으면 메시 이름이 실제 `BSTriShape` 이름과 맞는지, 메시가 스킨 데이터를 가지고 있는지 확인합니다.
-- per-triangle 충돌이 건너뛰어지면 CPU 인덱스 버퍼를 읽을 수 없는 상태일 수 있습니다.
-- 바디 위치가 어긋나면 `<centerOfMassTransform>`을 조정합니다.
-- 움직임이 폭주하면 각도 제한을 줄이고, mass를 낮추고, damping을 높이거나 키네마틱 루트를 사용합니다.
+- 아무것도 생성되지 않으면 XML에 `<system>` 루트가 있는지, 선택된 XML 경로가 실제로 해석되는지 확인합니다.
+- defaultBBP 매칭이 실패하면 실제 geometry 이름과 remap `<requires>` 항목을 확인합니다.
+- Body는 생성되지만 constraint가 생성되지 않으면 `bodyA`와 `bodyB` 이름을 확인합니다.
+- Mesh collision이 없으면 `BSTriShape` 이름, skin data, CPU vertex/index 사용 가능 여부를 확인합니다.
+- Per-triangle collision이 건너뛰어지면 CPU index buffer를 읽을 수 없는 상태일 수 있습니다.
+- Body 위치가 어긋나면 `<centerOfMassTransform>`을 조정합니다.
+- 움직임이 폭주하면 angular limit를 줄이고, mass를 낮추고, damping을 높이거나 kinematic root를 사용합니다.

@@ -6,16 +6,30 @@
 #include "LifecycleEvents.h"
 #include "PhysicsName.h"
 #include "SmpConfig.h"
+#include "RE/B/BSAnimationGraphManager.h"
+#include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSGeometry.h"
+#include "RE/B/BSUtilities.h"
+#include "RE/H/hkArray.h"
+#include "RE/H/hkReferencedObject.h"
+#include "RE/H/hkRefPtr.h"
 #include "RE/M/Main.h"
 #include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiPointer.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
+#include "RE/T/TESNPC.h"
+
+#if defined(_M_X64) && !defined(_AMD64_)
+#	define _AMD64_ 1
+#endif
+#include <Windows.h>
+#include <detours.h>
 
 #include <optional>
 #include <atomic>
+#include <unordered_set>
 #include <unordered_map>
 
 namespace Hooks
@@ -29,6 +43,10 @@ namespace Hooks
 		REL::Relocation<std::uintptr_t> BipedAnimRemovePart{ REL::ID{ 575576, 2194342 } };
 		REL::Relocation<std::uintptr_t> Update3DModel{ REL::ID{ 986782, 2231882 } };
 		REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
+		REL::Relocation<std::uintptr_t> BSFaceGenPrepareHeadPart{ REL::ID{ 840416, 2209534 } };
+		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 0 } };
+		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataGetBoneName{ REL::ID{ 190712, 0 } };
+		REL::Relocation<std::uintptr_t> BSFaceGenNiNodeFixSkinInstances{ REL::ID{ 399655, 0 } };
 	}
 
 	using MainOnIdleUpdateHighActorsArraySorted_t = void (*)(RE::Main*, float);
@@ -42,6 +60,8 @@ namespace Hooks
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
 	using Update3DModel_t = void (*)(void*, RE::Actor*, bool);
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
+	using PrepareHeadPart_t = void (*)(RE::BSFaceGenNiNode*, RE::BGSHeadPart*, const RE::TESNPC*, bool);
+	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
 
 	MainOnIdleUpdateHighActorsArraySorted_t OriginalMainOnIdleUpdateHighActorsArraySorted{ nullptr };
 	MainSwap_t                     OriginalMainSwap{ nullptr };
@@ -57,6 +77,8 @@ namespace Hooks
 	OnHeadInitialized_t            OriginalPlayerCharacterOnHeadInitialized{ nullptr };
 	Update3DModel_t                OriginalUpdate3DModel{ nullptr };
 	Reset3D_t                      OriginalReset3D{ nullptr };
+	PrepareHeadPart_t              OriginalPrepareHeadPart{ nullptr };
+	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
 
 	inline constexpr std::size_t kApplySkinnedObjectsPrologueSize = 14;
 	inline constexpr std::size_t kAttachSkinnedObjectPrologueSize = 15;
@@ -68,12 +90,68 @@ namespace Hooks
 	inline constexpr std::uintptr_t kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE = 0x6E4;
 	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetOG = 0x6EC;
 	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetAE = 0x6EC;
+	inline constexpr std::uintptr_t kGetBoneNameLimitImmediateOffsetOG = 0x6;
+	inline constexpr std::uintptr_t kFixSkinInstancesLimitImmediateOffsetOG = 0x91A;
+	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
+	inline constexpr bool kEnablePrepareHeadPartHook = true;
 
 	std::mutex               BackupNodeLock;
 	std::vector<std::string> BackupNodeNames;
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
 	std::atomic<std::uint32_t> PreMergeRenameId{ 0xF0000000U };
 	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
+	std::mutex FaceGenActorLock;
+	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
+
+	struct Fo4HkStringPtr
+	{
+		std::uintptr_t stringAndFlag{ 0 };
+	};
+	static_assert(sizeof(Fo4HkStringPtr) == 0x8);
+
+	struct Fo4HkaBone
+	{
+		Fo4HkStringPtr name;
+		bool lockTranslation{ false };
+		std::byte pad09[0x7]{};
+	};
+	static_assert(sizeof(Fo4HkaBone) == 0x10);
+
+	struct Fo4HkaSkeleton :
+		public RE::hkReferencedObject
+	{
+		Fo4HkStringPtr name;
+		RE::hkArray<std::int16_t> parentIndices;
+		RE::hkArray<Fo4HkaBone> bones;
+		RE::hkArray<RE::hkQsTransformf> referencePose;
+		RE::hkArray<float> referenceFloats;
+		RE::hkArray<Fo4HkStringPtr> floatSlots;
+		RE::hkArray<std::byte> localFrames;
+		RE::hkArray<std::byte> partitions;
+	};
+	static_assert(sizeof(Fo4HkaSkeleton) == 0x88);
+
+	struct Fo4HkbCharacterSetup :
+		public RE::hkReferencedObject
+	{
+		std::byte pad10[0x10]{};
+		RE::hkRefPtr<const Fo4HkaSkeleton> animationSkeleton;
+	};
+	static_assert(offsetof(Fo4HkbCharacterSetup, animationSkeleton) == 0x20);
+
+	struct Fo4HkbCharacter
+	{
+		std::byte pad00[0x78]{};
+		RE::hkRefPtr<const Fo4HkbCharacterSetup> setup;
+	};
+	static_assert(offsetof(Fo4HkbCharacter, setup) == 0x78);
+
+	struct Fo4BShkbAnimationGraph
+	{
+		std::byte pad00[0x1C8]{};
+		Fo4HkbCharacter characterInstance;
+	};
+	static_assert(offsetof(Fo4BShkbAnimationGraph, characterInstance) == 0x1C8);
 
 	using BackupBoneMap = std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>>;
 
@@ -166,6 +244,77 @@ namespace Hooks
 		return nullptr;
 	}
 
+	const char* HkStringPtrData(const Fo4HkStringPtr& a_string)
+	{
+		const auto pointer = a_string.stringAndFlag & ~static_cast<std::uintptr_t>(1);
+		return pointer != 0 ? reinterpret_cast<const char*>(pointer) : nullptr;
+	}
+
+	const Fo4HkaSkeleton* GetAnimationSkeleton(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return nullptr;
+		}
+
+		RE::BSTSmartPointer<RE::BSAnimationGraphManager> graphManager;
+		if (!a_actor->GetAnimationGraphManagerImpl(graphManager) || !graphManager || graphManager->graph.empty()) {
+			return nullptr;
+		}
+
+		auto* graph = graphManager->graph[0].get();
+		if (!graph) {
+			return nullptr;
+		}
+
+		const auto* fo4Graph = reinterpret_cast<const Fo4BShkbAnimationGraph*>(graph);
+		const auto* setup = fo4Graph->characterInstance.setup.ptr;
+		return setup ? setup->animationSkeleton.ptr : nullptr;
+	}
+
+	std::unordered_set<std::string> CollectActorSkeletonBoneNames(RE::Actor* a_actor)
+	{
+		std::unordered_set<std::string> result;
+		const auto* skeleton = GetAnimationSkeleton(a_actor);
+		if (!skeleton || skeleton->bones.size <= 0) {
+			return result;
+		}
+
+		result.reserve(static_cast<std::size_t>(skeleton->bones.size));
+		for (std::int32_t index = 0; index < skeleton->bones.size; ++index) {
+			const auto* boneName = HkStringPtrData(skeleton->bones.data[index].name);
+			if (boneName && *boneName != '\0') {
+				result.emplace(Smp::ConfigPaths::LowerString(boneName));
+			}
+		}
+		return result;
+	}
+
+	bool IsActorSkeletonBoneName(const std::unordered_set<std::string>& a_actorSkeletonBones, const std::string_view a_name)
+	{
+		if (a_name.empty()) {
+			return false;
+		}
+		return a_actorSkeletonBones.contains(Smp::ConfigPaths::LowerString(std::string(a_name)));
+	}
+
+	bool IsFo4RenderSkeletonHelperName(const std::string_view a_name)
+	{
+		if (a_name.empty()) {
+			return false;
+		}
+
+		const auto lowerName = Smp::ConfigPaths::LowerString(std::string(a_name));
+		return lowerName.contains("_skin") ||
+			lowerName.contains("_cbp_") ||
+			lowerName.starts_with("anus_") ||
+			lowerName.starts_with("vagina_") ||
+			lowerName.starts_with("belly_") ||
+			lowerName == "ribhelper.l" ||
+			lowerName == "ribhelper.r" ||
+			lowerName == "chest" ||
+			lowerName == "neck";
+	}
+
 	void CollectNodePointers(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_nodes)
 	{
 		if (!a_root) {
@@ -248,7 +397,6 @@ namespace Hooks
 			return nullptr;
 		}
 
-		RenameMergedNodeTree(a_source, a_prefix, nullptr);
 		RenameMergedNodeTree(cloneNode, a_prefix, std::addressof(a_renamedNodes));
 		return cloneNode;
 	}
@@ -258,6 +406,7 @@ namespace Hooks
 		RE::NiNode* a_source,
 		RE::NiAVObject* a_destinationRoot,
 		const std::string& a_prefix,
+		const std::unordered_set<std::string>& a_actorSkeletonBones,
 		std::vector<Smp::LifecycleMergedSkeletonNode>& a_renamedNodes,
 		std::vector<Smp::LifecycleMergedRootNode>& a_mergedRoots)
 	{
@@ -273,12 +422,24 @@ namespace Hooks
 
 			const auto sourceName = sourceChild->GetName();
 			if (sourceName.empty()) {
-				MergeSourceSkeletonIntoActorPreApply(a_destination, sourceChild, a_destinationRoot, a_prefix, a_renamedNodes, a_mergedRoots);
+				MergeSourceSkeletonIntoActorPreApply(a_destination, sourceChild, a_destinationRoot, a_prefix, a_actorSkeletonBones, a_renamedNodes, a_mergedRoots);
 				continue;
 			}
 
-			if (auto* destinationChild = FindNodeByName(a_destinationRoot, sourceName)) {
-				MergeSourceSkeletonIntoActorPreApply(destinationChild, sourceChild, a_destinationRoot, a_prefix, a_renamedNodes, a_mergedRoots);
+			if (IsActorSkeletonBoneName(a_actorSkeletonBones, sourceName) || IsFo4RenderSkeletonHelperName(sourceName)) {
+				if (auto* destinationChild = FindNodeByName(a_destinationRoot, sourceName)) {
+					MergeSourceSkeletonIntoActorPreApply(destinationChild, sourceChild, a_destinationRoot, a_prefix, a_actorSkeletonBones, a_renamedNodes, a_mergedRoots);
+					continue;
+				}
+				spdlog::debug("pre-merge actor skeleton did not contain live node for skeleton/helper bone '{}'; cloning source subtree", sourceName);
+			} else if (auto* staleDestinationChild = FindNodeByName(a_destinationRoot, sourceName)) {
+				spdlog::debug(
+					"pre-merge ignored stale/non-skeleton destination node '{}'={} so armor source subtree can be cloned",
+					sourceName,
+					static_cast<void*>(staleDestinationChild));
+			}
+
+			if (Smp::PhysicsNamesEqual(sourceName, "BSFaceGenNiNodeSkinned")) {
 				continue;
 			}
 
@@ -294,9 +455,6 @@ namespace Hooks
 				.node = clonedChild,
 			});
 
-			if (Smp::PhysicsNamesEqual(sourceName, "InariTail_01")) {
-				LogApplySourceNode("ArmorApplySkinnedObjects pre-merge clone", clonedChild, sourceName);
-			}
 			spdlog::debug(
 				"pre-merged source skeleton node '{}' as renamed attachment node={} under parent={}",
 				sourceName,
@@ -318,17 +476,29 @@ namespace Hooks
 		}
 
 		const auto prefix = MakeReferenceArmorRenamePrefix(PreMergeRenameId.fetch_add(1, std::memory_order_relaxed));
+		const auto actorSkeletonBones = CollectActorSkeletonBoneNames(actor);
 		UpdateNodeWorldFromLocal(actorRootNode);
 		UpdateNodeWorldFromLocal(a_sourceRoot);
-		MergeSourceSkeletonIntoActorPreApply(actorRootNode, a_sourceRoot, actorRootNode, prefix, a_renamedNodes, a_mergedRoots);
+		MergeSourceSkeletonIntoActorPreApply(actorRootNode, a_sourceRoot, actorRootNode, prefix, actorSkeletonBones, a_renamedNodes, a_mergedRoots);
 		spdlog::debug(
-			"pre-merged armor skeleton before ApplySkinnedObjects actor={} source={} root={} renamedNodes={} mergedRoots={} prefix='{}'",
+			"pre-merged armor skeleton before ApplySkinnedObjects actor={} source={} root={} renamedNodes={} mergedRoots={} havokBones={} prefix='{}'",
 			static_cast<void*>(actor),
 			static_cast<void*>(a_sourceRoot),
 			static_cast<void*>(actorRootNode),
 			a_renamedNodes.size(),
 			a_mergedRoots.size(),
+			actorSkeletonBones.size(),
 			prefix);
+	}
+
+	void DetachPreMergedRoots(std::vector<Smp::LifecycleMergedRootNode>& a_mergedRoots)
+	{
+		for (auto it = a_mergedRoots.rbegin(); it != a_mergedRoots.rend(); ++it) {
+			if (it->parent && it->node) {
+				it->parent->DetachChild(it->node);
+			}
+		}
+		a_mergedRoots.clear();
 	}
 
 	void LogApplySourceNode(const char* a_phase, RE::NiAVObject* a_root, const std::string_view a_name)
@@ -521,6 +691,52 @@ namespace Hooks
 		spdlog::info("{} resolved at {:x} moduleOffset={:x}", a_name, a_address, offset);
 	}
 
+	bool ValidateUInt32Immediate(
+		const char* a_name,
+		REL::Relocation<std::uintptr_t>& a_target,
+		const std::uintptr_t a_offset,
+		const std::uint32_t a_expected)
+	{
+		const auto address = a_target.address() + a_offset;
+		std::uint32_t current = 0;
+		std::memcpy(std::addressof(current), reinterpret_cast<const void*>(address), sizeof(current));
+		if (current != a_expected) {
+			spdlog::error(
+				"{} validation failed at {:x}: expected immediate {:#x}, found {:#x}",
+				a_name,
+				address,
+				a_expected,
+				current);
+			return false;
+		}
+
+		spdlog::info("{} validated at {:x}: {:#x}", a_name, address, a_expected);
+		return true;
+	}
+
+	bool ValidateFaceGenBoneNameLimit()
+	{
+		if (!REX::FModule::IsRuntimeOG()) {
+			spdlog::warn("FaceGen bone-name limit validation skipped: AE relocation IDs are not verified");
+			return true;
+		}
+
+		LogRelocationTarget("BSFaceGenModelExtraData::GetBoneName", Addresses::BSFaceGenModelExtraDataGetBoneName.address());
+		LogRelocationTarget("BSFaceGenNiNode::FixSkinInstances", Addresses::BSFaceGenNiNodeFixSkinInstances.address());
+
+		const auto getBoneNameValid = ValidateUInt32Immediate(
+			"BSFaceGenModelExtraData::GetBoneName bone-name limit",
+			Addresses::BSFaceGenModelExtraDataGetBoneName,
+			kGetBoneNameLimitImmediateOffsetOG,
+			kFaceGenModelExtraDataBoneNameLimit);
+		const auto fixSkinInstancesValid = ValidateUInt32Immediate(
+			"BSFaceGenNiNode::FixSkinInstances bone-name limit",
+			Addresses::BSFaceGenNiNodeFixSkinInstances,
+			kFixSkinInstancesLimitImmediateOffsetOG,
+			kFaceGenModelExtraDataBoneNameLimit);
+		return getBoneNameValid && fixSkinInstancesValid;
+	}
+
 	void LogHookTargets()
 	{
 		LogRelocationTarget("Main::OnIdle", Addresses::MainOnIdle.address());
@@ -530,6 +746,12 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::RemovePart", Addresses::BipedAnimRemovePart.address());
 		LogRelocationTarget("AIProcess::Update3DModel", Addresses::Update3DModel.address());
 		LogRelocationTarget("Actor::Reset3D", Addresses::Reset3D.address());
+		LogRelocationTarget("BSFaceGenUtils::PrepareHeadPart", Addresses::BSFaceGenPrepareHeadPart.address());
+		if (REX::FModule::IsRuntimeOG()) {
+			LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
+		} else {
+			spdlog::warn("BSFaceGenModelExtraData::SetBoneName hook skipped: AE relocation ID is not verified");
+		}
 	}
 
 	void EmitEvent(const Smp::LifecycleEvent& a_event)
@@ -554,6 +776,82 @@ namespace Hooks
 		Smp::NotifyLifecycleEvent(a_event);
 	}
 
+	void SeedFaceGenActor(RE::TESObjectREFR* a_ref)
+	{
+		auto* actor = a_ref ? static_cast<RE::Actor*>(a_ref) : nullptr;
+		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
+		if (!actor || !faceNode) {
+			return;
+		}
+
+		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(actor);
+		if (!handle) {
+			return;
+		}
+
+		std::scoped_lock lock(FaceGenActorLock);
+		std::erase_if(FaceGenActorMap, [actor, faceNode](const auto& a_entry) {
+			const auto resolved = a_entry.second.get();
+			return !resolved || (resolved.get() == actor && a_entry.first != faceNode);
+		});
+		FaceGenActorMap[faceNode] = handle;
+	}
+
+	RE::Actor* ResolveFaceGenActor(RE::BSFaceGenNiNode* a_faceNode)
+	{
+		if (!a_faceNode) {
+			return nullptr;
+		}
+
+		std::scoped_lock lock(FaceGenActorLock);
+		const auto found = FaceGenActorMap.find(a_faceNode);
+		if (found == FaceGenActorMap.end()) {
+			return nullptr;
+		}
+
+		auto resolved = found->second.get();
+		if (!resolved) {
+			FaceGenActorMap.erase(found);
+			return nullptr;
+		}
+		if (resolved->GetFaceNodeSkinned() != a_faceNode) {
+			FaceGenActorMap.erase(found);
+			return nullptr;
+		}
+		return resolved.get();
+	}
+
+	RE::NiAVObject* FindPreparedHeadPartObject(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart)
+	{
+		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(a_faceNode);
+		if (!faceObject || !a_headPart) {
+			return faceObject;
+		}
+
+		if (!a_headPart->formEditorID.empty()) {
+			if (auto* object = RE::BSUtilities::GetObjectByName(faceObject, a_headPart->formEditorID, true, true)) {
+				return object;
+			}
+		}
+
+		const auto modelKey = Smp::ConfigPaths::LowerString(Smp::ConfigPaths::Trim(std::string(a_headPart->ChargenModel.GetModel())));
+		if (!modelKey.empty()) {
+			if (auto slash = modelKey.find_last_of("\\/"); slash != std::string::npos) {
+				auto name = modelKey.substr(slash + 1);
+				if (auto dot = name.find_last_of('.'); dot != std::string::npos) {
+					name.erase(dot);
+				}
+				if (!name.empty()) {
+					if (auto* object = RE::BSUtilities::GetObjectByName(faceObject, RE::BSFixedString(name), true, true)) {
+						return object;
+					}
+				}
+			}
+		}
+
+		return faceObject;
+	}
+
 	RE::NiAVObject* HookedBipedAnimApplySkinnedObjects(RE::BipedAnim* a_biped, RE::NiNode* a_originalModelRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
@@ -568,10 +866,6 @@ namespace Hooks
 				*selectedXml,
 				static_cast<void*>(a_originalModelRoot),
 				a_originalModelRoot ? std::string_view(a_originalModelRoot->GetName()) : std::string_view{});
-			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "Root");
-			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "Pelvis");
-			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "InariTail_01");
-			LogApplySourceNode("ArmorApplySkinnedObjects pre-read original", originalModelObject, "InariTail_02");
 		}
 		auto mergeSourceObject = selectedXml ? ClonePhysicsMergeSource(a_originalModelRoot) : RE::NiPointer<RE::NiAVObject>{};
 		if (mergeSourceObject) {
@@ -582,15 +876,9 @@ namespace Hooks
 				std::string_view(mergeSourceObject->GetName()),
 				mergeSourceNode ? mergeSourceNode->children.size() : 0,
 				static_cast<void*>(a_originalModelRoot));
-			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "Root");
-			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "Pelvis");
-			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "InariTail_01");
-			LogApplySourceNode("ArmorApplySkinnedObjects preserved clone", mergeSourceObject.get(), "InariTail_02");
 		}
 		if (selectedXml) {
 			PreMergeArmorSkeleton(a_biped, a_originalModelRoot, a_firstPerson, preMergedSkeletonNodes, preMergedRootNodes);
-			LogApplySourceNode("ArmorApplySkinnedObjects post-pre-merge original", originalModelObject, "InariTail_01");
-			LogApplySourceNode("ArmorApplySkinnedObjects post-pre-merge original", originalModelObject, "InariTail_02");
 		}
 
 		const auto backupNodeNames = GetBackupNodeNames();
@@ -603,6 +891,16 @@ namespace Hooks
 		}
 		if (!backupBones.empty()) {
 			RestoreBackupBones(attachedObject, backupBones);
+		}
+		if (!attachedObject && !preMergedRootNodes.empty()) {
+			const auto detachedRoots = preMergedRootNodes.size();
+			DetachPreMergedRoots(preMergedRootNodes);
+			preMergedSkeletonNodes.clear();
+			spdlog::debug(
+				"detached {} pre-merged armor skeleton roots after ApplySkinnedObjects returned null actor={} source={}",
+				detachedRoots,
+				static_cast<void*>(ResolveActor(a_biped)),
+				static_cast<void*>(a_originalModelRoot));
 		}
 
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
@@ -740,6 +1038,7 @@ namespace Hooks
 	void HookedActorOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
 		OriginalActorOnHeadInitialized(a_ref);
+		SeedFaceGenActor(a_ref);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),
@@ -750,11 +1049,43 @@ namespace Hooks
 	void HookedPlayerCharacterOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
+		SeedFaceGenActor(a_ref);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),
 			.object = a_ref ? reinterpret_cast<RE::NiAVObject*>(a_ref->GetFaceNodeSkinned()) : nullptr,
 		});
+	}
+
+	void HookedPrepareHeadPart(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart, const RE::TESNPC* a_npc, bool a_arg4)
+	{
+		OriginalPrepareHeadPart(a_faceNode, a_headPart, a_npc, a_arg4);
+
+		auto* actor = ResolveFaceGenActor(a_faceNode);
+		if (!actor) {
+			return;
+		}
+
+		EmitEvent({
+			.type = Smp::LifecycleEventType::kHeadPrepareHeadPart,
+			.actor = actor,
+			.object = FindPreparedHeadPartObject(a_faceNode, a_headPart),
+			.headPart = a_headPart,
+		});
+	}
+
+	void HookedSetFaceGenBoneName(void* a_fmd, std::uint32_t a_boneIdx, RE::BSFixedString* a_boneName)
+	{
+		if (a_boneIdx < kFaceGenModelExtraDataBoneNameLimit) {
+			OriginalSetFaceGenBoneName(a_fmd, a_boneIdx, a_boneName);
+			return;
+		}
+
+		spdlog::debug(
+			"dropped out-of-range BSFaceGenModelExtraData::SetBoneName write fmd={} boneIdx={} boneName={}",
+			a_fmd,
+			a_boneIdx,
+			a_boneName && a_boneName->c_str() ? a_boneName->c_str() : "");
 	}
 
 	void HookedMainOnIdleUpdateHighActorsArraySorted(RE::Main* a_main, float a_distance)
@@ -794,6 +1125,7 @@ namespace Hooks
 	{
 		LogHookTargets();
 		const auto isOG = REX::FModule::IsRuntimeOG();
+		const auto faceGenBoneNameLimitsValid = ValidateFaceGenBoneNameLimit();
 		const auto mainFrameCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleUpdateHighActorsArraySortedCallOffsetOG : kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE);
 		const auto mainSyncCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleSwapCallOffsetOG : kMainOnIdleSwapCallOffsetAE);
 		LogRelocationTarget("Main::OnIdle frame update callsite", mainFrameCallsite);
@@ -850,6 +1182,48 @@ namespace Hooks
 		if (!OriginalReset3D) {
 			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Addresses::Reset3D, kReset3DPrologueSize, reinterpret_cast<void*>(&HookedReset3D));
 		}
+		if (isOG && !OriginalSetFaceGenBoneName) {
+			OriginalSetFaceGenBoneName = reinterpret_cast<SetFaceGenBoneName_t>(Addresses::BSFaceGenModelExtraDataSetBoneName.address());
+			DetourTransactionBegin();
+			DetourUpdateThread(GetCurrentThread());
+			const auto detourError = DetourAttach(
+				reinterpret_cast<PVOID*>(std::addressof(OriginalSetFaceGenBoneName)),
+				reinterpret_cast<PVOID>(&HookedSetFaceGenBoneName));
+			const auto commitError = DetourTransactionCommit();
+			if (detourError != NO_ERROR || commitError != NO_ERROR) {
+				spdlog::error(
+					"BSFaceGenModelExtraData::SetBoneName detour failed attachError={} commitError={} target={}",
+					detourError,
+					commitError,
+					reinterpret_cast<void*>(Addresses::BSFaceGenModelExtraDataSetBoneName.address()));
+				OriginalSetFaceGenBoneName = nullptr;
+			} else {
+				spdlog::info("BSFaceGenModelExtraData::SetBoneName detour installed at {:x}", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
+			}
+		}
+		if constexpr (kEnablePrepareHeadPartHook) {
+			if (!OriginalPrepareHeadPart) {
+				OriginalPrepareHeadPart = reinterpret_cast<PrepareHeadPart_t>(Addresses::BSFaceGenPrepareHeadPart.address());
+				DetourTransactionBegin();
+				DetourUpdateThread(GetCurrentThread());
+				const auto detourError = DetourAttach(
+					reinterpret_cast<PVOID*>(std::addressof(OriginalPrepareHeadPart)),
+					reinterpret_cast<PVOID>(&HookedPrepareHeadPart));
+				const auto commitError = DetourTransactionCommit();
+				if (detourError != NO_ERROR || commitError != NO_ERROR) {
+					spdlog::error(
+						"BSFaceGenUtils::PrepareHeadPart detour failed attachError={} commitError={} target={}",
+						detourError,
+						commitError,
+						reinterpret_cast<void*>(Addresses::BSFaceGenPrepareHeadPart.address()));
+					OriginalPrepareHeadPart = nullptr;
+				} else {
+					spdlog::info("BSFaceGenUtils::PrepareHeadPart detour installed at {:x}", Addresses::BSFaceGenPrepareHeadPart.address());
+				}
+			}
+		} else {
+			spdlog::warn("BSFaceGenUtils::PrepareHeadPart detour disabled pending FaceGen crash verification");
+		}
 
 		const bool installed =
 			(!isOG || (OriginalMainOnIdleUpdateHighActorsArraySorted && OriginalMainSwap)) &&
@@ -864,7 +1238,10 @@ namespace Hooks
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
 			OriginalUpdate3DModel &&
-			OriginalReset3D;
+			OriginalReset3D &&
+			faceGenBoneNameLimitsValid &&
+			(!isOG || OriginalSetFaceGenBoneName) &&
+			(!kEnablePrepareHeadPartHook || OriginalPrepareHeadPart);
 
 		spdlog::info("FO4 Faster HDT-SMP lifecycle hooks {}", installed ? "installed" : "failed");
 		return installed;

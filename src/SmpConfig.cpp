@@ -179,6 +179,7 @@ namespace Smp
 			settings_.smp.maxActiveActors = std::max(ReadInt(smp, "maxActiveActors", maxActiveActors), 1);
 			settings_.smp.maxActorDistance = std::clamp(ReadFloat(smp, "maxActorDistance", settings_.smp.maxActorDistance), 0.0F, 100000.0F);
 			settings_.smp.enablePrototypeDiagnostics = ReadBool(smp, "enablePrototypeDiagnostics", settings_.smp.enablePrototypeDiagnostics);
+			settings_.smp.disableSMPHairWhenWigEquipped = ReadBool(smp, "disableSMPHairWhenWigEquipped", settings_.smp.disableSMPHairWhenWigEquipped);
 			settings_.smp.prototypePhysicsXml = ReadText(smp, "prototypePhysicsXml");
 			settings_.smp.backupNodeByName = SplitCommaList(ReadText(smp, "backupNodeByName"));
 		}
@@ -192,6 +193,10 @@ namespace Smp
 			settings_.wind.directionZ = ReadFloat(wind, "directionZ", settings_.wind.directionZ);
 			settings_.wind.distanceForNoWind = std::clamp(ReadFloat(wind, "distanceForNoWind", settings_.wind.distanceForNoWind), 0.0F, 10000.0F);
 			settings_.wind.distanceForMaxWind = std::clamp(ReadFloat(wind, "distanceForMaxWind", settings_.wind.distanceForMaxWind), 0.0F, 10000.0F);
+			settings_.wind.weatherShortCooldownSeconds = std::clamp(ReadFloat(wind, "weatherShortCooldownSeconds", settings_.wind.weatherShortCooldownSeconds), 0.0F, 60.0F);
+			settings_.wind.weatherLongCooldownSeconds = std::clamp(ReadFloat(wind, "weatherLongCooldownSeconds", settings_.wind.weatherLongCooldownSeconds), 0.0F, 60.0F);
+			settings_.wind.smoothingSamples = std::clamp(ReadInt(wind, "smoothingSamples", settings_.wind.smoothingSamples), 1, 120);
+			settings_.wind.randomizePerBoneWind = ReadBool(wind, "randomizePerBoneWind", settings_.wind.randomizePerBoneWind);
 		}
 
 		const auto level = settings_.smp.logLevel >= 6 ? spdlog::level::off : static_cast<spdlog::level::level_enum>(5 - settings_.smp.logLevel);
@@ -216,6 +221,7 @@ namespace Smp
 		spdlog::debug("config: smp.maxActiveActors = {}", settings_.smp.maxActiveActors);
 		spdlog::debug("config: smp.maxActorDistance = {}", settings_.smp.maxActorDistance);
 		spdlog::debug("config: smp.enablePrototypeDiagnostics = {}", settings_.smp.enablePrototypeDiagnostics);
+		spdlog::debug("config: smp.disableSMPHairWhenWigEquipped = {}", settings_.smp.disableSMPHairWhenWigEquipped);
 		spdlog::debug("config: smp.prototypePhysicsXml = {}", settings_.smp.prototypePhysicsXml);
 		for (const auto& item : settings_.smp.backupNodeByName) {
 			spdlog::debug("config: smp.backupNodeByName += {}", item);
@@ -226,5 +232,9 @@ namespace Smp
 		spdlog::debug("config: wind.direction = ({}, {}, {})", settings_.wind.directionX, settings_.wind.directionY, settings_.wind.directionZ);
 		spdlog::debug("config: wind.distanceForNoWind = {}", settings_.wind.distanceForNoWind);
 		spdlog::debug("config: wind.distanceForMaxWind = {}", settings_.wind.distanceForMaxWind);
+		spdlog::debug("config: wind.weatherShortCooldownSeconds = {}", settings_.wind.weatherShortCooldownSeconds);
+		spdlog::debug("config: wind.weatherLongCooldownSeconds = {}", settings_.wind.weatherLongCooldownSeconds);
+		spdlog::debug("config: wind.smoothingSamples = {}", settings_.wind.smoothingSamples);
+		spdlog::debug("config: wind.randomizePerBoneWind = {}", settings_.wind.randomizePerBoneWind);
 	}
 }

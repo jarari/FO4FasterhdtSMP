@@ -17,6 +17,7 @@
     <sampleSize>5</sampleSize>
     <backupNodeByName></backupNodeByName>
     <disable1stPersonViewPhysics>false</disable1stPersonViewPhysics>
+    <disableSMPHairWhenWigEquipped>true</disableSMPHairWhenWigEquipped>
     <enableNpcPhysics>true</enableNpcPhysics>
     <autoAdjustMaxActors>false</autoAdjustMaxActors>
     <maxActiveActors>4</maxActiveActors>
@@ -26,12 +27,16 @@
   </smp>
   <wind>
     <enabled>false</enabled>
-    <useWeather>false</useWeather>
-    <windStrength>0</windStrength>
+    <useWeather>true</useWeather>
+    <windStrength>2</windStrength>
     <directionX>1</directionX>
     <directionY>0</directionY>
     <directionZ>0</directionZ>
     <distanceForNoWind>50</distanceForNoWind>
     <distanceForMaxWind>3000</distanceForMaxWind>
+    <weatherShortCooldownSeconds>0.5</weatherShortCooldownSeconds>
+    <weatherLongCooldownSeconds>5</weatherLongCooldownSeconds>
+    <smoothingSamples>8</smoothingSamples>
+    <randomizePerBoneWind>true</randomizePerBoneWind>
   </wind>
 </configs>

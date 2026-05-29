@@ -581,7 +581,7 @@ namespace Smp
 		if (a_path.empty()) {
 			prototype_ = PhysicsXmlSummary{};
 			hasPrototype_ = false;
-			spdlog::info("no prototype physics XML configured");
+			spdlog::warn("no prototype physics XML configured");
 			return false;
 		}
 
@@ -634,19 +634,6 @@ namespace Smp
 		}
 
 		CountKnownElement(system, loaded);
-		spdlog::info(
-			"loaded prototype physics XML {} bones={} boneDefaults={} pvShapes={} ptShapes={} shapes={} groups={} constraints={}",
-			loaded.path.string(),
-			loaded.bones,
-			loaded.boneDefaults,
-			loaded.perVertexShapes,
-			loaded.perTriangleShapes,
-			loaded.shapes,
-			loaded.constraintGroups,
-			loaded.constraints);
-		if (!loaded.boneNames.empty()) {
-			spdlog::info("prototype physics XML named bones={}", loaded.boneNames.size());
-		}
 
 		std::unordered_map<std::string, PhysicsShapeDescriptor> namedShapes;
 		std::unordered_map<std::string, PhysicsBoneDescriptor> templates;
@@ -758,22 +745,11 @@ namespace Smp
 			}
 		}
 
-		if (!namedShapes.empty()) {
-			spdlog::info("prototype physics XML parsed named shapes={}", namedShapes.size());
-		}
-		if (!loaded.boneDescriptors.empty()) {
-			spdlog::info("prototype physics XML parsed bone descriptors={}", loaded.boneDescriptors.size());
-		}
-		if (!loaded.meshDescriptors.empty()) {
-			spdlog::info("prototype physics XML parsed mesh descriptors={}", loaded.meshDescriptors.size());
-		}
-
 		if (!loaded.constraintDescriptors.empty()) {
 			for (const auto& descriptor : loaded.constraintDescriptors) {
 				AddUniqueBoneName(loaded, descriptor.bodyA.c_str());
 				AddUniqueBoneName(loaded, descriptor.bodyB.c_str());
 			}
-			spdlog::info("prototype physics XML parsed constraint descriptors={}", loaded.constraintDescriptors.size());
 		}
 		if (const auto loadedTimestamp = currentTimestamp ? currentTimestamp : GetLastWriteTime(loaded.path)) {
 			auto [entry, inserted] = summaryCache_.insert_or_assign(cacheKey, CachedSummary{
