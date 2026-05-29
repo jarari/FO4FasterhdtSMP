@@ -23,6 +23,11 @@ class btRigidBody;
 class btSequentialImpulseConstraintSolver;
 class btTypedConstraint;
 
+namespace RE
+{
+	class MenuOpenCloseEvent;
+}
+
 namespace hdt
 {
 	class CollisionDispatcher;
@@ -52,7 +57,8 @@ namespace Smp
 	};
 
 	class Fo4PhysicsWorld :
-		public RE::BSTEventSink<LifecycleEvent>
+		public RE::BSTEventSink<LifecycleEvent>,
+		public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
 	public:
 		~Fo4PhysicsWorld() override;
@@ -71,8 +77,10 @@ namespace Smp
 		void RecordWritebackMetric(float a_writebackMs, WritebackSource a_source, bool a_wroteAny, bool a_skippedDuplicate);
 		void WriteBackPrototypeBodies(WritebackSource a_source = WritebackSource::kUnknown);
 		void WriteBackPrototypeBodies(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
+		void PrepareActorForModelRebuild(RE::Actor* a_actor);
 
 		RE::BSEventNotifyControl ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>* a_source) override;
+		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_source) override;
 
 	private:
 		Fo4PhysicsWorld() = default;
@@ -133,6 +141,13 @@ namespace Smp
 			RE::NiPointer<RE::NiAVObject> node;
 		};
 
+		struct PrototypeArmorRecord
+		{
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+			std::string physicsXmlPath;
+			DefaultBBP::NameMap meshNameMap;
+		};
+
 		struct PrototypeActorState
 		{
 			RE::Actor* actor{ nullptr };
@@ -147,11 +162,27 @@ namespace Smp
 			std::vector<PrototypeMesh> meshes;
 			std::vector<PrototypeConstraint> constraints;
 			std::vector<PrototypeMergedNode> mergedNodes;
+			std::vector<PrototypeArmorRecord> armorRecords;
 		};
 
 		struct SuspendedActorCandidate
 		{
 			RE::ActorHandle actorHandle;
+		};
+
+		struct PendingActorRebuild
+		{
+			struct Armor
+			{
+				RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+				std::string physicsXmlPath;
+				DefaultBBP::NameMap meshNameMap;
+			};
+
+			RE::ActorHandle actorHandle;
+			bool firstPerson{ false };
+			bool customizationReload{ false };
+			std::vector<Armor> armors;
 		};
 
 		PrototypeActorState* FindPrototypeStateLocked(RE::Actor* a_actor, bool a_firstPerson);
@@ -161,7 +192,12 @@ namespace Smp
 		void EnforceActorBudgetLocked();
 		void SuspendActorCandidateLocked(RE::Actor* a_actor);
 		void TryReactivateSuspendedActorsLocked();
-		void ClearPrototypeStateLocked(PrototypeActorState& a_state);
+		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PendingActorRebuild::Armor> a_armors = {}, bool a_customizationReload = false);
+		void RecordPrototypeArmorLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::string a_physicsXmlPath, const DefaultBBP::NameMap& a_meshNameMap);
+		bool BuildPendingArmorReloadLocked(RE::Actor* a_actor, bool a_firstPerson, const PendingActorRebuild::Armor& a_armor);
+		void TryRebuildPendingActorsLocked(RE::Actor* a_actor = nullptr);
+		void ClearPrototypeStatesForMenuRebuildLocked();
+		void ClearPrototypeStateLocked(PrototypeActorState& a_state, bool a_restoreSkinSlots = true);
 		bool ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object);
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
@@ -220,6 +256,9 @@ namespace Smp
 		std::string prototypePhysicsXml_;
 		std::vector<PrototypeActorState> prototypeActors_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
+		std::vector<PendingActorRebuild> pendingActorRebuilds_;
+		std::uint32_t characterCustomizationMenuDepth_{ 0 };
+		bool customizationCloseReloadQueued_{ false };
 		bool registered_{ false };
 	};
 }

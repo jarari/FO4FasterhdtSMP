@@ -15,7 +15,12 @@ namespace Smp
 
 		static void ApplyStabilityConfig(bool a_clampRotations, float a_rotationSpeedLimit, bool a_unclampedResets, float a_unclampedResetAngle);
 
-		void AddSkinWorldTransform(RE::BSSkin::Instance* a_skin, std::uint32_t a_index, std::uint64_t a_buildGroup);
+		void AddSkinWorldTransform(
+			RE::BSSkin::Instance* a_skin,
+			std::uint32_t a_index,
+			std::uint64_t a_buildGroup,
+			RE::NiAVObject* a_originalBone,
+			RE::NiTransform* a_originalWorldTransform);
 		void RemoveSkinWorldTransformsForBuildGroup(std::uint64_t a_buildGroup);
 		void readTransform(float a_timeStep) override;
 		void writeTransform() override;
@@ -29,6 +34,8 @@ namespace Smp
 			RE::NiPointer<RE::BSSkin::Instance> skin;
 			std::uint32_t index{ 0 };
 			std::uint64_t buildGroup{ 0 };
+			RE::NiPointer<RE::NiAVObject> originalBone;
+			RE::NiTransform* originalWorldTransform{ nullptr };
 			RE::NiTransform* cached{ nullptr };
 		};
 

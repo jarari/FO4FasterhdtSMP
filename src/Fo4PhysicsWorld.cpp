@@ -11,6 +11,7 @@
 #include "hdtSkinnedMesh/hdtDispatcher.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshShape.h"
+#include "RE/B/BipedAnim.h"
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSUtilities.h"
 #include "RE/B/BSTimer.h"
@@ -19,6 +20,7 @@
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
 #include "RE/M/Main.h"
+#include "RE/M/MenuOpenCloseEvent.h"
 #include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/N/NiUpdateData.h"
@@ -31,6 +33,7 @@
 #include <btBulletDynamicsCommon.h>
 
 #include <array>
+#include <cctype>
 #include <cstdio>
 #include <chrono>
 #include <cmath>
@@ -226,6 +229,10 @@ namespace
 	{
 		RE::NiAVObject* object{ nullptr };
 		ArmorPhysicsXmlSelection selection;
+		RE::BIPOBJECT* bipObject{ nullptr };
+		RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+		RE::NiAVObject* sourceObject{ nullptr };
+		RE::NiNode* sourceRoot{ nullptr };
 	};
 
 	struct HeadPhysicsXmlBuildCandidate
@@ -473,6 +480,27 @@ namespace
 		return false;
 	}
 
+	std::string LowerMenuName(const RE::BSFixedString& a_name)
+	{
+		std::string result{ std::string_view(a_name) };
+		for (auto& ch : result) {
+			ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+		}
+		return result;
+	}
+
+	bool IsCharacterCustomizationMenuName(const std::string_view a_menuName)
+	{
+		return a_menuName == "looksmenu" ||
+			a_menuName == "looks menu" ||
+			a_menuName == "racesex menu" ||
+			a_menuName == "race sex menu" ||
+			a_menuName == "chargen menu" ||
+			a_menuName == "character generation menu" ||
+			a_menuName.find("looksmenu") != std::string_view::npos ||
+			a_menuName.find("racesex") != std::string_view::npos;
+	}
+
 	std::optional<std::filesystem::path> FindPhysicsXmlExtraData(RE::NiAVObject* a_object)
 	{
 		if (!a_object || !a_object->extra) {
@@ -621,6 +649,103 @@ namespace
 		}
 	}
 
+	RE::BipedAnim* ResolveEventBiped(const Smp::LifecycleEvent& a_event)
+	{
+		if (a_event.biped) {
+			return a_event.biped;
+		}
+		if (!a_event.actor) {
+			return nullptr;
+		}
+
+		const auto& biped = a_event.actor->GetBiped(a_event.firstPerson);
+		if (biped) {
+			return biped.get();
+		}
+		return a_event.actor->GetBiped().get();
+	}
+
+	bool HasArmorBuildCandidateObject(
+		const std::vector<ArmorPhysicsXmlBuildCandidate>& a_candidates,
+		RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return true;
+		}
+
+		return std::ranges::any_of(a_candidates, [a_object](const ArmorPhysicsXmlBuildCandidate& a_candidate) {
+			return a_candidate.object == a_object;
+		});
+	}
+
+	void AppendEquippedArmorCandidate(
+		std::vector<ArmorPhysicsXmlBuildCandidate>& a_candidates,
+		ArmorPhysicsXmlBuildCandidate a_candidate,
+		RE::BIPOBJECT* a_bipObject,
+		const RE::BIPED_OBJECT a_bipedObject,
+		RE::NiAVObject* a_partClone)
+	{
+		if (!a_candidate.object || HasArmorBuildCandidateObject(a_candidates, a_candidate.object)) {
+			return;
+		}
+
+		a_candidate.bipObject = a_bipObject;
+		a_candidate.bipedObject = a_bipedObject;
+		a_candidate.sourceObject = a_partClone;
+		a_candidate.sourceRoot = a_partClone ? a_partClone->IsNode() : nullptr;
+		a_candidates.push_back(std::move(a_candidate));
+	}
+
+	void CollectEquippedArmorPhysicsXmlSelections(
+		const Smp::LifecycleEvent& a_event,
+		std::vector<ArmorPhysicsXmlBuildCandidate>& a_candidates)
+	{
+		auto* biped = ResolveEventBiped(a_event);
+		if (!biped) {
+			return;
+		}
+
+		const auto previousCandidateCount = a_candidates.size();
+		for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
+			const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
+			auto* bipObject = biped->GetBipObject(bipedObject);
+			auto* partClone = bipObject ? bipObject->partClone.get() : nullptr;
+			if (!partClone) {
+				continue;
+			}
+
+			std::vector<ArmorPhysicsXmlBuildCandidate> subtreeCandidates;
+			CollectDirectArmorPhysicsXmlSelections(partClone, subtreeCandidates);
+			if (subtreeCandidates.empty()) {
+				if (auto selection = FindArmorPhysicsXml(partClone)) {
+					subtreeCandidates.push_back({
+						.object = partClone,
+						.selection = std::move(*selection),
+					});
+				}
+			}
+
+			for (auto& candidate : subtreeCandidates) {
+				AppendEquippedArmorCandidate(
+					a_candidates,
+					std::move(candidate),
+					bipObject,
+					bipedObject,
+					partClone);
+			}
+		}
+
+		const auto added = a_candidates.size() - previousCandidateCount;
+		if (added > 0) {
+			spdlog::debug(
+				"found {} equipped biped armor physics candidates for actor={} biped={} root={}",
+				added,
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(biped),
+				static_cast<void*>(biped->GetRoot()));
+		}
+	}
+
 	void CollectHeadPhysicsXmlSelections(
 		RE::NiAVObject* a_object,
 		const std::vector<std::string>& a_hairKeys,
@@ -766,6 +891,8 @@ namespace
 		{
 			RE::NiPointer<RE::BSSkin::Instance> skin;
 			std::uint32_t index{ 0 };
+			RE::NiPointer<RE::NiAVObject> originalBone;
+			RE::NiTransform* originalWorldTransform{ nullptr };
 		};
 
 		RE::NiNode* node{ nullptr };
@@ -851,6 +978,8 @@ namespace
 		a_bone.skinWorldTransforms.push_back({
 			.skin = a_skin,
 			.index = a_index,
+			.originalBone = a_index < a_skin->bones.size() ? a_skin->bones[a_index] : nullptr,
+			.originalWorldTransform = a_skin->worldTransforms[a_index],
 		});
 	}
 
@@ -1648,11 +1777,11 @@ namespace
 				}
 
 				if (matched->node) {
+					AddSkinWorldTransformSlot(*matched, skin, index);
 					const auto rebound = RebindSkinBoneSlot(skin, index, matched->node);
 					if (rebound && a_skeletonRoot) {
 						skin->rootNode = a_skeletonRoot;
 					}
-					AddSkinWorldTransformSlot(*matched, skin, index);
 					if (rebound && skinBone != matched->node) {
 						spdlog::debug(
 							"prototype rebound skin bone '{}' slot={} oldNode={} newNode={} skin={} root={}",
@@ -2528,7 +2657,12 @@ namespace Smp
 			return;
 		}
 		if (Initialize()) {
-			GetLifecycleEventSource().RegisterSink(this);
+			GetLifecycleEventSource().RegisterSink(static_cast<RE::BSTEventSink<LifecycleEvent>*>(this));
+			if (auto* ui = RE::UI::GetSingleton()) {
+				ui->RegisterSink<RE::MenuOpenCloseEvent>(static_cast<RE::BSTEventSink<RE::MenuOpenCloseEvent>*>(this));
+			} else {
+				spdlog::warn("FO4 Faster HDT-SMP could not register UI menu sink; LooksMenu rebuild deferral will be unavailable");
+			}
 			registered_ = true;
 		}
 	}
@@ -3236,22 +3370,117 @@ namespace Smp
 		RecordWritebackMetric(ElapsedMs(start, Clock::now()), a_source, wroteAny, skippedDuplicate);
 	}
 
+	void Fo4PhysicsWorld::PrepareActorForModelRebuild(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		std::scoped_lock lock(lock_);
+		if (characterCustomizationMenuDepth_ == 0 && !customizationCloseReloadQueued_) {
+			return;
+		}
+
+		std::vector<ArmorPhysicsXmlBuildCandidate> armorCandidates;
+		CollectEquippedArmorPhysicsXmlSelections(LifecycleEvent{
+			.type = LifecycleEventType::kActorSet3D,
+			.actor = a_actor,
+			.biped = a_actor->GetBiped(false).get(),
+			.object = a_actor->Get3D(false),
+			.firstPerson = false,
+		}, armorCandidates);
+		std::vector<PendingActorRebuild::Armor> pendingArmors;
+		pendingArmors.reserve(armorCandidates.size());
+		const auto mergePendingArmor = [&](PendingActorRebuild::Armor a_armor) {
+			if (a_armor.bipedObject == RE::BIPED_OBJECT::kTotal || a_armor.physicsXmlPath.empty()) {
+				return;
+			}
+			auto existing = std::ranges::find_if(pendingArmors, [&](const PendingActorRebuild::Armor& a_existing) {
+				return a_existing.bipedObject == a_armor.bipedObject;
+			});
+			if (existing != pendingArmors.end()) {
+				*existing = std::move(a_armor);
+			} else {
+				pendingArmors.push_back(std::move(a_armor));
+			}
+		};
+		for (const auto& candidate : armorCandidates) {
+			if (candidate.bipedObject == RE::BIPED_OBJECT::kTotal || candidate.selection.path.empty()) {
+				continue;
+			}
+			mergePendingArmor({
+				.bipedObject = candidate.bipedObject,
+				.physicsXmlPath = candidate.selection.path.string(),
+				.meshNameMap = candidate.selection.meshNameMap,
+			});
+		}
+
+		std::vector<bool> firstPersonStates;
+		for (auto& actorState : prototypeActors_) {
+			if (actorState.actor != a_actor) {
+				continue;
+			}
+			for (const auto& armorRecord : actorState.armorRecords) {
+				mergePendingArmor({
+					.bipedObject = armorRecord.bipedObject,
+					.physicsXmlPath = armorRecord.physicsXmlPath,
+					.meshNameMap = armorRecord.meshNameMap,
+				});
+			}
+			firstPersonStates.push_back(actorState.firstPerson);
+			ClearPrototypeStateLocked(actorState, false);
+			actorState.actor = nullptr;
+			actorState.actorHandle.reset();
+		}
+		if (firstPersonStates.empty()) {
+			if (!pendingArmors.empty()) {
+				MarkPendingActorRebuildLocked(a_actor, false, pendingArmors, true);
+				ResetStepClockLocked();
+				spdlog::debug(
+					"prepared actor={} prototype physics for customization model rebuild from equipped armor records only; cachedArmors={} closeQueued={}",
+					static_cast<void*>(a_actor),
+					pendingArmors.size(),
+					customizationCloseReloadQueued_);
+			}
+			return;
+		}
+
+		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+			return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
+		});
+		for (const auto firstPerson : firstPersonStates) {
+			MarkPendingActorRebuildLocked(a_actor, firstPerson, pendingArmors, true);
+		}
+		ResetStepClockLocked();
+		spdlog::debug(
+			"prepared actor={} prototype physics for customization model rebuild; queuedStates={} cachedArmors={} closeQueued={}",
+			static_cast<void*>(a_actor),
+			firstPersonStates.size(),
+			pendingArmors.size(),
+			customizationCloseReloadQueued_);
+	}
+
 	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>*)
 	{
 		if (IsAttachCandidate(a_event.type)) {
 			if (a_event.type == LifecycleEventType::kActorSet3D && !a_event.object) {
 				std::scoped_lock lock(lock_);
+				bool clearedActorState = false;
 				for (auto& actorState : prototypeActors_) {
 					if (actorState.actor != a_event.actor) {
 						continue;
 					}
-					ClearPrototypeStateLocked(actorState);
+					clearedActorState = true;
+					ClearPrototypeStateLocked(actorState, characterCustomizationMenuDepth_ == 0 && !customizationCloseReloadQueued_);
 					actorState.actor = nullptr;
 					actorState.actorHandle.reset();
 				}
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 					return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
 				});
+				if (clearedActorState) {
+					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson);
+				}
 				spdlog::debug("physics world cleared actor state for null Set3D actor={}", static_cast<void*>(a_event.actor));
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -3295,11 +3524,13 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 		} else if (IsResetCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
+			bool clearedActorState = false;
 			for (auto& actorState : prototypeActors_) {
 				if (actorState.actor != a_event.actor) {
 					continue;
 				}
-				ClearPrototypeStateLocked(actorState);
+				clearedActorState = true;
+				ClearPrototypeStateLocked(actorState, characterCustomizationMenuDepth_ == 0 && !customizationCloseReloadQueued_);
 				actorState.actor = nullptr;
 				actorState.actorHandle.reset();
 			}
@@ -3307,8 +3538,13 @@ namespace Smp
 				return !a_state.actor && a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
 			});
 			PruneInvalidPrototypeStatesLocked();
-			if (InitializeLocked() && IsPrototypeCandidateLocked(a_event, true)) {
+			bool rebuilt = false;
+			if (characterCustomizationMenuDepth_ == 0 && !customizationCloseReloadQueued_ && InitializeLocked() && IsPrototypeCandidateLocked(a_event, true)) {
 				BuildPrototypeForEventLocked(a_event);
+				rebuilt = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) != nullptr;
+			}
+			if (!rebuilt && clearedActorState) {
+				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson);
 			}
 			spdlog::debug(
 				"physics world observed rebuild/reset candidate {} actor={} object={}",
@@ -3316,8 +3552,10 @@ namespace Smp
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
 		} else if (a_event.type == LifecycleEventType::kActorUpdate3DModel) {
+			std::scoped_lock lock(lock_);
+			TryRebuildPendingActorsLocked(a_event.actor);
 			spdlog::trace(
-				"physics world observed per-frame update candidate {} actor={} object={}; ignored as rebuild trigger",
+				"physics world observed per-frame update candidate {} actor={} object={}; pending rebuilds checked",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
@@ -3327,6 +3565,34 @@ namespace Smp
 			if (InitializeLocked() && IsPrototypeCandidateLocked(a_event, false)) {
 				BuildHeadPrototypeForEventLocked(a_event);
 			}
+		}
+
+		return RE::BSEventNotifyControl::kContinue;
+	}
+
+	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
+	{
+		const auto menuName = LowerMenuName(a_event.menuName);
+		const auto isCustomizationMenu = IsCharacterCustomizationMenuName(menuName);
+		if (!isCustomizationMenu) {
+			return RE::BSEventNotifyControl::kContinue;
+		}
+
+		std::scoped_lock lock(lock_);
+		if (a_event.opening) {
+			++characterCustomizationMenuDepth_;
+			spdlog::debug(
+				"character customization menu '{}' opened; prototype physics will clear before vanilla model rebuild",
+				std::string_view(a_event.menuName));
+		} else {
+			if (characterCustomizationMenuDepth_ > 0) {
+				--characterCustomizationMenuDepth_;
+			}
+			customizationCloseReloadQueued_ = true;
+			ResetStepClockLocked();
+			spdlog::debug(
+				"character customization menu '{}' closed; cached prototype armor reloads will run after vanilla model update",
+				std::string_view(a_event.menuName));
 		}
 
 		return RE::BSEventNotifyControl::kContinue;
@@ -3377,6 +3643,7 @@ namespace Smp
 		dispatcher_.reset();
 		collisionConfiguration_.reset();
 		suspendedActors_.clear();
+		pendingActorRebuilds_.clear();
 		candidateEvents_ = 0;
 		simulationFrame_ = 1;
 		currentMaxActiveActors_ = maxActiveActors_;
@@ -3390,6 +3657,8 @@ namespace Smp
 		duplicateCellJobsWritebacks_ = 0;
 		duplicatePostAnimationWritebacks_ = 0;
 		diagnosticFrameBudget_ = 0;
+		characterCustomizationMenuDepth_ = 0;
+		customizationCloseReloadQueued_ = false;
 	}
 
 	void Fo4PhysicsWorld::NoteLifecycleCandidate(const LifecycleEvent& a_event)
@@ -3399,6 +3668,31 @@ namespace Smp
 			return;
 		}
 		PruneInvalidPrototypeStatesLocked();
+
+		if (characterCustomizationMenuDepth_ > 0 || customizationCloseReloadQueued_) {
+			std::vector<PendingActorRebuild::Armor> pendingArmors;
+			if (IsArmorAttachCandidate(a_event.type) && a_event.bipedObject != RE::BIPED_OBJECT::kTotal) {
+				if (auto selection = FindArmorPhysicsXml(a_event)) {
+					pendingArmors.push_back({
+						.bipedObject = a_event.bipedObject,
+						.physicsXmlPath = selection->path.string(),
+						.meshNameMap = selection->meshNameMap,
+					});
+				}
+			}
+			const auto customizationReload = characterCustomizationMenuDepth_ > 0 || customizationCloseReloadQueued_;
+			const auto cachedArmors = pendingArmors.size();
+			MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(pendingArmors), customizationReload);
+			ResetStepClockLocked();
+			spdlog::debug(
+				"deferred prototype physics attach candidate {} actor={} object={} while menu/model rebuild is active closeQueued={} cachedArmors={}",
+				ToString(a_event.type),
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_event.object),
+				customizationCloseReloadQueued_,
+				cachedArmors);
+			return;
+		}
 
 		++candidateEvents_;
 		spdlog::debug(
@@ -3420,9 +3714,11 @@ namespace Smp
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
 
-		const auto buildSelection = [&](RE::NiAVObject* a_object, const ArmorPhysicsXmlSelection& a_selection) {
+		const auto buildSelection = [&](const ArmorPhysicsXmlBuildCandidate& a_candidate) {
+			auto* a_object = a_candidate.object;
+			const auto& a_selection = a_candidate.selection;
 			const auto selectedXml = a_selection.path.string();
-			if (selectedXml.empty()) {
+			if (!a_object || selectedXml.empty()) {
 				return false;
 			}
 
@@ -3439,6 +3735,21 @@ namespace Smp
 
 			auto scopedEvent = a_event;
 			scopedEvent.object = a_object;
+			if (a_candidate.sourceObject) {
+				scopedEvent.sourceObject = a_candidate.sourceObject;
+			}
+			if (a_candidate.sourceRoot) {
+				scopedEvent.sourceRoot = a_candidate.sourceRoot;
+			}
+			if (a_candidate.bipObject) {
+				scopedEvent.bipObject = a_candidate.bipObject;
+			}
+			if (a_candidate.bipedObject != RE::BIPED_OBJECT::kTotal) {
+				scopedEvent.bipedObject = a_candidate.bipedObject;
+			}
+			if (!scopedEvent.biped) {
+				scopedEvent.biped = ResolveEventBiped(scopedEvent);
+			}
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			if (armorAttach) {
 				const auto clearedObject = ClearPrototypeGroupsForObjectLocked(actorState, a_object);
@@ -3453,12 +3764,14 @@ namespace Smp
 				}
 			}
 			BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor);
+			RecordPrototypeArmorLocked(actorState, scopedEvent.bipedObject, selectedXml, a_selection.meshNameMap);
 			return true;
 		};
 
 		if (!armorAttach) {
 			std::vector<ArmorPhysicsXmlBuildCandidate> candidates;
 			CollectDirectArmorPhysicsXmlSelections(a_event.object, candidates);
+			CollectEquippedArmorPhysicsXmlSelections(a_event, candidates);
 			if (!candidates.empty()) {
 				if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
 					ClearPrototypeStateLocked(*actorState);
@@ -3469,12 +3782,12 @@ namespace Smp
 
 				std::uint32_t built = 0;
 				for (const auto& candidate : candidates) {
-					if (buildSelection(candidate.object, candidate.selection)) {
+					if (buildSelection(candidate)) {
 						++built;
 					}
 				}
 				spdlog::debug(
-					"rebuilt prototype physics for {} directly XML-tagged armor subtrees actor={} root={} built={}",
+					"rebuilt prototype physics for {} armor subtrees/equipped clones actor={} root={} built={}",
 					candidates.size(),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object),
@@ -3522,9 +3835,16 @@ namespace Smp
 		}
 
 		const Smp::DefaultBBP::NameMap emptyMeshNameMap;
-		buildSelection(a_event.object, ArmorPhysicsXmlSelection{
-			.path = selectedXml,
-			.meshNameMap = discoveredXml ? discoveredXml->meshNameMap : emptyMeshNameMap,
+		buildSelection(ArmorPhysicsXmlBuildCandidate{
+			.object = a_event.object,
+			.selection = ArmorPhysicsXmlSelection{
+				.path = selectedXml,
+				.meshNameMap = discoveredXml ? discoveredXml->meshNameMap : emptyMeshNameMap,
+			},
+			.bipObject = a_event.bipObject,
+			.bipedObject = a_event.bipedObject,
+			.sourceObject = a_event.sourceObject,
+			.sourceRoot = a_event.sourceRoot,
 		});
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 			return a_state.bodies.empty() && a_state.meshes.empty() && a_state.constraints.empty();
@@ -3856,7 +4176,306 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeStateLocked(PrototypeActorState& a_state)
+	void Fo4PhysicsWorld::MarkPendingActorRebuildLocked(
+		RE::Actor* a_actor,
+		const bool a_firstPerson,
+		std::vector<PendingActorRebuild::Armor> a_armors,
+		const bool a_customizationReload)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		if (!handle) {
+			return;
+		}
+
+		if (a_customizationReload && a_armors.empty()) {
+			for (auto& pending : pendingActorRebuilds_) {
+				auto resolvedActor = pending.actorHandle.get();
+				if (resolvedActor && resolvedActor.get() == a_actor && pending.firstPerson == a_firstPerson) {
+					pending.customizationReload = true;
+					return;
+				}
+			}
+			return;
+		}
+
+		for (auto& pending : pendingActorRebuilds_) {
+			auto resolvedActor = pending.actorHandle.get();
+			if (resolvedActor && resolvedActor.get() == a_actor && pending.firstPerson == a_firstPerson) {
+				pending.customizationReload = pending.customizationReload || a_customizationReload;
+				if (!a_armors.empty()) {
+					for (auto& armor : a_armors) {
+						auto existing = std::ranges::find_if(pending.armors, [&](const PendingActorRebuild::Armor& a_pendingArmor) {
+							return a_pendingArmor.bipedObject == armor.bipedObject;
+						});
+						if (existing != pending.armors.end()) {
+							*existing = std::move(armor);
+						} else {
+							pending.armors.push_back(std::move(armor));
+						}
+					}
+				}
+				return;
+			}
+		}
+
+		pendingActorRebuilds_.push_back({
+			.actorHandle = handle,
+			.firstPerson = a_firstPerson,
+			.customizationReload = a_customizationReload,
+			.armors = std::move(a_armors),
+		});
+		spdlog::debug(
+			"queued pending prototype physics rebuild for actor={} firstPerson={} customizationReload={}",
+			static_cast<void*>(a_actor),
+			a_firstPerson,
+			a_customizationReload);
+	}
+
+	void Fo4PhysicsWorld::RecordPrototypeArmorLocked(
+		PrototypeActorState& a_state,
+		const RE::BIPED_OBJECT a_bipedObject,
+		std::string a_physicsXmlPath,
+		const DefaultBBP::NameMap& a_meshNameMap)
+	{
+		if (a_bipedObject == RE::BIPED_OBJECT::kTotal || a_physicsXmlPath.empty()) {
+			return;
+		}
+
+		auto existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+			return a_record.bipedObject == a_bipedObject;
+		});
+		if (existing != a_state.armorRecords.end()) {
+			existing->physicsXmlPath = std::move(a_physicsXmlPath);
+			existing->meshNameMap = a_meshNameMap;
+		} else {
+			a_state.armorRecords.push_back({
+				.bipedObject = a_bipedObject,
+				.physicsXmlPath = std::move(a_physicsXmlPath),
+				.meshNameMap = a_meshNameMap,
+			});
+		}
+	}
+
+	bool Fo4PhysicsWorld::BuildPendingArmorReloadLocked(
+		RE::Actor* a_actor,
+		const bool a_firstPerson,
+		const PendingActorRebuild::Armor& a_armor)
+	{
+		if (!a_actor || a_armor.bipedObject == RE::BIPED_OBJECT::kTotal || a_armor.physicsXmlPath.empty()) {
+			return true;
+		}
+
+		auto* biped = a_actor->GetBiped(a_firstPerson).get();
+		if (!biped) {
+			biped = a_actor->GetBiped().get();
+		}
+		if (!biped) {
+			return false;
+		}
+
+		auto* bipObject = biped->GetBipObject(a_armor.bipedObject);
+		if (!bipObject) {
+			return false;
+		}
+
+		auto* partClone = bipObject->partClone.get();
+		if (!partClone) {
+			if (!bipObject->part && !bipObject->armorAddon) {
+				spdlog::debug(
+					"customization close reload skipped unequipped armor actor={} bipedObject={} xml='{}'",
+					static_cast<void*>(a_actor),
+					std::to_underlying(a_armor.bipedObject),
+					a_armor.physicsXmlPath);
+				return true;
+			}
+			return false;
+		}
+
+		auto* loader = PhysicsXmlLoader::GetSingleton();
+		const auto selectedSummary = loader->LoadSummary(a_armor.physicsXmlPath);
+		if (!selectedSummary) {
+			spdlog::warn(
+				"customization close reload dropping armor slot because XML failed to load actor={} bipedObject={} xml='{}'",
+				static_cast<void*>(a_actor),
+				std::to_underlying(a_armor.bipedObject),
+				a_armor.physicsXmlPath);
+			return true;
+		}
+
+		const LifecycleEvent reloadEvent{
+			.type = LifecycleEventType::kArmorApplySkinnedObjects,
+			.actor = a_actor,
+			.biped = biped,
+			.bipObject = bipObject,
+			.bipedObject = a_armor.bipedObject,
+			.object = partClone,
+			.sourceObject = partClone,
+			.sourceRoot = partClone->IsNode(),
+			.physicsXmlPath = a_armor.physicsXmlPath,
+			.firstPerson = a_firstPerson,
+		};
+
+		auto& actorState = GetOrCreatePrototypeStateLocked(a_actor, a_firstPerson);
+		const auto clearedObject = ClearPrototypeGroupsForObjectLocked(actorState, partClone);
+		const auto clearedOverlappingBones = ClearPrototypeGroupsForBoneNamesLocked(actorState, selectedSummary->boneNames, PrototypeBuildDomain::kArmor);
+		spdlog::debug(
+			"customization close reload actor={} bipedObject={} object={} xml='{}' clearedObject={} overlappingBones={}",
+			static_cast<void*>(a_actor),
+			std::to_underlying(a_armor.bipedObject),
+			static_cast<void*>(partClone),
+			a_armor.physicsXmlPath,
+			clearedObject,
+			clearedOverlappingBones);
+		BuildPrototypeBodiesLocked(actorState, reloadEvent, *selectedSummary, a_armor.meshNameMap, PrototypeBuildDomain::kArmor);
+		RecordPrototypeArmorLocked(actorState, a_armor.bipedObject, a_armor.physicsXmlPath, a_armor.meshNameMap);
+		return FindPrototypeStateLocked(a_actor, a_firstPerson) != nullptr;
+	}
+
+	void Fo4PhysicsWorld::TryRebuildPendingActorsLocked(RE::Actor* a_actor)
+	{
+		if (characterCustomizationMenuDepth_ > 0) {
+			return;
+		}
+		if (pendingActorRebuilds_.empty()) {
+			customizationCloseReloadQueued_ = false;
+			return;
+		}
+		if (!InitializeLocked()) {
+			return;
+		}
+
+		for (auto it = pendingActorRebuilds_.begin(); it != pendingActorRebuilds_.end();) {
+			auto resolvedActor = it->actorHandle.get();
+			if (!resolvedActor) {
+				it = pendingActorRebuilds_.erase(it);
+				continue;
+			}
+
+			auto* actor = resolvedActor.get();
+			if (!actor) {
+				it = pendingActorRebuilds_.erase(it);
+				continue;
+			}
+			if (a_actor && actor != a_actor) {
+				++it;
+				continue;
+			}
+			if (FindPrototypeStateLocked(actor, it->firstPerson) && it->armors.empty()) {
+				it = pendingActorRebuilds_.erase(it);
+				continue;
+			}
+
+			if (it->customizationReload) {
+				if (it->armors.empty()) {
+					spdlog::debug(
+						"customization prototype armor reload pending actor={} firstPerson={} because no armor XML records are cached yet",
+						static_cast<void*>(actor),
+						it->firstPerson);
+					++it;
+					continue;
+				}
+
+				std::erase_if(it->armors, [&](const PendingActorRebuild::Armor& a_armor) {
+					return BuildPendingArmorReloadLocked(actor, it->firstPerson, a_armor);
+				});
+				if (it->armors.empty()) {
+					spdlog::debug(
+						"customization close reload complete actor={} firstPerson={}",
+						static_cast<void*>(actor),
+						it->firstPerson);
+					it = pendingActorRebuilds_.erase(it);
+					continue;
+				}
+
+				++it;
+				continue;
+			}
+
+			if (!it->armors.empty()) {
+				std::erase_if(it->armors, [&](const PendingActorRebuild::Armor& a_armor) {
+					return BuildPendingArmorReloadLocked(actor, it->firstPerson, a_armor);
+				});
+				if (it->armors.empty()) {
+					it = pendingActorRebuilds_.erase(it);
+					continue;
+				}
+			}
+
+			auto* root = actor->Get3D(it->firstPerson);
+			if (!root && !it->firstPerson) {
+				root = actor->Get3D();
+			}
+			if (!root) {
+				++it;
+				continue;
+			}
+
+			const LifecycleEvent rebuildEvent{
+				.type = LifecycleEventType::kActorSet3D,
+				.actor = actor,
+				.biped = actor->GetBiped(it->firstPerson).get(),
+				.object = root,
+				.firstPerson = it->firstPerson,
+			};
+			if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
+				spdlog::debug(
+					"processing pending prototype physics rebuild for actor={} root={} firstPerson={}",
+					static_cast<void*>(actor),
+					static_cast<void*>(root),
+					it->firstPerson);
+				BuildPrototypeForEventLocked(rebuildEvent);
+			}
+			if (FindPrototypeStateLocked(actor, it->firstPerson)) {
+				it = pendingActorRebuilds_.erase(it);
+				continue;
+			}
+
+			++it;
+		}
+
+		customizationCloseReloadQueued_ = std::ranges::any_of(pendingActorRebuilds_, [](const PendingActorRebuild& a_pending) {
+			return a_pending.customizationReload;
+		});
+	}
+
+	void Fo4PhysicsWorld::ClearPrototypeStatesForMenuRebuildLocked()
+	{
+		if (prototypeActors_.empty()) {
+			return;
+		}
+
+		std::vector<std::pair<RE::Actor*, bool>> rebuildActors;
+		rebuildActors.reserve(prototypeActors_.size());
+		for (auto& actorState : prototypeActors_) {
+			auto* actor = actorState.actor;
+			if (!actor) {
+				if (auto resolved = actorState.actorHandle.get()) {
+					actor = resolved.get();
+				}
+			}
+			if (actor) {
+				rebuildActors.emplace_back(actor, actorState.firstPerson);
+			}
+			ClearPrototypeStateLocked(actorState);
+		}
+		const auto clearedStates = prototypeActors_.size();
+		prototypeActors_.clear();
+		suspendedActors_.clear();
+		for (const auto& [actor, firstPerson] : rebuildActors) {
+			MarkPendingActorRebuildLocked(actor, firstPerson);
+		}
+		ResetStepClockLocked();
+		spdlog::debug(
+			"cleared {} prototype actor states for menu-driven model rebuild; queuedActors={}",
+			clearedStates,
+			rebuildActors.size());
+	}
+
+	void Fo4PhysicsWorld::ClearPrototypeStateLocked(PrototypeActorState& a_state, const bool a_restoreSkinSlots)
 	{
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
@@ -3891,6 +4510,24 @@ namespace Smp
 					dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
 				}
 			}
+		}
+
+		if (a_restoreSkinSlots) {
+			for (auto& prototypeBody : a_state.bodies) {
+				if (!prototypeBody.bone) {
+					continue;
+				}
+				for (const auto buildGroup : prototypeBody.buildGroups) {
+					prototypeBody.bone->RemoveSkinWorldTransformsForBuildGroup(buildGroup);
+				}
+				if (prototypeBody.buildGroup != 0) {
+					prototypeBody.bone->RemoveSkinWorldTransformsForBuildGroup(prototypeBody.buildGroup);
+				}
+			}
+		} else if (!a_state.bodies.empty()) {
+			spdlog::debug(
+				"skipped restoring prototype skin slots while clearing actor={} for model rebuild",
+				static_cast<void*>(a_state.actor));
 		}
 
 		for (auto& prototypeBody : a_state.bodies) {
@@ -4287,7 +4924,12 @@ namespace Smp
 				}
 				if (existing->bone) {
 					for (auto& skinWorld : matchedBone.skinWorldTransforms) {
-						existing->bone->AddSkinWorldTransform(skinWorld.skin.get(), skinWorld.index, buildGroup);
+						existing->bone->AddSkinWorldTransform(
+							skinWorld.skin.get(),
+							skinWorld.index,
+							buildGroup,
+							skinWorld.originalBone.get(),
+							skinWorld.originalWorldTransform);
 					}
 				}
 				continue;
@@ -4315,7 +4957,12 @@ namespace Smp
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(mass, motionState.get(), shape.get(), localInertia);
 			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, constructionInfo);
 			for (auto& skinWorld : matchedBone.skinWorldTransforms) {
-				bone->AddSkinWorldTransform(skinWorld.skin.get(), skinWorld.index, buildGroup);
+				bone->AddSkinWorldTransform(
+					skinWorld.skin.get(),
+					skinWorld.index,
+					buildGroup,
+					skinWorld.originalBone.get(),
+					skinWorld.originalWorldTransform);
 			}
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();

@@ -108,7 +108,12 @@ namespace Smp
 		g_unclampedResetAngle = std::max(a_unclampedResetAngle, 0.0F);
 	}
 
-	void Fo4SkinnedMeshBone::AddSkinWorldTransform(RE::BSSkin::Instance* a_skin, const std::uint32_t a_index, const std::uint64_t a_buildGroup)
+	void Fo4SkinnedMeshBone::AddSkinWorldTransform(
+		RE::BSSkin::Instance* a_skin,
+		const std::uint32_t a_index,
+		const std::uint64_t a_buildGroup,
+		RE::NiAVObject* a_originalBone,
+		RE::NiTransform* a_originalWorldTransform)
 	{
 		if (!a_skin || a_index >= a_skin->worldTransforms.size()) {
 			return;
@@ -123,6 +128,12 @@ namespace Smp
 			return a_slot.skin.get() == a_skin && a_slot.index == a_index && a_slot.buildGroup == a_buildGroup;
 		});
 		if (found != skinWorldTransforms_.end()) {
+			if (!found->originalBone && a_originalBone) {
+				found->originalBone = a_originalBone;
+			}
+			if (!found->originalWorldTransform && a_originalWorldTransform) {
+				found->originalWorldTransform = a_originalWorldTransform;
+			}
 			found->cached = transform;
 			return;
 		}
@@ -131,6 +142,8 @@ namespace Smp
 			.skin = a_skin,
 			.index = a_index,
 			.buildGroup = a_buildGroup,
+			.originalBone = a_originalBone,
+			.originalWorldTransform = a_originalWorldTransform,
 			.cached = transform,
 		});
 	}
@@ -141,7 +154,39 @@ namespace Smp
 			return;
 		}
 
-		std::erase_if(skinWorldTransforms_, [a_buildGroup](const SkinWorldTransformSlot& a_slot) {
+		std::erase_if(skinWorldTransforms_, [this, a_buildGroup](const SkinWorldTransformSlot& a_slot) {
+			if (a_slot.buildGroup == a_buildGroup && a_slot.skin) {
+				const auto keepRebound = std::ranges::any_of(skinWorldTransforms_, [&a_slot, a_buildGroup](const SkinWorldTransformSlot& a_other) {
+					return a_other.buildGroup != a_buildGroup &&
+						a_other.skin.get() == a_slot.skin.get() &&
+						a_other.index == a_slot.index;
+				});
+				if (keepRebound) {
+					return true;
+				}
+
+				const auto node = node_.get();
+				if (node && a_slot.index < a_slot.skin->bones.size()) {
+					auto*& bone = a_slot.skin->bones[a_slot.index];
+					if (bone == node && a_slot.originalBone) {
+						spdlog::debug(
+							"restored FO4 skin bone slot for '{}' buildGroup={} index={} skin={} node={} original={}",
+							m_name.c_str(),
+							a_buildGroup,
+							a_slot.index,
+							static_cast<void*>(a_slot.skin.get()),
+							static_cast<void*>(node),
+							static_cast<void*>(a_slot.originalBone.get()));
+						bone = a_slot.originalBone.get();
+					}
+				}
+				if (node && a_slot.index < a_slot.skin->worldTransforms.size()) {
+					auto*& worldTransform = a_slot.skin->worldTransforms[a_slot.index];
+					if (worldTransform == std::addressof(node->world) && a_slot.originalWorldTransform) {
+						worldTransform = a_slot.originalWorldTransform;
+					}
+				}
+			}
 			return a_slot.buildGroup == a_buildGroup;
 		});
 	}
