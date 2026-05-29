@@ -226,6 +226,22 @@ namespace
 		return Smp::FindMatchingPhysicsName(a_meshNames, geometryName).has_value();
 	}
 
+	bool IsValidNiObjectForIsNode(const RE::NiAVObject* a_object)
+	{
+		constexpr std::uintptr_t kCanonicalUserSpaceMax = 0x00007FFFFFFFFFFFULL;
+		if (!a_object || reinterpret_cast<std::uintptr_t>(a_object) > kCanonicalUserSpaceMax) {
+			return false;
+		}
+
+		const auto vtable = *reinterpret_cast<void* const* const*>(a_object);
+		if (!vtable || reinterpret_cast<std::uintptr_t>(vtable) > kCanonicalUserSpaceMax) {
+			return false;
+		}
+
+		const auto isNode = vtable[4];
+		return isNode && reinterpret_cast<std::uintptr_t>(isNode) <= kCanonicalUserSpaceMax;
+	}
+
 	void DecodeSkinBones(RE::BSSkin::Instance* a_skin, std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
 	{
 		if (!a_skin) {
@@ -250,6 +266,11 @@ namespace
 			Smp::Fo4DecodedSkinBone decoded;
 			if (!boneObject) {
 				++a_stats.nullBones;
+				a_bones.push_back(decoded);
+				continue;
+			}
+			if (!IsValidNiObjectForIsNode(boneObject)) {
+				++a_stats.nonNodeBones;
 				a_bones.push_back(decoded);
 				continue;
 			}

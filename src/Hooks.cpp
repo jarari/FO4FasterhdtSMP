@@ -771,7 +771,6 @@ namespace Hooks
 
 	void HookedUpdate3DModel(void* a_middleProcess, RE::Actor* a_actor, bool a_flag)
 	{
-		Smp::Fo4PhysicsWorld::GetSingleton()->PrepareActorForModelRebuild(a_actor);
 		OriginalUpdate3DModel(a_middleProcess, a_actor, a_flag);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorUpdate3DModel,

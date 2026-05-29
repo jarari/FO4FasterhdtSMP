@@ -77,7 +77,7 @@ namespace Smp
 		void RecordWritebackMetric(float a_writebackMs, WritebackSource a_source, bool a_wroteAny, bool a_skippedDuplicate);
 		void WriteBackPrototypeBodies(WritebackSource a_source = WritebackSource::kUnknown);
 		void WriteBackPrototypeBodies(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
-		void PrepareActorForModelRebuild(RE::Actor* a_actor);
+		void ProcessPendingRebuilds();
 
 		RE::BSEventNotifyControl ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>* a_source) override;
 		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_source) override;
@@ -146,6 +146,8 @@ namespace Smp
 			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 			std::string physicsXmlPath;
 			DefaultBBP::NameMap meshNameMap;
+			std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
+			std::vector<LifecycleMergedRootNode> preMergedRootNodes;
 		};
 
 		struct PrototypeActorState
@@ -172,17 +174,17 @@ namespace Smp
 
 		struct PendingActorRebuild
 		{
-			struct Armor
-			{
-				RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
-				std::string physicsXmlPath;
-				DefaultBBP::NameMap meshNameMap;
-			};
-
 			RE::ActorHandle actorHandle;
 			bool firstPerson{ false };
-			bool customizationReload{ false };
-			std::vector<Armor> armors;
+			std::uint32_t waitFrames{ 0 };
+			std::vector<PrototypeArmorRecord> armorRecords;
+		};
+
+		struct PendingHeadRebuild
+		{
+			RE::ActorHandle actorHandle;
+			std::uint32_t frameDelay{ 0 };
+			std::uint32_t waitFrames{ 0 };
 		};
 
 		PrototypeActorState* FindPrototypeStateLocked(RE::Actor* a_actor, bool a_firstPerson);
@@ -192,11 +194,25 @@ namespace Smp
 		void EnforceActorBudgetLocked();
 		void SuspendActorCandidateLocked(RE::Actor* a_actor);
 		void TryReactivateSuspendedActorsLocked();
-		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PendingActorRebuild::Armor> a_armors = {}, bool a_customizationReload = false);
-		void RecordPrototypeArmorLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::string a_physicsXmlPath, const DefaultBBP::NameMap& a_meshNameMap);
-		bool BuildPendingArmorReloadLocked(RE::Actor* a_actor, bool a_firstPerson, const PendingActorRebuild::Armor& a_armor);
+		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
+		void MarkPendingHeadRebuildLocked(RE::Actor* a_actor);
+		void SchedulePendingRebuildTaskLocked();
+		bool HasActiveOrPendingActorRebuildLocked(RE::Actor* a_actor);
+		bool HasPendingArmorRecordRebuildLocked(RE::Actor* a_actor);
+		void RecordPrototypeArmorLocked(
+			PrototypeActorState& a_state,
+			RE::BIPED_OBJECT a_bipedObject,
+			std::string a_physicsXmlPath,
+			const DefaultBBP::NameMap& a_meshNameMap,
+			const std::vector<LifecycleMergedSkeletonNode>& a_preMergedSkeletonNodes,
+			const std::vector<LifecycleMergedRootNode>& a_preMergedRootNodes);
+		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords);
 		void TryRebuildPendingActorsLocked(RE::Actor* a_actor = nullptr);
+		void TryRebuildPendingHeadsLocked();
+		void SuspendPrototypeStatesForCustomizationMenuLocked();
+		void ReloadPrototypeStatesForCustomizationMenuLocked();
 		void ClearPrototypeStatesForMenuRebuildLocked();
+		void SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state);
 		void ClearPrototypeStateLocked(PrototypeActorState& a_state, bool a_restoreSkinSlots = true);
 		bool ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object);
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
@@ -257,8 +273,10 @@ namespace Smp
 		std::vector<PrototypeActorState> prototypeActors_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
+		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		bool customizationCloseReloadQueued_{ false };
+		bool pendingRebuildTaskQueued_{ false };
 		bool registered_{ false };
 	};
 }
