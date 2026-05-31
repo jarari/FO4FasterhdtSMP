@@ -67,6 +67,7 @@ namespace
 	constexpr float kGravityAcceleration = -9.80665F * kGameUnitsPerMeter;
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
 	constexpr std::uint32_t kAttachResetReadFrames = 8;
+	constexpr std::uint64_t kBuildSoftSuspendSettleFrames = 1;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
@@ -1229,6 +1230,7 @@ namespace
 		RE::NiPointer<RE::NiAVObject> node;
 		RE::NiNode* sourceNode{ nullptr };
 		std::string originalName;
+		std::string recordParentName;
 		RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
 		bool hasLocalToParent{ false };
 		bool recordMergeParentBinding{ false };
@@ -2474,6 +2476,19 @@ namespace
 		bool fromConstraint{ false };
 	};
 
+	RE::NiTransform BuildLocalToSourceAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor)
+	{
+		if (!a_node) {
+			return RE::NiTransform::IDENTITY;
+		}
+
+		auto localToAncestor = a_node->local;
+		for (auto* parent = a_node->parent; parent && parent != a_ancestor; parent = parent->parent) {
+			localToAncestor = parent->local * localToAncestor;
+		}
+		return localToAncestor;
+	}
+
 	RE::NiNode* FindTrustedActorSkeletonNodeForName(
 		RE::NiAVObject* a_actorRoot,
 		const std::string_view a_name,
@@ -2529,6 +2544,8 @@ namespace
 			if (auto* actorParent = FindTrustedActorSkeletonNodeForName(a_actorRoot, sourceParentName, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes)) {
 				result.parent = actorParent;
 				result.parentName = std::string(sourceParentName);
+				result.localToParent = BuildLocalToSourceAncestor(a_source, sourceParent);
+				result.hasLocalToParent = true;
 				result.recordBinding = true;
 				return result;
 			}
@@ -2641,21 +2658,22 @@ namespace
 			const auto parentIsPluginClone = IsCurrentMergeCloneNode(a_renamedNodes, a_cloneParent);
 			auto* clonedNode = CloneMergedNodeOnly(a_source, a_prefix, a_renamedNodes);
 			if (clonedNode) {
-				auto resolution = parentIsPluginClone ?
-					MergeParentResolution{ .parent = a_cloneParent } :
-						ResolveMergeParentForArmorBone(
-							a_cloneParent,
-							a_source,
-							a_actorRoot,
-							a_actorSkeletonLookup,
-							a_summary,
-						a_mergeParentBindings,
-						a_actorSkeletonSearchExclusions,
-						a_knownArmorNodes,
-						a_trustedActorSkeletonNodes);
-				auto* cloneParent = resolution.parent ? resolution.parent : a_cloneParent;
+				auto resolution = ResolveMergeParentForArmorBone(
+					a_cloneParent,
+					a_source,
+					a_actorRoot,
+					a_actorSkeletonLookup,
+					a_summary,
+					a_mergeParentBindings,
+					a_actorSkeletonSearchExclusions,
+					a_knownArmorNodes,
+					a_trustedActorSkeletonNodes);
+				auto* cloneParent = parentIsPluginClone ? a_cloneParent : (resolution.parent ? resolution.parent : a_cloneParent);
 				cloneParent->AttachChild(clonedNode, false);
-				if (resolution.hasLocalToParent) {
+				if (parentIsPluginClone) {
+					clonedNode->local = a_source->local;
+					UpdateNodeWorldFromLocal(clonedNode);
+				} else if (resolution.hasLocalToParent) {
 					clonedNode->local = resolution.localToParent;
 					UpdateNodeWorldFromLocal(clonedNode);
 				} else if (resolution.fromStoredBinding || resolution.fromConstraint || (resolution.recordBinding && cloneParent != a_cloneParent)) {
@@ -2669,12 +2687,14 @@ namespace
 					.node = clonedNode,
 					.sourceNode = a_source,
 					.originalName = std::string(sourceName),
-					.localToParent = clonedNode->local,
+					.recordParentName = resolution.recordBinding ? resolution.parentName : std::string{},
+					.localToParent = resolution.hasLocalToParent ? resolution.localToParent : clonedNode->local,
 					.hasLocalToParent = true,
-					.recordMergeParentBinding = resolution.recordBinding && !parentIsPluginClone,
+					.recordMergeParentBinding = resolution.recordBinding,
 				});
+				const auto& recordLocal = resolution.hasLocalToParent ? resolution.localToParent : clonedNode->local;
 				spdlog::debug(
-					"cloned armor-owned XML source bone '{}' as plugin-owned prefixed node='{}' node={} under merge parent={} parentName='{}' prefix='{}' storedParent={} constraintParent={} recordBinding={} localToParent=({:.3f},{:.3f},{:.3f})",
+					"cloned armor-owned XML source bone '{}' as plugin-owned prefixed node='{}' node={} under merge parent={} parentName='{}' prefix='{}' storedParent={} constraintParent={} recordBinding={} recordParent='{}' actualLocal=({:.3f},{:.3f},{:.3f}) recordLocal=({:.3f},{:.3f},{:.3f})",
 					sourceName,
 					std::string_view(clonedNode->GetName()),
 					static_cast<void*>(clonedNode),
@@ -2683,10 +2703,14 @@ namespace
 					a_prefix,
 					resolution.fromStoredBinding,
 					resolution.fromConstraint,
-					resolution.recordBinding && !parentIsPluginClone,
+					resolution.recordBinding,
+					resolution.recordBinding ? std::string_view(resolution.parentName) : std::string_view{},
 					clonedNode->local.translate.x,
 					clonedNode->local.translate.y,
-					clonedNode->local.translate.z);
+					clonedNode->local.translate.z,
+					recordLocal.translate.x,
+					recordLocal.translate.y,
+					recordLocal.translate.z);
 				for (auto& child : a_source->children) {
 					if (auto* sourceChild = child ? child->IsNode() : nullptr) {
 						CloneSourceSkeletonIntoPartTree(clonedNode, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
@@ -5040,6 +5064,9 @@ namespace Smp
 					},
 				});
 			}
+			if (armorAttach) {
+				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, scopedEvent);
+			}
 			return buildResult.succeeded;
 		};
 
@@ -5260,24 +5287,43 @@ namespace Smp
 			return false;
 		}
 
+		const auto buildSuspendedArmorCandidate = ShouldBuildSuspendedArmorCandidateLocked(a_event);
 		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 			return a_state.HasActiveRuntime();
 		}));
 		if (FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) == nullptr && activeActors >= currentMaxActiveActors_) {
-			spdlog::debug(
-				"skipping prototype physics candidate {} for actor={} because active actor budget is full ({}/{})",
-				ToString(a_event.type),
-				static_cast<void*>(a_event.actor),
-				activeActors,
-				currentMaxActiveActors_);
-			SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
-			return false;
+			if (buildSuspendedArmorCandidate) {
+				spdlog::debug(
+					"allowing out-of-budget SMP armor candidate {} for actor={} to build directly into soft suspension ({}/{})",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					activeActors,
+					currentMaxActiveActors_);
+			} else {
+				spdlog::debug(
+					"skipping prototype physics candidate {} for actor={} because active actor budget is full ({}/{})",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					activeActors,
+					currentMaxActiveActors_);
+				SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
+				return false;
+			}
 		}
 
 		if (player && maxActorDistance_ > 0.0F) {
 			const auto distanceSquared = DistanceSquared(a_event.actor->GetPosition(), player->GetPosition());
 			const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
 			if (distanceSquared > maxDistanceSquared) {
+				if (buildSuspendedArmorCandidate) {
+					spdlog::debug(
+						"allowing out-of-range SMP armor candidate {} for actor={} to build directly into soft suspension distanceSq={} maxDistanceSq={}",
+						ToString(a_event.type),
+						static_cast<void*>(a_event.actor),
+						distanceSquared,
+						maxDistanceSquared);
+					return true;
+				}
 				spdlog::trace(
 					"skipping prototype physics candidate {} for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
 					ToString(a_event.type),
@@ -5360,6 +5406,9 @@ namespace Smp
 				const auto distanceSquared = DistanceSquared(a_state.actor->GetPosition(), player->GetPosition());
 				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
 				if (distanceSquared > maxDistanceSquared) {
+					if (IsBuildSoftSuspendSettlePendingLocked(a_state)) {
+						return true;
+					}
 					if (a_state.HasRuntime() && !a_state.runtimeSoftSuspended) {
 						spdlog::debug(
 							"soft-suspending prototype physics state for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
@@ -5370,6 +5419,7 @@ namespace Smp
 					}
 					return true;
 				}
+				a_state.softSuspendAfterSimulationFrame = 0;
 			}
 		}
 
@@ -5408,6 +5458,9 @@ namespace Smp
 				if (!it->HasActiveRuntime()) {
 					continue;
 				}
+				if (IsBuildSoftSuspendSettlePendingLocked(*it)) {
+					continue;
+				}
 				auto resolvedActor = it->actorHandle.get();
 				if (!resolvedActor || resolvedActor.get() != it->actor) {
 					continue;
@@ -5438,6 +5491,65 @@ namespace Smp
 			SoftSuspendPrototypeRuntimeLocked(*victim);
 			--activeActors;
 		}
+	}
+
+	bool Fo4PhysicsWorld::ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const
+	{
+		return IsArmorAttachCandidate(a_event.type) && !a_event.physicsXmlPath.empty();
+	}
+
+	bool Fo4PhysicsWorld::IsBuildSoftSuspendSettlePendingLocked(const PrototypeActorState& a_state) const
+	{
+		return a_state.softSuspendAfterSimulationFrame != 0 &&
+			simulationFrame_ < a_state.softSuspendAfterSimulationFrame;
+	}
+
+	void Fo4PhysicsWorld::SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event)
+	{
+		if (!a_state.HasActiveRuntime()) {
+			return;
+		}
+
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		if (a_state.actor == player) {
+			return;
+		}
+
+		bool shouldSuspend = false;
+		const char* reason = nullptr;
+		if (player && maxActorDistance_ > 0.0F) {
+			const auto distanceSquared = DistanceSquared(a_event.actor->GetPosition(), player->GetPosition());
+			const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
+			if (distanceSquared > maxDistanceSquared) {
+				shouldSuspend = true;
+				reason = "distance";
+			}
+		}
+
+		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_candidate) {
+			return a_candidate.HasActiveRuntime();
+		}));
+		if (!shouldSuspend && activeActors > currentMaxActiveActors_) {
+			shouldSuspend = true;
+			reason = "budget";
+		}
+
+		if (!shouldSuspend) {
+			return;
+		}
+
+		spdlog::debug(
+			"scheduling freshly built armor prototype runtime for soft suspension after settle actor={} reason={} activeActors={} actorCap={} event={} currentFrame={} suspendAfterFrame={}",
+			static_cast<void*>(a_state.actor),
+			reason ? reason : "unknown",
+			activeActors,
+			currentMaxActiveActors_,
+			ToString(a_event.type),
+			simulationFrame_,
+			simulationFrame_ + kBuildSoftSuspendSettleFrames);
+		a_state.softSuspendAfterSimulationFrame = std::max(
+			a_state.softSuspendAfterSimulationFrame,
+			simulationFrame_ + kBuildSoftSuspendSettleFrames);
 	}
 
 	void Fo4PhysicsWorld::SuspendActorCandidateLocked(
@@ -5663,6 +5775,13 @@ namespace Smp
 		if (a_record.bipedObject == RE::BIPED_OBJECT::kTotal || a_record.physicsXmlPath.empty()) {
 			return;
 		}
+		auto appendBuildGroups = [](std::vector<std::uint64_t>& a_target, const std::vector<std::uint64_t>& a_source) {
+			for (const auto buildGroup : a_source) {
+				if (buildGroup != 0 && std::ranges::find(a_target, buildGroup) == a_target.end()) {
+					a_target.push_back(buildGroup);
+				}
+			}
+		};
 		const auto normalizedXml = ConfigPaths::LowerString(a_record.physicsXmlPath);
 		auto existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const PrototypeArmorRecord& a_existing) {
 			return a_existing.bipedObject == a_record.bipedObject &&
@@ -5686,6 +5805,7 @@ namespace Smp
 			if (a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
 				a_record.mergeParentBindings = existing->mergeParentBindings;
 			}
+			appendBuildGroups(a_record.buildGroups, existing->buildGroups);
 			*existing = std::move(a_record);
 		} else {
 			a_records.push_back(std::move(a_record));
@@ -5961,7 +6081,9 @@ namespace Smp
 		if (a_buildGroup != 0) {
 			for (const auto& mergedNode : a_state.mergedNodes) {
 				auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
-				const auto parentName = mergedNode.parent ? std::string(mergedNode.parent->GetName()) : std::string{};
+				const auto parentName = !mergedNode.recordParentName.empty() ?
+					mergedNode.recordParentName :
+					(mergedNode.parent ? std::string(mergedNode.parent->GetName()) : std::string{});
 				if (mergedNode.buildGroup != a_buildGroup || !mergedNode.recordMergeParentBinding || !node || parentName.empty()) {
 					continue;
 				}
@@ -5994,6 +6116,11 @@ namespace Smp
 		}
 
 		const auto normalizedXml = ConfigPaths::LowerString(a_physicsXmlPath);
+		const auto appendBuildGroup = [](std::vector<std::uint64_t>& a_buildGroups, const std::uint64_t a_buildGroup) {
+			if (a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) == a_buildGroups.end()) {
+				a_buildGroups.push_back(a_buildGroup);
+			}
+		};
 		auto existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject &&
 				a_record.attachedObject.get() == a_attachedObject &&
@@ -6012,7 +6139,10 @@ namespace Smp
 				existing->trustedActorSkeletonNodes = std::move(a_trustedActorSkeletonNodes);
 			}
 			existing->mergeParentBindings = std::move(mergeParentBindings);
+			appendBuildGroup(existing->buildGroups, a_buildGroup);
 		} else {
+			std::vector<std::uint64_t> buildGroups;
+			appendBuildGroup(buildGroups, a_buildGroup);
 			a_state.armorRecords.push_back({
 				.bipedObject = a_bipedObject,
 				.physicsXmlPath = std::move(a_physicsXmlPath),
@@ -6022,6 +6152,7 @@ namespace Smp
 				.mergeSourceObject = a_mergeSourceObject,
 				.trustedActorSkeletonNodes = std::move(a_trustedActorSkeletonNodes),
 				.mergeParentBindings = std::move(mergeParentBindings),
+				.buildGroups = std::move(buildGroups),
 			});
 		}
 	}
@@ -6280,6 +6411,7 @@ namespace Smp
 					record.mergeSourceObject.get(),
 					record.trustedActorSkeletonNodes,
 					buildResult.buildGroup);
+				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, resumeEvent);
 			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
 				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
 				spdlog::debug(
@@ -6695,6 +6827,7 @@ namespace Smp
 		a_state.resetReadFrames = 0;
 		a_state.runtimeSuspended = true;
 		a_state.runtimeSoftSuspended = false;
+		a_state.softSuspendAfterSimulationFrame = 0;
 		spdlog::debug(
 			"suspended prototype runtime for actor={} bodies={} meshes={} constraints={} capturedSkinSlots={} preservedMergedNodes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
@@ -6752,6 +6885,7 @@ namespace Smp
 		a_state.currentWindFactor = 0.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = true;
+		a_state.softSuspendAfterSimulationFrame = 0;
 		ResetStepClockLocked();
 		spdlog::debug(
 			"soft-suspended prototype runtime for actor={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} runtimes={} armorRecords={}",
@@ -6810,6 +6944,7 @@ namespace Smp
 
 		a_state.runtimeSoftSuspended = false;
 		a_state.runtimeSuspended = false;
+		a_state.softSuspendAfterSimulationFrame = 0;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.resetReadFrames = std::max(a_state.resetReadFrames, kAttachResetReadFrames);
@@ -6999,6 +7134,7 @@ namespace Smp
 		a_state.currentWindFactor = 1.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
+		a_state.softSuspendAfterSimulationFrame = 0;
 		a_state.faceNode = nullptr;
 		a_state.attachmentRecords.clear();
 		a_state.runtimes.clear();
@@ -7404,18 +7540,35 @@ namespace Smp
 			a_record.sourceObject = nullptr;
 			return true;
 		});
+		const auto armorRecordCount = std::erase_if(a_state.armorRecords, [&containsGroup](PrototypeArmorRecord& a_record) {
+			if (a_record.buildGroups.empty()) {
+				return false;
+			}
+			std::erase_if(a_record.buildGroups, [&containsGroup](const std::uint64_t a_buildGroup) {
+				return containsGroup(a_buildGroup);
+			});
+			if (!a_record.buildGroups.empty()) {
+				return false;
+			}
+			a_record.attachedObject = nullptr;
+			a_record.sourceObject = nullptr;
+			a_record.mergeSourceObject = nullptr;
+			return true;
+		});
 		if (!a_state.HasRuntime()) {
 			a_state.runtimeSoftSuspended = false;
+			a_state.softSuspendAfterSimulationFrame = 0;
 		}
 
 		spdlog::debug(
-			"cleared prototype physics groups={} runtimes={} bodies={} meshes={} constraints={} mergedNodes={} for actor={}",
+			"cleared prototype physics groups={} runtimes={} bodies={} meshes={} constraints={} mergedNodes={} armorRecords={} for actor={}",
 			a_buildGroups.size(),
 			runtimeCount,
 			bodyCount,
 			meshCount,
 			constraintCount,
 			mergedNodeCount,
+			armorRecordCount,
 			static_cast<void*>(a_state.actor));
 	}
 
@@ -7688,6 +7841,7 @@ namespace Smp
 
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
+		a_state.softSuspendAfterSimulationFrame = 0;
 		auto meshNames = BuildMeshMatchNames(a_summary, a_meshNameMap);
 		if (a_summary.boneNames.empty() && meshNames.empty()) {
 			spdlog::debug("prototype physics XML has no named bones or mesh descriptors to match");
@@ -8112,6 +8266,7 @@ namespace Smp
 				.parent = mergedRoot.parent,
 				.node = mergedRoot.node,
 				.sourceName = mergedRoot.originalName,
+				.recordParentName = mergedRoot.recordParentName,
 				.localToParent = mergedRoot.localToParent,
 				.hasLocalToParent = mergedRoot.hasLocalToParent,
 				.recordMergeParentBinding = mergedRoot.recordMergeParentBinding,

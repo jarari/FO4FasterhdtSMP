@@ -147,6 +147,7 @@ namespace Smp
 			RE::NiNode* parent{ nullptr };
 			RE::NiPointer<RE::NiAVObject> node;
 			std::string sourceName;
+			std::string recordParentName;
 			RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
 			bool hasLocalToParent{ false };
 			bool recordMergeParentBinding{ false };
@@ -162,6 +163,7 @@ namespace Smp
 			RE::NiPointer<RE::NiAVObject> mergeSourceObject;
 			std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
 			std::vector<MergeParentBinding> mergeParentBindings;
+			std::vector<std::uint64_t> buildGroups;
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
 
@@ -209,6 +211,7 @@ namespace Smp
 			float currentWindFactor{ 1.0F };
 			bool runtimeSuspended{ false };
 			bool runtimeSoftSuspended{ false };
+			std::uint64_t softSuspendAfterSimulationFrame{ 0 };
 			RE::NiPointer<RE::NiAVObject> faceNode;
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
@@ -263,6 +266,9 @@ namespace Smp
 		void SuspendActorCandidateLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
 		void TryReactivateSuspendedActorsLocked();
 		void TryReactivateSuspendedPrototypeStatesLocked();
+		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
+		bool IsBuildSoftSuspendSettlePendingLocked(const PrototypeActorState& a_state) const;
+		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);
