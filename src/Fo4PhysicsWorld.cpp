@@ -66,6 +66,8 @@ namespace
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
 	constexpr std::uint32_t kAttachResetReadFrames = 8;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
+	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
+	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
 	constexpr std::uint64_t kPendingRebuildRetryIntervalFrames = 15;
 	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 	using Clock = std::chrono::steady_clock;
@@ -318,6 +320,64 @@ namespace
 		}
 	}
 
+	struct PendingCpuCopyExtraction
+	{
+		bool pending{ false };
+		std::uint32_t matchedGeometries{ 0 };
+		std::uint32_t pendingVertexCopies{ 0 };
+		std::uint32_t pendingIndexCopies{ 0 };
+	};
+
+	bool HasPendingCpuCopyExtraction(const Smp::Fo4MeshExtractionResult& a_extraction)
+	{
+		return a_extraction.stats.matchedGeometries > 0 &&
+			(a_extraction.stats.pendingVertexCopies > 0 || a_extraction.stats.pendingIndexCopies > 0);
+	}
+
+	void AccumulatePendingCpuCopy(PendingCpuCopyExtraction& a_pending, const Smp::Fo4MeshExtractionResult& a_extraction)
+	{
+		if (!HasPendingCpuCopyExtraction(a_extraction)) {
+			return;
+		}
+
+		a_pending.pending = true;
+		a_pending.matchedGeometries += a_extraction.stats.matchedGeometries;
+		a_pending.pendingVertexCopies += a_extraction.stats.pendingVertexCopies;
+		a_pending.pendingIndexCopies += a_extraction.stats.pendingIndexCopies;
+	}
+
+	PendingCpuCopyExtraction FindPendingPrototypeMeshCpuCopy(const Smp::LifecycleEvent& a_event, const std::vector<std::string>& a_meshNames)
+	{
+		PendingCpuCopyExtraction result;
+		if (a_meshNames.empty()) {
+			return result;
+		}
+
+		auto extraction = ExtractSkinnedMeshes(a_event.object, a_meshNames);
+		AccumulatePendingCpuCopy(result, extraction);
+		if (result.pending || !extraction.meshes.empty()) {
+			return result;
+		}
+
+		const std::array fallbackRoots{
+			std::pair{ "merge-source", a_event.mergeSourceObject },
+			std::pair{ "source-object", a_event.sourceObject },
+			std::pair{ "source-root", static_cast<RE::NiAVObject*>(a_event.sourceRoot) },
+		};
+		for (const auto& [sourceName, root] : fallbackRoots) {
+			if (!root || root == a_event.object) {
+				continue;
+			}
+
+			auto fallbackExtraction = ExtractSkinnedMeshes(root, a_meshNames);
+			AccumulatePendingCpuCopy(result, fallbackExtraction);
+			if (result.pending || !fallbackExtraction.meshes.empty()) {
+				return result;
+			}
+		}
+
+		return result;
+	}
 	std::string NormalizeHeadpartKey(std::string a_value)
 	{
 		a_value = Smp::ConfigPaths::LowerString(Smp::ConfigPaths::Trim(std::move(a_value)));
@@ -4011,15 +4071,28 @@ namespace Smp
 						clearedOverlappingBones);
 				}
 			}
-			BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor);
-			RecordPrototypeArmorLocked(
-				actorState,
-				scopedEvent.bipedObject,
-				selectedXml,
-				a_selection.meshNameMap,
-				scopedEvent.preMergedSkeletonNodes,
-				scopedEvent.preMergedRootNodes);
-			return true;
+			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor);
+			if (buildResult.succeeded) {
+				RecordPrototypeArmorLocked(
+					actorState,
+					scopedEvent.bipedObject,
+					selectedXml,
+					a_selection.meshNameMap,
+					scopedEvent.preMergedSkeletonNodes,
+					scopedEvent.preMergedRootNodes);
+			} else if (armorAttach && buildResult.cpuCopyPending && a_event.actor) {
+				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::vector<PrototypeArmorRecord>{
+					PrototypeArmorRecord{
+						.bipedObject = scopedEvent.bipedObject,
+						.physicsXmlPath = selectedXml,
+						.meshNameMap = a_selection.meshNameMap,
+						.preMergedSkeletonNodes = scopedEvent.preMergedSkeletonNodes,
+						.preMergedRootNodes = scopedEvent.preMergedRootNodes,
+						.cpuCopyRetryCount = 1,
+					},
+				});
+			}
+			return buildResult.succeeded;
 		};
 
 		if (!armorAttach) {
@@ -4199,8 +4272,10 @@ namespace Smp
 					static_cast<void*>(candidate.object),
 					selectedXml);
 			}
-			BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
-			++built;
+			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
+			if (buildResult.succeeded) {
+				++built;
+			}
 		}
 
 		spdlog::debug(
@@ -4639,6 +4714,10 @@ namespace Smp
 			return;
 		}
 
+		const auto requestedDelay = std::ranges::any_of(a_armorRecords, [](const PrototypeArmorRecord& a_record) {
+			return a_record.cpuCopyRetryCount > 0;
+		}) ? kCpuCopyPendingRetryDelayTasks : 0U;
+
 		for (auto& pending : pendingActorRebuilds_) {
 			auto resolvedActor = pending.actorHandle.get();
 			if (resolvedActor && resolvedActor.get() == a_actor && pending.firstPerson == a_firstPerson) {
@@ -4652,6 +4731,7 @@ namespace Smp
 						pending.armorRecords.push_back(std::move(record));
 					}
 				}
+				pending.frameDelay = std::max(pending.frameDelay, requestedDelay);
 				SchedulePendingRebuildTaskLocked();
 				return;
 			}
@@ -4661,15 +4741,16 @@ namespace Smp
 			.actorHandle = handle,
 			.firstPerson = a_firstPerson,
 			.armorRecords = std::move(a_armorRecords),
+			.frameDelay = requestedDelay,
 		});
 		SchedulePendingRebuildTaskLocked();
 		spdlog::debug(
-			"queued pending prototype physics rebuild for actor={} firstPerson={} armorRecords={}",
+			"queued pending prototype physics rebuild for actor={} firstPerson={} armorRecords={} delayTasks={}",
 			static_cast<void*>(a_actor),
 			a_firstPerson,
-			pendingActorRebuilds_.back().armorRecords.size());
+			pendingActorRebuilds_.back().armorRecords.size(),
+			pendingActorRebuilds_.back().frameDelay);
 	}
-
 	void Fo4PhysicsWorld::MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event)
 	{
 		if (!a_event.actor) {
@@ -4817,7 +4898,7 @@ namespace Smp
 		}
 	}
 
-	bool Fo4PhysicsWorld::RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, const bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords)
+	bool Fo4PhysicsWorld::RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, const bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords, std::uint32_t* a_retryDelay)
 	{
 		if (!a_actor) {
 			a_armorRecords.clear();
@@ -4833,7 +4914,7 @@ namespace Smp
 		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
-		std::erase_if(a_armorRecords, [&](const PrototypeArmorRecord& a_record) {
+		std::erase_if(a_armorRecords, [&](PrototypeArmorRecord& a_record) {
 			if (a_record.bipedObject == RE::BIPED_OBJECT::kTotal || a_record.physicsXmlPath.empty()) {
 				return true;
 			}
@@ -4879,20 +4960,40 @@ namespace Smp
 				a_record.physicsXmlPath,
 				clearedObject,
 				clearedOverlappingBones);
-			BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, a_record.meshNameMap, PrototypeBuildDomain::kArmor);
-			RecordPrototypeArmorLocked(
-				actorState,
-				a_record.bipedObject,
-				a_record.physicsXmlPath,
-				a_record.meshNameMap,
-				a_record.preMergedSkeletonNodes,
-				a_record.preMergedRootNodes);
+			const auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, a_record.meshNameMap, PrototypeBuildDomain::kArmor);
+			if (buildResult.succeeded) {
+				RecordPrototypeArmorLocked(actorState, a_record.bipedObject, a_record.physicsXmlPath, a_record.meshNameMap, a_record.preMergedSkeletonNodes, a_record.preMergedRootNodes);
+				return true;
+			}
+			if (buildResult.cpuCopyPending) {
+				if (a_record.cpuCopyRetryCount < kCpuCopyPendingMaxRetries) {
+					++a_record.cpuCopyRetryCount;
+					if (a_retryDelay) {
+						*a_retryDelay = std::max(*a_retryDelay, kCpuCopyPendingRetryDelayTasks);
+					}
+					spdlog::debug(
+						"retrying pending prototype mesh CPU copy actor={} bipedObject={} object={} attempt={}/{} delayTasks={}",
+						static_cast<void*>(a_actor),
+						std::to_underlying(a_record.bipedObject),
+						static_cast<void*>(partClone),
+						a_record.cpuCopyRetryCount,
+						kCpuCopyPendingMaxRetries,
+						a_retryDelay ? *a_retryDelay : 0U);
+					return false;
+				}
+				spdlog::warn(
+					"giving up pending prototype mesh CPU copy actor={} bipedObject={} object={} attempts={} xml='{}'",
+					static_cast<void*>(a_actor),
+					std::to_underlying(a_record.bipedObject),
+					static_cast<void*>(partClone),
+					a_record.cpuCopyRetryCount,
+					a_record.physicsXmlPath);
+			}
 			return true;
 		});
 
 		return a_armorRecords.empty();
 	}
-
 	void Fo4PhysicsWorld::TryRebuildPendingActorsLocked(RE::Actor* a_actor)
 	{
 		if (characterCustomizationMenuDepth_ > 0) {
@@ -4923,7 +5024,13 @@ namespace Smp
 			}
 
 			if (!it->armorRecords.empty()) {
-				if (!RebuildPendingArmorRecordsLocked(actor, it->firstPerson, it->armorRecords)) {
+				if (it->frameDelay > 0) {
+					--it->frameDelay;
+					++it;
+					continue;
+				}
+
+				if (!RebuildPendingArmorRecordsLocked(actor, it->firstPerson, it->armorRecords, std::addressof(it->frameDelay))) {
 					++it;
 					continue;
 				}
@@ -5522,13 +5629,29 @@ namespace Smp
 		spdlog::debug("loading menu resume reset {} prototype physics bodies to current node poses", resetBodies);
 	}
 
-	void Fo4PhysicsWorld::BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, const PrototypeBuildDomain a_domain)
+	Fo4PhysicsWorld::PrototypeBuildResult Fo4PhysicsWorld::BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, const PrototypeBuildDomain a_domain)
 	{
+		PrototypeBuildResult result;
 		a_state.runtimeSuspended = false;
 		auto meshNames = BuildMeshMatchNames(a_summary, a_meshNameMap);
 		if (a_summary.boneNames.empty() && meshNames.empty()) {
 			spdlog::debug("prototype physics XML has no named bones or mesh descriptors to match");
-			return;
+			return result;
+		}
+
+		if (a_domain == PrototypeBuildDomain::kArmor && !meshNames.empty()) {
+			const auto pendingCpuCopy = FindPendingPrototypeMeshCpuCopy(a_event, meshNames);
+			if (pendingCpuCopy.pending) {
+				result.cpuCopyPending = true;
+				spdlog::debug(
+					"prototype mesh extraction delayed for pending CPU copy actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+					static_cast<void*>(a_state.actor),
+					static_cast<void*>(a_event.object),
+					pendingCpuCopy.matchedGeometries,
+					pendingCpuCopy.pendingVertexCopies,
+					pendingCpuCopy.pendingIndexCopies);
+				return result;
+			}
 		}
 
 		std::vector<MatchedSkinBone> matchedBones;
@@ -5642,7 +5765,7 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 			RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
 			DetachMergedRootNodes(mergedRootNodes);
-			return;
+			return result;
 		}
 
 		std::uint32_t created = 0;
@@ -5824,6 +5947,8 @@ namespace Smp
 			matchedUnderActorRoot,
 			matchedUnderAttachedObject,
 			matchedBones.size());
+		result.succeeded = true;
+		return result;
 	}
 
 	void Fo4PhysicsWorld::ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, const std::uint64_t a_buildGroup)

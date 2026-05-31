@@ -148,6 +148,13 @@ namespace Smp
 			DefaultBBP::NameMap meshNameMap;
 			std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
 			std::vector<LifecycleMergedRootNode> preMergedRootNodes;
+			std::uint32_t cpuCopyRetryCount{ 0 };
+		};
+
+		struct PrototypeBuildResult
+		{
+			bool cpuCopyPending{ false };
+			bool succeeded{ false };
 		};
 
 		struct PrototypeActorState
@@ -188,6 +195,7 @@ namespace Smp
 			RE::ActorHandle actorHandle;
 			bool firstPerson{ false };
 			std::vector<PrototypeArmorRecord> armorRecords;
+			std::uint32_t frameDelay{ 0 };
 		};
 
 		struct PendingHeadRebuild
@@ -220,7 +228,7 @@ namespace Smp
 			const DefaultBBP::NameMap& a_meshNameMap,
 			const std::vector<LifecycleMergedSkeletonNode>& a_preMergedSkeletonNodes,
 			const std::vector<LifecycleMergedRootNode>& a_preMergedRootNodes);
-		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords);
+		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords, std::uint32_t* a_retryDelay = nullptr);
 		void TryRebuildPendingActorsLocked(RE::Actor* a_actor = nullptr);
 		void TryRebuildPendingHeadsLocked();
 		void SuspendPrototypeStatesForCustomizationMenuLocked();
@@ -234,7 +242,7 @@ namespace Smp
 		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
-		void BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
+		PrototypeBuildResult BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
 		void BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
 		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);

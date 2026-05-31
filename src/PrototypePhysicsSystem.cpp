@@ -1,6 +1,7 @@
 #include "PrototypePhysicsSystem.h"
 
 #include "BSSkin.h"
+#include "Fo4CpuBuffer.h"
 #include "Fo4MeshExtractor.h"
 #include "RE/B/BSGraphics.h"
 #include "RE/B/BSTriShape.h"
@@ -72,14 +73,14 @@ namespace
 		}
 
 		const auto vertexBytes = static_cast<std::uint64_t>(vertexStride) * triShape->numVertices;
-		const auto availableVertexBytes = vertexBuffer->dataSize > vertexBuffer->dataOffset ? vertexBuffer->dataSize - vertexBuffer->dataOffset : 0;
+		const auto availableVertexBytes = Smp::Fo4CpuBuffer::GetAvailableBytes(vertexBuffer);
 		if (availableVertexBytes < vertexBytes) {
 			++a_stats.undersizedVertexBuffers;
 		}
 
 		if (auto* indexBuffer = renderer->indexBuffer) {
 			const auto indexBytes = static_cast<std::uint64_t>(triShape->numTriangles) * 3 * sizeof(std::uint16_t);
-			const auto availableIndexBytes = indexBuffer->dataSize > indexBuffer->dataOffset ? indexBuffer->dataSize - indexBuffer->dataOffset : 0;
+			const auto availableIndexBytes = Smp::Fo4CpuBuffer::GetAvailableBytes(indexBuffer);
 			if (availableIndexBytes < indexBytes) {
 				++a_stats.undersizedIndexBuffers;
 			}
@@ -89,7 +90,7 @@ namespace
 			return;
 		}
 
-		const auto* vertexData = static_cast<const std::uint8_t*>(vertexBuffer->data) + vertexBuffer->dataOffset;
+		const auto* vertexData = Smp::Fo4CpuBuffer::GetDataStart(vertexBuffer);
 		RE::NiPoint3 position{};
 		RE::NiPoint2 texCoord0{};
 		RE::NiPoint2 texCoord1{};
