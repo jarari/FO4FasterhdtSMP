@@ -1,5 +1,7 @@
 #include "Fo4SkinnedMeshBone.h"
 
+#include "Fo4TransformConversion.h"
+
 #include <cmath>
 
 namespace
@@ -10,45 +12,6 @@ namespace
 	bool  g_unclampedResets = true;
 	float g_unclampedResetAngle = 130.0F;
 
-	float NormalizeNiScale(const float a_scale)
-	{
-		return std::isfinite(a_scale) && a_scale > FLT_EPSILON ? a_scale : 1.0F;
-	}
-
-	btTransform ToBulletTransform(const RE::NiTransform& a_transform)
-	{
-		const btMatrix3x3 basis(
-			a_transform.rotate[0].x,
-			a_transform.rotate[1].x,
-			a_transform.rotate[2].x,
-			a_transform.rotate[0].y,
-			a_transform.rotate[1].y,
-			a_transform.rotate[2].y,
-			a_transform.rotate[0].z,
-			a_transform.rotate[1].z,
-			a_transform.rotate[2].z);
-
-		return btTransform(basis, btVector3(a_transform.translate.x, a_transform.translate.y, a_transform.translate.z));
-	}
-
-	hdt::btQsTransform ToBulletQsTransform(const RE::NiTransform& a_transform)
-	{
-		return hdt::btQsTransform(ToBulletTransform(a_transform), NormalizeNiScale(a_transform.scale));
-	}
-
-	RE::NiTransform ToNiTransform(const btTransform& a_transform, const float a_scale)
-	{
-		const auto& basis = a_transform.getBasis();
-		RE::NiTransform result;
-		result.rotate = RE::NiMatrix3(
-			basis[0].x(), basis[1].x(), basis[2].x(), 0.0F,
-			basis[0].y(), basis[1].y(), basis[2].y(), 0.0F,
-			basis[0].z(), basis[1].z(), basis[2].z(), 0.0F);
-		const auto origin = a_transform.getOrigin();
-		result.translate = RE::NiPoint3(origin.x(), origin.y(), origin.z());
-		result.scale = NormalizeNiScale(a_scale);
-		return result;
-	}
 
 	void ResetRigidBody(btRigidBody& a_body, const btTransform& a_transform)
 	{
@@ -223,7 +186,7 @@ namespace Smp
 
 		const auto oldScale = m_currentTransform.getScale();
 		const auto isStaticOrKinematic = m_rig.isStaticOrKinematicObject();
-		m_currentTransform = ToBulletQsTransform(node_->world);
+		m_currentTransform = Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(node_->world);
 		const auto newScale = m_currentTransform.getScale();
 		const auto current = m_rig.getWorldTransform();
 
@@ -277,7 +240,7 @@ namespace Smp
 		m_currentTransform.setBasis(transform.getBasis());
 		m_currentTransform.setOrigin(transform.getOrigin());
 
-		const auto world = ToNiTransform(transform, node_->world.scale);
+		const auto world = Smp::Fo4Transform::ToNiTransformNormalizedScale(transform, node_->world.scale);
 		node_->world = world;
 
 		std::erase_if(skinWorldTransforms_, [this](SkinWorldTransformSlot& a_slot) {

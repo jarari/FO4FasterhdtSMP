@@ -5,6 +5,7 @@
 #include "DefaultBBP.h"
 #include "Fo4MeshExtractor.h"
 #include "Fo4SkinnedMeshBone.h"
+#include "Fo4TransformConversion.h"
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
 #include "SmpConfig.h"
@@ -2201,26 +2202,6 @@ namespace
 		}
 	}
 
-	btTransform ToBulletTransform(const RE::NiTransform& a_transform)
-	{
-		const btMatrix3x3 basis(
-			a_transform.rotate[0].x,
-			a_transform.rotate[1].x,
-			a_transform.rotate[2].x,
-			a_transform.rotate[0].y,
-			a_transform.rotate[1].y,
-			a_transform.rotate[2].y,
-			a_transform.rotate[0].z,
-			a_transform.rotate[1].z,
-			a_transform.rotate[2].z);
-
-		return btTransform(basis, btVector3(a_transform.translate.x, a_transform.translate.y, a_transform.translate.z));
-	}
-
-	hdt::btQsTransform ToBulletQsTransform(const RE::NiTransform& a_transform)
-	{
-		return hdt::btQsTransform(ToBulletTransform(a_transform), std::max(a_transform.scale, FLT_EPSILON));
-	}
 
 	btTransform ToBulletTransform(const Smp::XmlTransform& a_transform)
 	{
@@ -2236,19 +2217,6 @@ namespace
 
 	std::unique_ptr<btCollisionShape> CreateCollisionShape(const Smp::PhysicsShapeDescriptor& a_descriptor);
 
-	RE::NiTransform ToNiTransform(const btTransform& a_transform, const float a_scale)
-	{
-		const auto& basis = a_transform.getBasis();
-		RE::NiTransform result;
-		result.rotate = RE::NiMatrix3(
-			basis[0].x(), basis[1].x(), basis[2].x(), 0.0F,
-			basis[0].y(), basis[1].y(), basis[2].y(), 0.0F,
-			basis[0].z(), basis[1].z(), basis[2].z(), 0.0F);
-		const auto origin = a_transform.getOrigin();
-		result.translate = RE::NiPoint3(origin.x(), origin.y(), origin.z());
-		result.scale = a_scale;
-		return result;
-	}
 
 	void LogPrototypeTransformDiagnostic(
 		const std::string_view a_phase,
@@ -5782,7 +5750,7 @@ namespace Smp
 
 			const auto localToRig = ToBulletTransform(boneDescriptor.centerOfMassTransform);
 			const auto& initialWorld = matchedBone.node->world;
-			auto motionState = std::make_unique<btDefaultMotionState>(ToBulletTransform(initialWorld) * localToRig);
+			auto motionState = std::make_unique<btDefaultMotionState>(Smp::Fo4Transform::ToBulletTransform(initialWorld) * localToRig);
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(mass, motionState.get(), shape.get(), localInertia);
 			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, constructionInfo);
 			for (auto& skinWorld : matchedBone.skinWorldTransforms) {

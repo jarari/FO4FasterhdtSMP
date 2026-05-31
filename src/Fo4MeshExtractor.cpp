@@ -1,6 +1,7 @@
 #include "Fo4MeshExtractor.h"
 
 #include "BSSkin.h"
+#include "Fo4TransformConversion.h"
 #include "PhysicsName.h"
 #include "RE/B/BSGraphics.h"
 #include "RE/B/BSTriShape.h"
@@ -17,32 +18,6 @@
 
 namespace
 {
-	hdt::btQsTransform ToQsTransform(const RE::NiTransform& a_transform)
-	{
-		btMatrix3x3 basis(
-			a_transform.rotate[0].x,
-			a_transform.rotate[1].x,
-			a_transform.rotate[2].x,
-			a_transform.rotate[0].y,
-			a_transform.rotate[1].y,
-			a_transform.rotate[2].y,
-			a_transform.rotate[0].z,
-			a_transform.rotate[1].z,
-			a_transform.rotate[2].z);
-
-		btQuaternion rotation = btQuaternion::getIdentity();
-		basis.getRotation(rotation);
-		if (rotation.length2() <= FLT_EPSILON) {
-			rotation = btQuaternion::getIdentity();
-		} else {
-			rotation.normalize();
-		}
-
-		return hdt::btQsTransform(
-			rotation,
-			btVector3(a_transform.translate.x, a_transform.translate.y, a_transform.translate.z),
-			std::max(a_transform.scale, FLT_EPSILON));
-	}
 
 	hdt::BoundingSphere ToBoundingSphere(const RE::NiBound& a_bound)
 	{
@@ -288,7 +263,7 @@ namespace
 
 			if (useBoneData && index < a_skin->boneData->transforms.size()) {
 				const auto& transform = a_skin->boneData->transforms[index];
-				decoded.skinToBone = ToQsTransform(transform.transform);
+				decoded.skinToBone = Smp::Fo4Transform::ToBulletQsTransform(transform.transform);
 				decoded.boundingSphere = ToBoundingSphere(transform.bound);
 				decoded.hasBoneData = true;
 			} else {
