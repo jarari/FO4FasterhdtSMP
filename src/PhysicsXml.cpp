@@ -90,6 +90,15 @@ namespace
 		return a_default;
 	}
 
+	bool TryReadFloatAttribute(tinyxml2::XMLElement* a_element, const char* a_name, float& a_out)
+	{
+		const auto text = a_element ? a_element->Attribute(a_name) : nullptr;
+		if (!text) {
+			return false;
+		}
+		return ParseFloat(text, a_out);
+	}
+
 	bool ReadBool(tinyxml2::XMLElement* a_parent, const char* a_name, const bool a_default)
 	{
 		if (const auto element = a_parent ? a_parent->FirstChildElement(a_name) : nullptr) {
@@ -140,6 +149,31 @@ namespace
 		return result;
 	}
 
+	Smp::XmlVector3 ReadRequiredVector3(
+		tinyxml2::XMLElement* a_element,
+		const Smp::XmlVector3& a_default,
+		bool& a_valid,
+		const std::string_view a_context)
+	{
+		auto result = a_default;
+		if (!a_element) {
+			return result;
+		}
+
+		float x = 0.0F;
+		float y = 0.0F;
+		float z = 0.0F;
+		if (!TryReadFloatAttribute(a_element, "x", x) ||
+			!TryReadFloatAttribute(a_element, "y", y) ||
+			!TryReadFloatAttribute(a_element, "z", z)) {
+			spdlog::warn("prototype physics XML {} has incomplete vector '{}'; constraint skipped", a_context, a_element->Name());
+			a_valid = false;
+			return result;
+		}
+
+		return { .x = x, .y = y, .z = z };
+	}
+
 	Smp::XmlQuaternion ReadQuaternion(tinyxml2::XMLElement* a_element, const Smp::XmlQuaternion& a_default)
 	{
 		auto result = a_default;
@@ -151,6 +185,39 @@ namespace
 		result.y = ReadFloatAttribute(a_element, "y", result.y);
 		result.z = ReadFloatAttribute(a_element, "z", result.z);
 		result.w = ReadFloatAttribute(a_element, "w", result.w);
+		const auto lengthSquared = result.x * result.x + result.y * result.y + result.z * result.z + result.w * result.w;
+		if (lengthSquared <= FLT_EPSILON) {
+			return { .x = 0.0F, .y = 0.0F, .z = 0.0F, .w = 1.0F };
+		}
+
+		const auto invLength = 1.0F / std::sqrt(lengthSquared);
+		result.x *= invLength;
+		result.y *= invLength;
+		result.z *= invLength;
+		result.w *= invLength;
+		return result;
+	}
+
+	Smp::XmlQuaternion ReadRequiredQuaternion(
+		tinyxml2::XMLElement* a_element,
+		const Smp::XmlQuaternion& a_default,
+		bool& a_valid,
+		const std::string_view a_context)
+	{
+		if (!a_element) {
+			return a_default;
+		}
+
+		Smp::XmlQuaternion result;
+		if (!TryReadFloatAttribute(a_element, "x", result.x) ||
+			!TryReadFloatAttribute(a_element, "y", result.y) ||
+			!TryReadFloatAttribute(a_element, "z", result.z) ||
+			!TryReadFloatAttribute(a_element, "w", result.w)) {
+			spdlog::warn("prototype physics XML {} has incomplete quaternion '{}'; constraint skipped", a_context, a_element->Name());
+			a_valid = false;
+			return a_default;
+		}
+
 		const auto lengthSquared = result.x * result.x + result.y * result.y + result.z * result.z + result.w * result.w;
 		if (lengthSquared <= FLT_EPSILON) {
 			return { .x = 0.0F, .y = 0.0F, .z = 0.0F, .w = 1.0F };
@@ -191,6 +258,43 @@ namespace
 		};
 	}
 
+	Smp::XmlQuaternion ReadRequiredAxisAngle(
+		tinyxml2::XMLElement* a_element,
+		const Smp::XmlQuaternion& a_default,
+		bool& a_valid,
+		const std::string_view a_context)
+	{
+		if (!a_element) {
+			return a_default;
+		}
+
+		Smp::XmlVector3 axis;
+		float angle = 0.0F;
+		if (!TryReadFloatAttribute(a_element, "x", axis.x) ||
+			!TryReadFloatAttribute(a_element, "y", axis.y) ||
+			!TryReadFloatAttribute(a_element, "z", axis.z) ||
+			!TryReadFloatAttribute(a_element, "angle", angle)) {
+			spdlog::warn("prototype physics XML {} has incomplete axis-angle '{}'; constraint skipped", a_context, a_element->Name());
+			a_valid = false;
+			return a_default;
+		}
+
+		const auto lengthSquared = axis.x * axis.x + axis.y * axis.y + axis.z * axis.z;
+		if (lengthSquared <= FLT_EPSILON) {
+			return { .x = 0.0F, .y = 0.0F, .z = 0.0F, .w = 1.0F };
+		}
+
+		const auto invLength = 1.0F / std::sqrt(lengthSquared);
+		const auto halfAngle = angle * 0.5F;
+		const auto sinHalf = std::sin(halfAngle);
+		return {
+			.x = axis.x * invLength * sinHalf,
+			.y = axis.y * invLength * sinHalf,
+			.z = axis.z * invLength * sinHalf,
+			.w = std::cos(halfAngle),
+		};
+	}
+
 	Smp::XmlTransform ReadTransform(tinyxml2::XMLElement* a_element, const Smp::XmlTransform& a_default)
 	{
 		auto result = a_default;
@@ -206,6 +310,30 @@ namespace
 				result.rotation = ReadQuaternion(child, result.rotation);
 			} else if (name == "basis-axis-angle") {
 				result.rotation = ReadAxisAngle(child, result.rotation);
+			}
+		}
+		return result;
+	}
+
+	Smp::XmlTransform ReadRequiredTransform(
+		tinyxml2::XMLElement* a_element,
+		const Smp::XmlTransform& a_default,
+		bool& a_valid,
+		const std::string_view a_context)
+	{
+		auto result = a_default;
+		if (!a_element) {
+			return result;
+		}
+
+		for (auto* child = a_element->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			const std::string name = child->Name();
+			if (name == "origin") {
+				result.origin = ReadRequiredVector3(child, result.origin, a_valid, a_context);
+			} else if (name == "basis") {
+				result.rotation = ReadRequiredQuaternion(child, result.rotation, a_valid, a_context);
+			} else if (name == "basis-axis-angle") {
+				result.rotation = ReadRequiredAxisAngle(child, result.rotation, a_valid, a_context);
 			}
 		}
 		return result;
@@ -428,15 +556,16 @@ namespace
 		result.bodyA = ReadAttribute(a_constraint, "bodyA", result.bodyA);
 		result.bodyB = ReadAttribute(a_constraint, "bodyB", result.bodyB);
 		result.templateName = ReadAttribute(a_constraint, "template", result.templateName);
+		const auto context = result.name.empty() ? std::string_view(a_constraint->Name()) : std::string_view(result.name);
 		for (auto* child = a_constraint->FirstChildElement(); child; child = child->NextSiblingElement()) {
 			const std::string name = child->Name();
 			if (name == "frameInA") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInA;
-				result.frame = ReadTransform(child, result.frame);
+				result.frame = ReadRequiredTransform(child, result.frame, result.valid, context);
 				result.frameInA = result.frame;
 			} else if (name == "frameInB") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInB;
-				result.frame = ReadTransform(child, result.frame);
+				result.frame = ReadRequiredTransform(child, result.frame, result.valid, context);
 				result.frameInB = result.frame;
 			} else if (name == "frameInLerp") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInLerp;
@@ -452,26 +581,26 @@ namespace
 		}
 
 		result.useLinearReferenceFrameA = ReadBool(a_constraint, "useLinearReferenceFrameA", result.useLinearReferenceFrameA);
-		result.linearLowerLimit = ReadVector3(a_constraint->FirstChildElement("linearLowerLimit"), result.linearLowerLimit);
-		result.linearUpperLimit = ReadVector3(a_constraint->FirstChildElement("linearUpperLimit"), result.linearUpperLimit);
-		result.angularLowerLimit = ReadVector3(a_constraint->FirstChildElement("angularLowerLimit"), result.angularLowerLimit);
-		result.angularUpperLimit = ReadVector3(a_constraint->FirstChildElement("angularUpperLimit"), result.angularUpperLimit);
-		result.linearStiffness = ReadVector3(a_constraint->FirstChildElement("linearStiffness"), result.linearStiffness);
-		result.angularStiffness = ReadVector3(a_constraint->FirstChildElement("angularStiffness"), result.angularStiffness);
-		result.linearDamping = ReadVector3(a_constraint->FirstChildElement("linearDamping"), result.linearDamping);
-		result.angularDamping = ReadVector3(a_constraint->FirstChildElement("angularDamping"), result.angularDamping);
-		result.linearNonHookeanDamping = ReadVector3(a_constraint->FirstChildElement("linearNonHookeanDamping"), result.linearNonHookeanDamping);
-		result.angularNonHookeanDamping = ReadVector3(a_constraint->FirstChildElement("angularNonHookeanDamping"), result.angularNonHookeanDamping);
-		result.linearNonHookeanStiffness = ReadVector3(a_constraint->FirstChildElement("linearNonHookeanStiffness"), result.linearNonHookeanStiffness);
-		result.angularNonHookeanStiffness = ReadVector3(a_constraint->FirstChildElement("angularNonHookeanStiffness"), result.angularNonHookeanStiffness);
-		result.linearEquilibrium = ReadVector3(a_constraint->FirstChildElement("linearEquilibrium"), result.linearEquilibrium);
-		result.angularEquilibrium = ReadVector3(a_constraint->FirstChildElement("angularEquilibrium"), result.angularEquilibrium);
-		result.linearBounce = ReadVector3(a_constraint->FirstChildElement("linearBounce"), result.linearBounce);
-		result.angularBounce = ReadVector3(a_constraint->FirstChildElement("angularBounce"), result.angularBounce);
-		result.linearTargetVelocity = ReadVector3(a_constraint->FirstChildElement("linearTargetVelocity"), result.linearTargetVelocity);
-		result.angularTargetVelocity = ReadVector3(a_constraint->FirstChildElement("angularTargetVelocity"), result.angularTargetVelocity);
-		result.linearMaxMotorForce = ReadVector3(a_constraint->FirstChildElement("linearMaxMotorForce"), result.linearMaxMotorForce);
-		result.angularMaxMotorForce = ReadVector3(a_constraint->FirstChildElement("angularMaxMotorForce"), result.angularMaxMotorForce);
+		result.linearLowerLimit = ReadRequiredVector3(a_constraint->FirstChildElement("linearLowerLimit"), result.linearLowerLimit, result.valid, context);
+		result.linearUpperLimit = ReadRequiredVector3(a_constraint->FirstChildElement("linearUpperLimit"), result.linearUpperLimit, result.valid, context);
+		result.angularLowerLimit = ReadRequiredVector3(a_constraint->FirstChildElement("angularLowerLimit"), result.angularLowerLimit, result.valid, context);
+		result.angularUpperLimit = ReadRequiredVector3(a_constraint->FirstChildElement("angularUpperLimit"), result.angularUpperLimit, result.valid, context);
+		result.linearStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("linearStiffness"), result.linearStiffness, result.valid, context);
+		result.angularStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("angularStiffness"), result.angularStiffness, result.valid, context);
+		result.linearDamping = ReadRequiredVector3(a_constraint->FirstChildElement("linearDamping"), result.linearDamping, result.valid, context);
+		result.angularDamping = ReadRequiredVector3(a_constraint->FirstChildElement("angularDamping"), result.angularDamping, result.valid, context);
+		result.linearNonHookeanDamping = ReadRequiredVector3(a_constraint->FirstChildElement("linearNonHookeanDamping"), result.linearNonHookeanDamping, result.valid, context);
+		result.angularNonHookeanDamping = ReadRequiredVector3(a_constraint->FirstChildElement("angularNonHookeanDamping"), result.angularNonHookeanDamping, result.valid, context);
+		result.linearNonHookeanStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("linearNonHookeanStiffness"), result.linearNonHookeanStiffness, result.valid, context);
+		result.angularNonHookeanStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("angularNonHookeanStiffness"), result.angularNonHookeanStiffness, result.valid, context);
+		result.linearEquilibrium = ReadRequiredVector3(a_constraint->FirstChildElement("linearEquilibrium"), result.linearEquilibrium, result.valid, context);
+		result.angularEquilibrium = ReadRequiredVector3(a_constraint->FirstChildElement("angularEquilibrium"), result.angularEquilibrium, result.valid, context);
+		result.linearBounce = ReadRequiredVector3(a_constraint->FirstChildElement("linearBounce"), result.linearBounce, result.valid, context);
+		result.angularBounce = ReadRequiredVector3(a_constraint->FirstChildElement("angularBounce"), result.angularBounce, result.valid, context);
+		result.linearTargetVelocity = ReadRequiredVector3(a_constraint->FirstChildElement("linearTargetVelocity"), result.linearTargetVelocity, result.valid, context);
+		result.angularTargetVelocity = ReadRequiredVector3(a_constraint->FirstChildElement("angularTargetVelocity"), result.angularTargetVelocity, result.valid, context);
+		result.linearMaxMotorForce = ReadRequiredVector3(a_constraint->FirstChildElement("linearMaxMotorForce"), result.linearMaxMotorForce, result.valid, context);
+		result.angularMaxMotorForce = ReadRequiredVector3(a_constraint->FirstChildElement("angularMaxMotorForce"), result.angularMaxMotorForce, result.valid, context);
 		result.enableLinearSprings = ReadBool(a_constraint, "enableLinearSprings", result.enableLinearSprings);
 		result.enableAngularSprings = ReadBool(a_constraint, "enableAngularSprings", result.enableAngularSprings);
 		result.linearStiffnessLimited = ReadBool(a_constraint, "linearStiffnessLimited", result.linearStiffnessLimited);
@@ -669,30 +798,45 @@ namespace Smp
 				const auto base = findExistingConstraintTemplate(genericConstraintTemplates, extends);
 				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kGeneric, base);
 				descriptor.name = templateName;
-				genericConstraintTemplates[templateName] = descriptor;
+				if (descriptor.valid) {
+					genericConstraintTemplates[templateName] = descriptor;
+				}
 			} else if (name == "conetwist-constraint-default") {
 				const auto templateName = ReadAttribute(child, "name");
 				const auto extends = ReadAttribute(child, "extends");
 				const auto base = findExistingConstraintTemplate(coneTwistConstraintTemplates, extends);
 				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kConeTwist, base);
 				descriptor.name = templateName;
-				coneTwistConstraintTemplates[templateName] = descriptor;
+				if (descriptor.valid) {
+					coneTwistConstraintTemplates[templateName] = descriptor;
+				}
 			} else if (name == "stiffspring-constraint-default") {
 				const auto templateName = ReadAttribute(child, "name");
 				const auto extends = ReadAttribute(child, "extends");
 				const auto base = findExistingConstraintTemplate(stiffSpringConstraintTemplates, extends);
 				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kStiffSpring, base);
 				descriptor.name = templateName;
-				stiffSpringConstraintTemplates[templateName] = descriptor;
+				if (descriptor.valid) {
+					stiffSpringConstraintTemplates[templateName] = descriptor;
+				}
 			} else if (name == "generic-constraint") {
 				const auto templateName = ReadAttribute(child, "template");
-				loaded.constraintDescriptors.push_back(ReadConstraint(child, PhysicsConstraintKind::kGeneric, findExistingConstraintTemplate(genericConstraintTemplates, templateName)));
+				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kGeneric, findExistingConstraintTemplate(genericConstraintTemplates, templateName));
+				if (descriptor.valid) {
+					loaded.constraintDescriptors.push_back(std::move(descriptor));
+				}
 			} else if (name == "conetwist-constraint") {
 				const auto templateName = ReadAttribute(child, "template");
-				loaded.constraintDescriptors.push_back(ReadConstraint(child, PhysicsConstraintKind::kConeTwist, findExistingConstraintTemplate(coneTwistConstraintTemplates, templateName)));
+				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kConeTwist, findExistingConstraintTemplate(coneTwistConstraintTemplates, templateName));
+				if (descriptor.valid) {
+					loaded.constraintDescriptors.push_back(std::move(descriptor));
+				}
 			} else if (name == "stiffspring-constraint") {
 				const auto templateName = ReadAttribute(child, "template");
-				loaded.constraintDescriptors.push_back(ReadConstraint(child, PhysicsConstraintKind::kStiffSpring, findExistingConstraintTemplate(stiffSpringConstraintTemplates, templateName)));
+				auto descriptor = ReadConstraint(child, PhysicsConstraintKind::kStiffSpring, findExistingConstraintTemplate(stiffSpringConstraintTemplates, templateName));
+				if (descriptor.valid) {
+					loaded.constraintDescriptors.push_back(std::move(descriptor));
+				}
 			}
 		};
 

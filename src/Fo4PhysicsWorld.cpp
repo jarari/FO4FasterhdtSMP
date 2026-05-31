@@ -2473,20 +2473,6 @@ namespace
 		return btVector3(a_value.x, a_value.y, a_value.z);
 	}
 
-	bool HasAnyNonZero(const Smp::XmlVector3& a_value)
-	{
-		return std::abs(a_value.x) > FLT_EPSILON ||
-			std::abs(a_value.y) > FLT_EPSILON ||
-			std::abs(a_value.z) > FLT_EPSILON;
-	}
-
-	bool HasNonHookeanTerms(const Smp::PhysicsConstraintDescriptor& a_descriptor)
-	{
-		return HasAnyNonZero(a_descriptor.linearNonHookeanDamping) ||
-			HasAnyNonZero(a_descriptor.angularNonHookeanDamping) ||
-			HasAnyNonZero(a_descriptor.linearNonHookeanStiffness) ||
-			HasAnyNonZero(a_descriptor.angularNonHookeanStiffness);
-	}
 
 	float CurrentBoneScale(const Smp::Fo4SkinnedMeshBone* a_bone)
 	{
@@ -2870,11 +2856,6 @@ namespace
 		case Smp::PhysicsConstraintKind::kGeneric:
 		default:
 		{
-			if (HasNonHookeanTerms(a_descriptor)) {
-				spdlog::warn(
-					"prototype generic constraint '{}' uses non-Hookean fields; current FO4 Bullet constraint path parses them but cannot apply them yet",
-					a_descriptor.name);
-			}
 			auto constraint = a_descriptor.useLinearReferenceFrameA ?
 				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyB, a_bodyA, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ) :
 				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyA, a_bodyB, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ);
@@ -2894,6 +2875,10 @@ namespace
 				constraint->setStiffness(axis + 3, AxisValue(a_descriptor.angularStiffness, axis), a_descriptor.angularStiffnessLimited);
 				constraint->setDamping(axis, AxisValue(a_descriptor.linearDamping, axis), a_descriptor.springDampingLimited);
 				constraint->setDamping(axis + 3, AxisValue(a_descriptor.angularDamping, axis), a_descriptor.springDampingLimited);
+				constraint->setNonHookeanDamping(axis, AxisValue(a_descriptor.linearNonHookeanDamping, axis));
+				constraint->setNonHookeanDamping(axis + 3, AxisValue(a_descriptor.angularNonHookeanDamping, axis));
+				constraint->setNonHookeanStiffness(axis, AxisValue(a_descriptor.linearNonHookeanStiffness, axis));
+				constraint->setNonHookeanStiffness(axis + 3, AxisValue(a_descriptor.angularNonHookeanStiffness, axis));
 				constraint->setEquilibriumPoint(axis, AxisValue(a_descriptor.linearEquilibrium, axis));
 				constraint->setEquilibriumPoint(axis + 3, AxisValue(a_descriptor.angularEquilibrium, axis));
 				constraint->setBounce(axis, AxisValue(a_descriptor.linearBounce, axis));

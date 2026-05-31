@@ -1,4 +1,5 @@
 -- include subprojects
+includes("packages/bullet3-hdt")
 includes("lib/commonlibf4")
 
 -- set project constants
@@ -14,9 +15,9 @@ add_rules("plugin.vsxmake.autoupdate")
 
 add_defines("COMMONLIB_RUNTIMECOUNT=3")
 if is_mode("debug") then
-    add_requires("bullet3", {configs = {runtimes = "MDd", debug = true}})
+    add_requires("bullet3-hdt", {configs = {runtimes = "MDd", debug = true, non_hookean = true, sse_in_api = true, profile_gate = true, opencl = false, multithreading = true}})
 else
-    add_requires("bullet3", {configs = {runtimes = "MD"}})
+    add_requires("bullet3-hdt", {configs = {runtimes = "MD", non_hookean = true, sse_in_api = true, profile_gate = true, opencl = false, multithreading = true}})
 end
 add_requires("tbb")
 add_requires("xbyak")
@@ -45,7 +46,7 @@ local function add_fo4_faster_hdt_smp_target(target_name, arch_flag, variant_def
         add_files("src/**.cpp")
         add_headerfiles("src/**.h")
         add_includedirs("src")
-        add_packages("bullet3", "tbb", "xbyak", "tinyxml2", "microsoft-detours", "spdlog")
+        add_packages("bullet3-hdt", "tbb", "xbyak", "tinyxml2", "microsoft-detours", "spdlog")
         add_installfiles("res/configs.xml", "res/defaultBBPs.xml", "res/prototype-sample.xml", { prefixdir = "F4SE/Plugins/FO4FasterHdtSMP" })
         set_pcxxheader("src/pch.h")
 end

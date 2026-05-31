@@ -49,6 +49,7 @@ namespace Smp
 
 	struct PhysicsConstraintDescriptor
 	{
+		bool valid{ true };
 		PhysicsConstraintKind kind{ PhysicsConstraintKind::kGeneric };
 		std::string name;
 		std::string bodyA;
