@@ -67,7 +67,6 @@ namespace
 	constexpr float kGravityAcceleration = -9.80665F * kGameUnitsPerMeter;
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
 	constexpr std::uint32_t kAttachResetReadFrames = 8;
-	constexpr std::uint64_t kBuildSoftSuspendSettleFrames = 1;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
@@ -3185,21 +3184,6 @@ namespace
 			a_reason);
 	}
 
-	void ResetBulletRigidBody(btRigidBody& a_body, const btTransform& a_transform)
-	{
-		const btVector3 zero(0.0F, 0.0F, 0.0F);
-		a_body.setWorldTransform(a_transform);
-		a_body.setInterpolationWorldTransform(a_transform);
-		if (auto* motionState = a_body.getMotionState()) {
-			motionState->setWorldTransform(a_transform);
-		}
-		a_body.setLinearVelocity(zero);
-		a_body.setAngularVelocity(zero);
-		a_body.setInterpolationLinearVelocity(zero);
-		a_body.setInterpolationAngularVelocity(zero);
-		a_body.updateInertiaTensor();
-	}
-
 	bool IsFiniteTransform(const btTransform& a_transform)
 	{
 		const auto origin = a_transform.getOrigin();
@@ -5406,9 +5390,6 @@ namespace Smp
 				const auto distanceSquared = DistanceSquared(a_state.actor->GetPosition(), player->GetPosition());
 				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
 				if (distanceSquared > maxDistanceSquared) {
-					if (IsBuildSoftSuspendSettlePendingLocked(a_state)) {
-						return true;
-					}
 					if (a_state.HasRuntime() && !a_state.runtimeSoftSuspended) {
 						spdlog::debug(
 							"soft-suspending prototype physics state for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
@@ -5419,7 +5400,6 @@ namespace Smp
 					}
 					return true;
 				}
-				a_state.softSuspendAfterSimulationFrame = 0;
 			}
 		}
 
@@ -5456,9 +5436,6 @@ namespace Smp
 			auto victimDistanceSquared = -1.0F;
 			for (auto it = prototypeActors_.begin(); it != prototypeActors_.end(); ++it) {
 				if (!it->HasActiveRuntime()) {
-					continue;
-				}
-				if (IsBuildSoftSuspendSettlePendingLocked(*it)) {
 					continue;
 				}
 				auto resolvedActor = it->actorHandle.get();
@@ -5498,12 +5475,6 @@ namespace Smp
 		return IsArmorAttachCandidate(a_event.type) && !a_event.physicsXmlPath.empty();
 	}
 
-	bool Fo4PhysicsWorld::IsBuildSoftSuspendSettlePendingLocked(const PrototypeActorState& a_state) const
-	{
-		return a_state.softSuspendAfterSimulationFrame != 0 &&
-			simulationFrame_ < a_state.softSuspendAfterSimulationFrame;
-	}
-
 	void Fo4PhysicsWorld::SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event)
 	{
 		if (!a_state.HasActiveRuntime()) {
@@ -5538,18 +5509,28 @@ namespace Smp
 			return;
 		}
 
+		std::vector<std::uint64_t> buildGroups;
+		for (const auto& runtime : a_state.runtimes) {
+			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(runtime.buildGroup);
+			}
+		}
+
+		std::uint32_t resetBodies = 0;
+		for (const auto buildGroup : buildGroups) {
+			resetBodies += ResetPrototypeBuildGroupToReferencePoseLocked(a_state, buildGroup);
+		}
+
 		spdlog::debug(
-			"scheduling freshly built armor prototype runtime for soft suspension after settle actor={} reason={} activeActors={} actorCap={} event={} currentFrame={} suspendAfterFrame={}",
+			"soft-suspending freshly built armor prototype runtime after reference-pose node/Bullet reset actor={} reason={} activeActors={} actorCap={} event={} buildGroups={} resetBodies={}",
 			static_cast<void*>(a_state.actor),
 			reason ? reason : "unknown",
 			activeActors,
 			currentMaxActiveActors_,
 			ToString(a_event.type),
-			simulationFrame_,
-			simulationFrame_ + kBuildSoftSuspendSettleFrames);
-		a_state.softSuspendAfterSimulationFrame = std::max(
-			a_state.softSuspendAfterSimulationFrame,
-			simulationFrame_ + kBuildSoftSuspendSettleFrames);
+			buildGroups.size(),
+			resetBodies);
+		SoftSuspendPrototypeRuntimeLocked(a_state);
 	}
 
 	void Fo4PhysicsWorld::SuspendActorCandidateLocked(
@@ -6827,7 +6808,6 @@ namespace Smp
 		a_state.resetReadFrames = 0;
 		a_state.runtimeSuspended = true;
 		a_state.runtimeSoftSuspended = false;
-		a_state.softSuspendAfterSimulationFrame = 0;
 		spdlog::debug(
 			"suspended prototype runtime for actor={} bodies={} meshes={} constraints={} capturedSkinSlots={} preservedMergedNodes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
@@ -6876,7 +6856,6 @@ namespace Smp
 					++removedBodies;
 				}
 			}
-			dynamicsWorld_->clearForces();
 		}
 
 		a_state.lastWritebackFrame = 0;
@@ -6885,8 +6864,6 @@ namespace Smp
 		a_state.currentWindFactor = 0.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = true;
-		a_state.softSuspendAfterSimulationFrame = 0;
-		ResetStepClockLocked();
 		spdlog::debug(
 			"soft-suspended prototype runtime for actor={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} runtimes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
@@ -6944,15 +6921,10 @@ namespace Smp
 
 		a_state.runtimeSoftSuspended = false;
 		a_state.runtimeSuspended = false;
-		a_state.softSuspendAfterSimulationFrame = 0;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.resetReadFrames = std::max(a_state.resetReadFrames, kAttachResetReadFrames);
+		a_state.resetReadFrames = 0;
 		a_state.currentWindFactor = 1.0F;
-		if (dynamicsWorld_) {
-			dynamicsWorld_->clearForces();
-		}
-		ResetStepClockLocked();
 		spdlog::debug(
 			"resumed soft-suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={}",
 			static_cast<void*>(a_state.actor),
@@ -7134,7 +7106,6 @@ namespace Smp
 		a_state.currentWindFactor = 1.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
-		a_state.softSuspendAfterSimulationFrame = 0;
 		a_state.faceNode = nullptr;
 		a_state.attachmentRecords.clear();
 		a_state.runtimes.clear();
@@ -7557,7 +7528,6 @@ namespace Smp
 		});
 		if (!a_state.HasRuntime()) {
 			a_state.runtimeSoftSuspended = false;
-			a_state.softSuspendAfterSimulationFrame = 0;
 		}
 
 		spdlog::debug(
@@ -7841,7 +7811,6 @@ namespace Smp
 
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
-		a_state.softSuspendAfterSimulationFrame = 0;
 		auto meshNames = BuildMeshMatchNames(a_summary, a_meshNameMap);
 		if (a_summary.boneNames.empty() && meshNames.empty()) {
 			spdlog::debug("prototype physics XML has no named bones or mesh descriptors to match");
@@ -8305,6 +8274,9 @@ namespace Smp
 			a_state.constraints.push_back(std::move(stagedConstraint));
 		}
 		CommitPrototypeBuildGroupToBulletLocked(a_state, buildGroup);
+		if (a_domain == PrototypeBuildDomain::kArmor) {
+			ResetPrototypeBuildGroupToReferencePoseLocked(a_state, buildGroup);
+		}
 		timing.bindCommitConstraintMs += ElapsedMs(phaseStart, Clock::now());
 		if (actorRoot && spdlog::default_logger_raw() && spdlog::default_logger_raw()->should_log(spdlog::level::trace)) {
 			LogObjectHierarchy(actorRoot, "actor-skeleton-after-prototype-build");
@@ -8457,6 +8429,7 @@ namespace Smp
 			}
 
 			body.bone->readTransform(0.0F);
+			body.bone->RefreshSkinWorldTransforms();
 		}
 		for (auto& body : a_stagedBodies) {
 			if (!isInBuildGroup(body) || !body.bone || !body.node) {
@@ -8464,7 +8437,64 @@ namespace Smp
 			}
 
 			body.bone->readTransform(0.0F);
+			body.bone->RefreshSkinWorldTransforms();
 		}
+	}
+
+	std::uint32_t Fo4PhysicsWorld::ResetPrototypeBuildGroupToReferencePoseLocked(
+		PrototypeActorState& a_state,
+		const std::uint64_t a_buildGroup)
+	{
+		if (a_buildGroup == 0) {
+			return 0;
+		}
+
+		auto findMergedNode = [&a_state, a_buildGroup](const RE::NiAVObject* a_node) -> PrototypeMergedNode* {
+			if (!a_node) {
+				return nullptr;
+			}
+
+			const auto mergedNode = std::ranges::find_if(a_state.mergedNodes, [a_node, a_buildGroup](const PrototypeMergedNode& a_mergedNode) {
+				return a_mergedNode.buildGroup == a_buildGroup && a_mergedNode.node.get() == a_node;
+			});
+			return mergedNode != a_state.mergedNodes.end() ? std::addressof(*mergedNode) : nullptr;
+		};
+
+		std::uint32_t resetBodies = 0;
+		std::uint32_t syncedNodes = 0;
+		for (auto& body : a_state.bodies) {
+			if (!PrototypeBodyHasBuildGroup(body, a_buildGroup) || !body.bone) {
+				continue;
+			}
+
+			if (auto* mergedNode = findMergedNode(body.node); mergedNode && mergedNode->node) {
+				if (mergedNode->hasLocalToParent) {
+					mergedNode->node->local = mergedNode->localToParent;
+				}
+				if (auto* node = mergedNode->node->IsNode()) {
+					UpdateNodeWorldFromLocal(node);
+				} else if (mergedNode->node->parent) {
+					mergedNode->node->world = mergedNode->node->parent->world * mergedNode->node->local;
+				} else {
+					mergedNode->node->world = mergedNode->node->local;
+				}
+				++syncedNodes;
+			}
+
+			body.bone->readTransform(0.0F);
+			body.bone->RefreshSkinWorldTransforms();
+			++resetBodies;
+		}
+
+		if (resetBodies > 0) {
+			spdlog::debug(
+				"reset prototype build group to reference pose actor={} buildGroup={} bodies={} syncedPluginNodes={}",
+				static_cast<void*>(a_state.actor),
+				a_buildGroup,
+				resetBodies,
+				syncedNodes);
+		}
+		return resetBodies;
 	}
 
 	bool Fo4PhysicsWorld::BuildPrototypeMeshesLocked(

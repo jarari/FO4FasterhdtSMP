@@ -46,6 +46,7 @@ namespace Smp
 		void CollectSkinWorldTransformRestoreSlots(std::vector<SkinSlotRestore>& a_slots) const;
 		void RemoveSkinWorldTransformsForBuildGroup(std::uint64_t a_buildGroup);
 		void RemoveSkinWorldTransformsForBuildGroup(std::uint64_t a_buildGroup, std::span<const ActiveSkinSlot> a_activeSlots);
+		void RefreshSkinWorldTransforms();
 		void readTransform(float a_timeStep) override;
 		void writeTransform() override;
 

@@ -211,7 +211,6 @@ namespace Smp
 			float currentWindFactor{ 1.0F };
 			bool runtimeSuspended{ false };
 			bool runtimeSoftSuspended{ false };
-			std::uint64_t softSuspendAfterSimulationFrame{ 0 };
 			RE::NiPointer<RE::NiAVObject> faceNode;
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
@@ -267,7 +266,6 @@ namespace Smp
 		void TryReactivateSuspendedActorsLocked();
 		void TryReactivateSuspendedPrototypeStatesLocked();
 		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
-		bool IsBuildSoftSuspendSettlePendingLocked(const PrototypeActorState& a_state) const;
 		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
@@ -321,6 +319,7 @@ namespace Smp
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeConstraint>& a_stagedConstraints);
 		void LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, std::string_view a_reason) const;
 		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup, std::span<PrototypeBody> a_stagedBodies = {});
+		std::uint32_t ResetPrototypeBuildGroupToReferencePoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state, const PrototypeBuildGroupRuntime& a_runtime);
 		void LogRootConstraintDiagnosticsLocked(std::string_view a_phase, const PrototypeActorState& a_state);

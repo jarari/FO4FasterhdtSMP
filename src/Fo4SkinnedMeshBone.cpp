@@ -277,6 +277,13 @@ namespace Smp
 		return current;
 	}
 
+	void Fo4SkinnedMeshBone::RefreshSkinWorldTransforms()
+	{
+		std::erase_if(skinWorldTransforms_, [this](SkinWorldTransformSlot& a_slot) {
+			return ResolveSkinWorldTransform(a_slot) == nullptr;
+		});
+	}
+
 	void Fo4SkinnedMeshBone::readTransform(const float a_timeStep)
 	{
 		if (!node_) {
@@ -327,6 +334,10 @@ namespace Smp
 			m_rig.setInterpolationLinearVelocity(linearVelocity);
 			m_rig.setInterpolationAngularVelocity(angularVelocity);
 		}
+
+		if (isStaticOrKinematic) {
+			RefreshSkinWorldTransforms();
+		}
 	}
 
 	void Fo4SkinnedMeshBone::writeTransform()
@@ -347,8 +358,6 @@ namespace Smp
 			node_->local = world;
 		}
 
-		std::erase_if(skinWorldTransforms_, [this](SkinWorldTransformSlot& a_slot) {
-			return ResolveSkinWorldTransform(a_slot) == nullptr;
-		});
+		RefreshSkinWorldTransforms();
 	}
 }
