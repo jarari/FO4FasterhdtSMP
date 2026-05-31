@@ -24,6 +24,17 @@ namespace
 		return "unknown";
 	}
 
+	const char* SimdVariantName()
+	{
+#if defined(FO4_FASTER_HDTSMP_AVX512)
+		return "AVX512";
+#elif defined(FO4_FASTER_HDTSMP_AVX2)
+		return "AVX2";
+#else
+		return "No AVX";
+#endif
+	}
+
 	void LoadRuntimeConfig()
 	{
 		Smp::PhysicsXmlLoader::GetSingleton()->ClearCache();
@@ -116,7 +127,7 @@ F4SEPluginLoad(const F4SE::LoadInterface* a_f4se)
 		.trampolineSize = 1 << 15,
     });
 
-	spdlog::info("{} v{} loading", Version::PROJECT, Version::NAME);
+	spdlog::info("{} v{} ({}) loading", Version::PROJECT, Version::NAME, SimdVariantName());
 	const auto runtimeVersion = a_f4se->RuntimeVersion();
 	const auto executableVersion = REX::FModule::GetExecutingModule().GetFileVersion();
 	spdlog::info(

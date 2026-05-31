@@ -24,19 +24,33 @@ add_requires("tinyxml2")
 add_requires("microsoft-detours")
 add_requires("spdlog v1.16.0", {configs = {header_only = false, wchar = true, std_format = true}})
 
--- define targets
-target("FO4FasterHdtSMP")
-    add_rules("commonlibf4.plugin", {
-        name = "FO4FasterHdtSMP",
-        author = "Bingle",
-        description = "Fallout 4 Faster HDT-SMP prototype using CommonLibF4",
-        plugin_template = path.join(os.projectdir(), "res/commonlibf4-plugin.cpp.in"),
-    })
+local function add_fo4_faster_hdt_smp_target(target_name, arch_flag, variant_define)
+    target(target_name)
+        add_rules("commonlibf4.plugin", {
+            name = "FO4FasterHdtSMP",
+            author = "Bingle",
+            description = "Fallout 4 Faster HDT-SMP prototype using CommonLibF4",
+            plugin_template = path.join(os.projectdir(), "res/commonlibf4-plugin.cpp.in"),
+        })
 
-    -- add src files
-    add_files("src/**.cpp")
-    add_headerfiles("src/**.h")
-    add_includedirs("src")
-    add_packages("bullet3", "tbb", "xbyak", "tinyxml2", "microsoft-detours", "spdlog")
-    add_installfiles("res/configs.xml", "res/defaultBBPs.xml", "res/prototype-sample.xml", { prefixdir = "F4SE/Plugins/FO4FasterHdtSMP" })
-    set_pcxxheader("src/pch.h")
+        if arch_flag then
+            add_cxxflags(arch_flag, { tools = "cl" })
+            add_cflags(arch_flag, { tools = "cl" })
+        end
+        if variant_define then
+            add_defines(variant_define)
+        end
+
+        -- add src files
+        add_files("src/**.cpp")
+        add_headerfiles("src/**.h")
+        add_includedirs("src")
+        add_packages("bullet3", "tbb", "xbyak", "tinyxml2", "microsoft-detours", "spdlog")
+        add_installfiles("res/configs.xml", "res/defaultBBPs.xml", "res/prototype-sample.xml", { prefixdir = "F4SE/Plugins/FO4FasterHdtSMP" })
+        set_pcxxheader("src/pch.h")
+end
+
+-- define targets
+add_fo4_faster_hdt_smp_target("FO4FasterHdtSMP")
+add_fo4_faster_hdt_smp_target("FO4FasterHdtSMP-AVX2", "/arch:AVX2", "FO4_FASTER_HDTSMP_AVX2")
+add_fo4_faster_hdt_smp_target("FO4FasterHdtSMP-AVX512", "/arch:AVX512", "FO4_FASTER_HDTSMP_AVX512")

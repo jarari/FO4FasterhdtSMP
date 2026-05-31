@@ -4,6 +4,10 @@
 
 #include <algorithm>
 
+#if defined(__AVX2__) || defined(__AVX512F__) || defined(FO4_FASTER_HDTSMP_AVX2) || defined(FO4_FASTER_HDTSMP_AVX512)
+#define HDT_USE_FMA_VERTEX_UPDATE 1
+#endif
+
 namespace hdt
 {
 	SkinnedMeshBody::CollisionShape::CollisionShape() :
@@ -31,13 +35,27 @@ namespace hdt
 
 	namespace
 	{
-		__m128 CalculateVertexState(const btVector3& a_skinPosition, const Bone& a_bone, const float a_weight)
+		__m128 CalculateVertexState(__m128 a_skinPosition, const Bone& a_bone, __m128 a_weight)
 		{
-			auto position = a_bone.vertexToWorld_ * a_skinPosition;
+			const auto position = a_bone.vertexToWorld_ * vectorFromM128(a_skinPosition);
 			__m128 packed = position.get128();
 			packed = _mm_blend_ps(packed, _mm_load_ps(a_bone.reserved_), 0x8);
-			return _mm_mul_ps(_mm_set1_ps(a_weight), packed);
+			return _mm_mul_ps(a_weight, packed);
 		}
+
+#ifdef HDT_USE_FMA_VERTEX_UPDATE
+		__m128 CalculateVertexStateFMA(__m128 a_skinPosition, const Bone& a_bone, __m128 a_weight)
+		{
+			const __m128 px = setAll0(a_skinPosition);
+			const __m128 py = setAll1(a_skinPosition);
+			const __m128 pz = setAll2(a_skinPosition);
+			__m128 result = _mm_fmadd_ps(a_bone.vertexToWorld_.col_[2].get128(), pz, a_bone.vertexToWorld_.col_[3].get128());
+			result = _mm_fmadd_ps(a_bone.vertexToWorld_.col_[1].get128(), py, result);
+			result = _mm_fmadd_ps(a_bone.vertexToWorld_.col_[0].get128(), px, result);
+			result = _mm_blend_ps(result, _mm_load_ps(a_bone.reserved_), 0x8);
+			return _mm_mul_ps(a_weight, result);
+		}
+#endif
 	}
 
 	void SkinnedMeshBody::internalUpdate()
@@ -48,6 +66,9 @@ namespace hdt
 
 		bones_.resize(skinnedBones_.size());
 		for (std::size_t index = 0; index < skinnedBones_.size(); ++index) {
+			if (index + 8 < skinnedBones_.size()) {
+				_mm_prefetch(reinterpret_cast<const char*>(std::addressof(skinnedBones_[index + 8])), _MM_HINT_T1);
+			}
 			auto& source = skinnedBones_[index];
 			auto& destination = bones_[index];
 			if (!source.ptr) {
@@ -63,19 +84,82 @@ namespace hdt
 		}
 
 		vertexPositions_.resize(vertices_.size());
-		for (std::size_t index = 0; index < vertices_.size(); ++index) {
-			const auto& vertex = vertices_[index];
-			__m128 blended = _mm_setzero_ps();
-			for (int weightIndex = 0; weightIndex < 4; ++weightIndex) {
-				const auto boneIndex = vertex.getBoneIdx(weightIndex);
-				if (vertex.weight_[weightIndex] <= FLT_EPSILON || boneIndex >= bones_.size()) {
-					continue;
+		const auto vertexCount = static_cast<int>(vertices_.size());
+		const auto* const __restrict vertices = vertices_.data();
+		auto* const __restrict vertexPositions = vertexPositions_.data();
+		const auto* const __restrict bones = bones_.data();
+
+		if (!bones_.empty()) {
+#ifdef HDT_USE_FMA_VERTEX_UPDATE
+			constexpr int prefetchDistance = 6;
+			int index = 0;
+			for (; index + 1 < vertexCount; index += 2) {
+				if (index + prefetchDistance + 1 < vertexCount) {
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance])), _MM_HINT_T0);
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance + 1])), _MM_HINT_T0);
 				}
-				blended = _mm_add_ps(blended, CalculateVertexState(vertex.skinPos_, bones_[boneIndex], vertex.weight_[weightIndex]));
+
+				const auto& vertex0 = vertices[index];
+				const auto skinPosition0 = vertex0.skinPos_.get128();
+				const auto weights0 = _mm_load_ps(vertex0.weight_);
+				auto blended0 = CalculateVertexStateFMA(skinPosition0, bones[vertex0.getBoneIdx(0)], setAll0(weights0));
+				blended0 += CalculateVertexStateFMA(skinPosition0, bones[vertex0.getBoneIdx(1)], setAll1(weights0));
+				blended0 += CalculateVertexStateFMA(skinPosition0, bones[vertex0.getBoneIdx(2)], setAll2(weights0));
+				blended0 += CalculateVertexStateFMA(skinPosition0, bones[vertex0.getBoneIdx(3)], setAll3(weights0));
+				vertexPositions[index].set(blended0);
+
+				const auto& vertex1 = vertices[index + 1];
+				const auto skinPosition1 = vertex1.skinPos_.get128();
+				const auto weights1 = _mm_load_ps(vertex1.weight_);
+				auto blended1 = CalculateVertexStateFMA(skinPosition1, bones[vertex1.getBoneIdx(0)], setAll0(weights1));
+				blended1 += CalculateVertexStateFMA(skinPosition1, bones[vertex1.getBoneIdx(1)], setAll1(weights1));
+				blended1 += CalculateVertexStateFMA(skinPosition1, bones[vertex1.getBoneIdx(2)], setAll2(weights1));
+				blended1 += CalculateVertexStateFMA(skinPosition1, bones[vertex1.getBoneIdx(3)], setAll3(weights1));
+				vertexPositions[index + 1].set(blended1);
 			}
-			alignas(16) float values[4];
-			_mm_store_ps(values, blended);
-			vertexPositions_[index].set(btVector4(values[0], values[1], values[2], values[3]));
+			for (; index < vertexCount; ++index) {
+				const auto& vertex = vertices[index];
+				const auto skinPosition = vertex.skinPos_.get128();
+				const auto weights = _mm_load_ps(vertex.weight_);
+				auto blended = CalculateVertexStateFMA(skinPosition, bones[vertex.getBoneIdx(0)], setAll0(weights));
+				blended += CalculateVertexStateFMA(skinPosition, bones[vertex.getBoneIdx(1)], setAll1(weights));
+				blended += CalculateVertexStateFMA(skinPosition, bones[vertex.getBoneIdx(2)], setAll2(weights));
+				blended += CalculateVertexStateFMA(skinPosition, bones[vertex.getBoneIdx(3)], setAll3(weights));
+				vertexPositions[index].set(blended);
+			}
+#else
+			constexpr int prefetchDistance = 8;
+			int index = 0;
+			for (; index + 3 < vertexCount; index += 4) {
+				if (index + prefetchDistance + 3 < vertexCount) {
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance])), _MM_HINT_T0);
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance + 1])), _MM_HINT_T0);
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance + 2])), _MM_HINT_T0);
+					_mm_prefetch(reinterpret_cast<const char*>(std::addressof(vertices[index + prefetchDistance + 3])), _MM_HINT_T0);
+				}
+
+				for (int lane = 0; lane < 4; ++lane) {
+					const auto& vertex = vertices[index + lane];
+					const auto skinPosition = vertex.skinPos_.get128();
+					const auto weights = _mm_load_ps(vertex.weight_);
+					auto blended = CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(0)], setAll0(weights));
+					blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(1)], setAll1(weights));
+					blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(2)], setAll2(weights));
+					blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(3)], setAll3(weights));
+					vertexPositions[index + lane].set(blended);
+				}
+			}
+			for (; index < vertexCount; ++index) {
+				const auto& vertex = vertices[index];
+				const auto skinPosition = vertex.skinPos_.get128();
+				const auto weights = _mm_load_ps(vertex.weight_);
+				auto blended = CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(0)], setAll0(weights));
+				blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(1)], setAll1(weights));
+				blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(2)], setAll2(weights));
+				blended += CalculateVertexState(skinPosition, bones[vertex.getBoneIdx(3)], setAll3(weights));
+				vertexPositions[index].set(blended);
+			}
+#endif
 		}
 
 		if (shape_) {

@@ -41,6 +41,11 @@ namespace hdt
 			data_ = a_positionAndMargin.get128();
 		}
 
+		void set(__m128 a_positionAndMargin)
+		{
+			data_ = a_positionAndMargin;
+		}
+
 		btVector3 pos() const { return vectorFromM128(data_); }
 		__m128 marginMultiplier4() const { return pshufd<0xFF>(data_); }
 		float marginMultiplier() const { return _mm_cvtss_f32(marginMultiplier4()); }
