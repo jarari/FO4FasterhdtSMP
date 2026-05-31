@@ -15,6 +15,7 @@ namespace Smp
 		std::string name;
 		hdt::btQsTransform skinToBone{ hdt::btQsTransform::getIdentity() };
 		hdt::BoundingSphere boundingSphere;
+		bool hasSkinToBone{ false };
 		bool hasBoneData{ false };
 	};
 

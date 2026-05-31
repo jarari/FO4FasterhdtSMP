@@ -137,6 +137,46 @@ namespace
 		return isNode && reinterpret_cast<std::uintptr_t>(isNode) <= kCanonicalUserSpaceMax;
 	}
 
+	std::uint32_t CountNullSkinBones(RE::BSSkin::Instance* a_skin)
+	{
+		if (!a_skin) {
+			return 0;
+		}
+
+		std::uint32_t count = 0;
+		for (auto* bone : a_skin->bones) {
+			if (!bone) {
+				++count;
+			}
+		}
+		return count;
+	}
+
+	void MakeSkinBonesReal(RE::BSSkin::Instance* a_skin, const std::string& a_meshName)
+	{
+		if (!a_skin || a_skin->bones.empty()) {
+			return;
+		}
+
+		const auto beforeNullBones = CountNullSkinBones(a_skin);
+		if (beforeNullBones == 0) {
+			return;
+		}
+
+		using func_t = void (*)(RE::BSSkin::Instance*);
+		static REL::Relocation<func_t> makeBonesReal{ REL::ID{ 497936, 2270470 } };
+		makeBonesReal(a_skin);
+
+		const auto afterNullBones = CountNullSkinBones(a_skin);
+		if (afterNullBones != beforeNullBones) {
+			spdlog::debug(
+				"mesh '{}' realized BSSkin bones nullBefore={} nullAfter={}",
+				a_meshName,
+				beforeNullBones,
+				afterNullBones);
+		}
+	}
+
 	void DecodeSkinBones(RE::BSSkin::Instance* a_skin, std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
 	{
 		if (!a_skin) {
@@ -185,6 +225,7 @@ namespace
 				const auto& transform = a_skin->boneData->transforms[index];
 				decoded.skinToBone = Smp::Fo4Transform::ToBulletQsTransform(transform.transform);
 				decoded.boundingSphere = ToBoundingSphere(transform.bound);
+				decoded.hasSkinToBone = true;
 				decoded.hasBoneData = true;
 			} else {
 				++a_stats.missingBoneData;
@@ -210,7 +251,14 @@ namespace
 		return count;
 	}
 
-	bool SanitizeVertexSkinning(hdt::Vertex& a_vertex, const std::size_t a_boneCount, Smp::Fo4MeshExtractionStats& a_stats)
+	bool HasUsableSkinBone(const std::vector<Smp::Fo4DecodedSkinBone>& a_bones, const std::size_t a_boneIndex)
+	{
+		return a_boneIndex < a_bones.size() &&
+			a_bones[a_boneIndex].node &&
+			a_bones[a_boneIndex].hasSkinToBone;
+	}
+
+	bool SanitizeVertexSkinning(hdt::Vertex& a_vertex, const std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
 	{
 		constexpr std::size_t kMaxSkinInfluences = 4;
 		float totalWeight = 0.0F;
@@ -219,7 +267,7 @@ namespace
 				a_vertex.weight_[index] = 0.0F;
 				continue;
 			}
-			if (a_vertex.boneIdx_[index] >= a_boneCount) {
+			if (!HasUsableSkinBone(a_bones, a_vertex.boneIdx_[index])) {
 				++a_stats.badBoneIndices;
 				a_vertex.weight_[index] = 0.0F;
 				a_vertex.boneIdx_[index] = 0;
@@ -229,16 +277,7 @@ namespace
 		}
 
 		if (totalWeight <= FLT_EPSILON) {
-			if (a_boneCount == 0) {
-				return false;
-			}
-			a_vertex.weight_[0] = 1.0F;
-			a_vertex.boneIdx_[0] = 0;
-			for (std::size_t index = 1; index < kMaxSkinInfluences; ++index) {
-				a_vertex.weight_[index] = 0.0F;
-				a_vertex.boneIdx_[index] = 0;
-			}
-			return true;
+			return false;
 		}
 
 		const auto invTotalWeight = 1.0F / totalWeight;
@@ -303,6 +342,7 @@ namespace
 		mesh.geometry = a_geometry;
 		const auto name = a_geometry->GetName();
 		mesh.name = name.empty() ? std::string{} : std::string(name);
+		MakeSkinBonesReal(skin, mesh.name);
 		DecodeSkinBones(skin, mesh.bones, a_result.stats);
 		mesh.vertices.reserve(triShape->numVertices);
 
@@ -371,7 +411,7 @@ namespace
 				vertex.boneIdx_[index] = indices[index];
 			}
 			const auto beforeBadBoneIndices = a_result.stats.badBoneIndices;
-			if (!SanitizeVertexSkinning(vertex, mesh.bones.size(), a_result.stats)) {
+			if (!SanitizeVertexSkinning(vertex, mesh.bones, a_result.stats)) {
 				++skippedUnusableVertices;
 				continue;
 			}
