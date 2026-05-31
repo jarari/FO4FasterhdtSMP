@@ -23,13 +23,13 @@ namespace Smp::Fo4Transform
 	{
 		const btMatrix3x3 basis(
 			a_transform.rotate[0].x,
-			a_transform.rotate[0].y,
-			a_transform.rotate[0].z,
 			a_transform.rotate[1].x,
-			a_transform.rotate[1].y,
-			a_transform.rotate[1].z,
 			a_transform.rotate[2].x,
+			a_transform.rotate[0].y,
+			a_transform.rotate[1].y,
 			a_transform.rotate[2].y,
+			a_transform.rotate[0].z,
+			a_transform.rotate[1].z,
 			a_transform.rotate[2].z);
 
 		return btTransform(basis, btVector3(a_transform.translate.x, a_transform.translate.y, a_transform.translate.z));
@@ -50,9 +50,9 @@ namespace Smp::Fo4Transform
 		const auto& basis = a_transform.getBasis();
 		RE::NiTransform result;
 		result.rotate = RE::NiMatrix3(
-			basis[0].x(), basis[0].y(), basis[0].z(), 0.0F,
-			basis[1].x(), basis[1].y(), basis[1].z(), 0.0F,
-			basis[2].x(), basis[2].y(), basis[2].z(), 0.0F);
+			basis[0].x(), basis[1].x(), basis[2].x(), 0.0F,
+			basis[0].y(), basis[1].y(), basis[2].y(), 0.0F,
+			basis[0].z(), basis[1].z(), basis[2].z(), 0.0F);
 		const auto origin = a_transform.getOrigin();
 		result.translate = RE::NiPoint3(origin.x(), origin.y(), origin.z());
 		result.scale = a_scale;
