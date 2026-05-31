@@ -5,19 +5,6 @@
 
 namespace Smp
 {
-	struct LifecycleMergedSkeletonNode
-	{
-		std::string originalName;
-		std::string renamedName;
-		RE::NiNode* node{ nullptr };
-	};
-
-	struct LifecycleMergedRootNode
-	{
-		RE::NiNode* parent{ nullptr };
-		RE::NiAVObject* node{ nullptr };
-	};
-
 	enum class LifecycleEventType
 	{
 		kArmorApplySkinnedObjects,
@@ -33,6 +20,14 @@ namespace Smp
 		kActorReset3D
 	};
 
+	struct MergeParentBinding
+	{
+		std::string sourceName;
+		std::string parentName;
+		RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
+		bool hasLocalToParent{ false };
+	};
+
 	struct LifecycleEvent
 	{
 		LifecycleEventType type;
@@ -44,9 +39,9 @@ namespace Smp
 		RE::NiAVObject*    sourceObject{ nullptr };
 		RE::NiAVObject*    mergeSourceObject{ nullptr };
 		RE::BGSHeadPart*   headPart{ nullptr };
+		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
 		std::vector<RE::NiAVObject*> mergeSearchExclusions;
-		std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
-		std::vector<LifecycleMergedRootNode> preMergedRootNodes;
+		std::vector<MergeParentBinding> mergeParentBindings;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
 		std::string        mergeRenamePrefix;

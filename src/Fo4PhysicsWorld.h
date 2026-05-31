@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DefaultBBP.h"
+#include "Fo4SkinnedMeshBone.h"
 #include "LifecycleEvents.h"
 #include "RE/N/NiTransform.h"
 
@@ -8,6 +9,7 @@
 
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -26,6 +28,7 @@ class btTypedConstraint;
 namespace RE
 {
 	class MenuOpenCloseEvent;
+	class NiAVObject;
 }
 
 namespace hdt
@@ -101,14 +104,15 @@ namespace Smp
 			RE::Actor* actor{ nullptr };
 			RE::NiNode* node{ nullptr };
 			std::uint64_t buildGroup{ 0 };
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 			std::vector<std::uint64_t> buildGroups;
 			std::vector<std::pair<std::uint64_t, PrototypeBuildDomain>> buildGroupDomains;
-			RE::NiNode* resetParent{ nullptr };
-			std::unique_ptr<RE::NiTransform> resetLocalToParent;
+			std::vector<std::pair<std::uint64_t, RE::BIPED_OBJECT>> buildGroupBipedObjects;
 			std::string boneName;
 			std::unique_ptr<btCollisionShape> shape;
 			std::unique_ptr<btDefaultMotionState> motionState;
 			std::unique_ptr<Fo4SkinnedMeshBone> bone;
+			bool inBulletWorld{ false };
 		};
 
 		struct PrototypeConstraint
@@ -123,6 +127,7 @@ namespace Smp
 			float scaleA{ 1.0F };
 			float scaleB{ 1.0F };
 			std::unique_ptr<btTypedConstraint> constraint;
+			bool inBulletWorld{ false };
 		};
 
 		struct PrototypeMesh
@@ -130,8 +135,10 @@ namespace Smp
 			std::string name;
 			RE::BSGeometry* geometry{ nullptr };
 			std::uint64_t buildGroup{ 0 };
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 			PrototypeBuildDomain domain{ PrototypeBuildDomain::kArmor };
 			RE::BSTSmartPointer<hdt::SkinnedMeshBody> body;
+			bool inBulletWorld{ false };
 		};
 
 		struct PrototypeMergedNode
@@ -139,6 +146,10 @@ namespace Smp
 			std::uint64_t buildGroup{ 0 };
 			RE::NiNode* parent{ nullptr };
 			RE::NiPointer<RE::NiAVObject> node;
+			std::string sourceName;
+			RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
+			bool hasLocalToParent{ false };
+			bool recordMergeParentBinding{ false };
 		};
 
 		struct PrototypeArmorRecord
@@ -146,15 +157,41 @@ namespace Smp
 			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 			std::string physicsXmlPath;
 			DefaultBBP::NameMap meshNameMap;
-			std::vector<LifecycleMergedSkeletonNode> preMergedSkeletonNodes;
-			std::vector<LifecycleMergedRootNode> preMergedRootNodes;
+			RE::NiPointer<RE::NiAVObject> attachedObject;
+			RE::NiPointer<RE::NiAVObject> sourceObject;
+			RE::NiPointer<RE::NiAVObject> mergeSourceObject;
+			std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
+			std::vector<MergeParentBinding> mergeParentBindings;
 			std::uint32_t cpuCopyRetryCount{ 0 };
+		};
+
+		struct PrototypeAttachmentRecord
+		{
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+			std::uint32_t generation{ 0 };
+			std::string physicsXmlPath;
+			RE::NiPointer<RE::NiAVObject> attachedObject;
+			RE::NiPointer<RE::NiAVObject> sourceObject;
+			std::vector<std::uint64_t> buildGroups;
 		};
 
 		struct PrototypeBuildResult
 		{
+			std::uint64_t buildGroup{ 0 };
 			bool cpuCopyPending{ false };
+			bool committed{ false };
+			bool recordable{ false };
 			bool succeeded{ false };
+		};
+
+		struct PrototypeBuildGroupRuntime
+		{
+			std::uint64_t buildGroup{ 0 };
+			PrototypeBuildDomain domain{ PrototypeBuildDomain::kArmor };
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+			std::vector<hdt::SkinnedMeshBody*> meshes;
+			std::vector<Fo4SkinnedMeshBone*> bones;
+			std::vector<btTypedConstraint*> constraints;
 		};
 
 		struct PrototypeActorState
@@ -162,24 +199,34 @@ namespace Smp
 			RE::Actor* actor{ nullptr };
 			RE::ActorHandle actorHandle;
 			bool firstPerson{ false };
+			RE::NiPointer<RE::NiAVObject> lastReadRoot;
+			bool readInitialized{ false };
 			std::uint64_t nextBuildGroup{ 0 };
-			std::uint32_t nextArmorRenameId{ 0 };
-			std::uint32_t nextHeadRenameId{ 0 };
+			std::uint32_t nextAttachmentGeneration{ 0 };
 			std::uint64_t lastWritebackFrame{ 0 };
 			WritebackSource lastWritebackSource{ WritebackSource::kUnknown };
 			std::uint32_t resetReadFrames{ 0 };
 			float currentWindFactor{ 1.0F };
 			bool runtimeSuspended{ false };
+			bool runtimeSoftSuspended{ false };
 			RE::NiPointer<RE::NiAVObject> faceNode;
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
 			std::vector<PrototypeConstraint> constraints;
 			std::vector<PrototypeMergedNode> mergedNodes;
 			std::vector<PrototypeArmorRecord> armorRecords;
+			std::vector<PrototypeAttachmentRecord> attachmentRecords;
+			std::vector<PrototypeBuildGroupRuntime> runtimes;
+			std::vector<Fo4SkinnedMeshBone::SkinSlotRestore> suspendedSkinSlots;
 
 			[[nodiscard]] bool HasRuntime() const
 			{
-				return !bodies.empty() || !meshes.empty() || !constraints.empty();
+				return !runtimes.empty() || !bodies.empty() || !meshes.empty() || !constraints.empty();
+			}
+
+			[[nodiscard]] bool HasActiveRuntime() const
+			{
+				return HasRuntime() && !runtimeSuspended && !runtimeSoftSuspended;
 			}
 		};
 
@@ -196,6 +243,7 @@ namespace Smp
 			bool firstPerson{ false };
 			std::vector<PrototypeArmorRecord> armorRecords;
 			std::uint32_t frameDelay{ 0 };
+			bool forceArmorRescan{ false };
 		};
 
 		struct PendingHeadRebuild
@@ -215,38 +263,60 @@ namespace Smp
 		void SuspendActorCandidateLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
 		void TryReactivateSuspendedActorsLocked();
 		void TryReactivateSuspendedPrototypeStatesLocked();
-		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {});
+		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
+		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
+		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);
+		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event);
+		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {}, bool a_forceArmorRescan = false, bool a_scheduleImmediately = true, bool a_replaceArmorRecords = false);
 		void MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event);
 		void SchedulePendingRebuildTaskLocked();
 		bool HasActiveOrPendingActorRebuildLocked(RE::Actor* a_actor);
-		bool HasPendingArmorRecordRebuildLocked(RE::Actor* a_actor);
 		std::vector<PrototypeArmorRecord> CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event);
 		void RecordPrototypeArmorLocked(
 			PrototypeActorState& a_state,
 			RE::BIPED_OBJECT a_bipedObject,
 			std::string a_physicsXmlPath,
 			const DefaultBBP::NameMap& a_meshNameMap,
-			const std::vector<LifecycleMergedSkeletonNode>& a_preMergedSkeletonNodes,
-			const std::vector<LifecycleMergedRootNode>& a_preMergedRootNodes);
-		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord>& a_armorRecords, std::uint32_t* a_retryDelay = nullptr);
+			RE::NiAVObject* a_attachedObject = nullptr,
+			RE::NiAVObject* a_sourceObject = nullptr,
+			RE::NiAVObject* a_mergeSourceObject = nullptr,
+			std::vector<RE::NiAVObject*> a_trustedActorSkeletonNodes = {},
+			std::uint64_t a_buildGroup = 0);
+		PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
+		const PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
+		bool IsPrototypeAttachmentCurrentLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object, RE::NiAVObject* a_sourceObject, std::string_view a_physicsXmlPath);
+		void RecordPrototypeAttachmentLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object, RE::NiAVObject* a_sourceObject, std::string a_physicsXmlPath, std::uint64_t a_buildGroup);
+		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, PendingActorRebuild& a_pending);
 		void TryRebuildPendingActorsLocked(RE::Actor* a_actor = nullptr);
 		void TryRebuildPendingHeadsLocked();
 		void SuspendPrototypeStatesForCustomizationMenuLocked();
 		void ReloadPrototypeStatesForCustomizationMenuLocked();
-		void ClearPrototypeStatesForMenuRebuildLocked();
 		void SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state);
+		void SoftSuspendPrototypeRuntimeLocked(PrototypeActorState& a_state);
+		bool ResumeSoftSuspendedPrototypeRuntimeLocked(PrototypeActorState& a_state);
 		void ClearPrototypeStateLocked(PrototypeActorState& a_state, bool a_restoreSkinSlots = true);
+		std::uint32_t RestoreSuspendedSkinSlotsLocked(PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups, std::span<const Fo4SkinnedMeshBone::ActiveSkinSlot> a_activeSlots = {});
+		std::uint32_t RestoreAllSuspendedSkinSlotsLocked(PrototypeActorState& a_state);
+		std::vector<std::uint64_t> CollectPrototypeGroupsForObjectLocked(const PrototypeActorState& a_state, RE::NiAVObject* a_object) const;
 		bool ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object);
+		bool ClearPrototypeGroupsForBipedObjectLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject);
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
 		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
+		float PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);
+		bool PrototypeBuildGroupHasMeshLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
+		bool PrototypeBuildGroupHasBodyLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
+		bool PrototypeBuildGroupIsRecordableLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain) const;
+		void CommitPrototypeBuildGroupToBulletLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		PrototypeBuildResult BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
-		void BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
-		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain);
-		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
+		bool BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeMesh>& a_stagedMeshes);
+		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeConstraint>& a_stagedConstraints);
+		void LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, std::string_view a_reason) const;
+		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup, std::span<PrototypeBody> a_stagedBodies = {});
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state);
+		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state, const PrototypeBuildGroupRuntime& a_runtime);
 		void LogRootConstraintDiagnosticsLocked(std::string_view a_phase, const PrototypeActorState& a_state);
 		void UpdateMeshDisableStatesLocked(PrototypeActorState& a_state);
 		void ResetStepClockLocked();
@@ -307,7 +377,6 @@ namespace Smp
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		std::uint32_t loadingMenuDepth_{ 0 };
 		bool loadingPhysicsSuspended_{ false };
-		bool customizationCloseReloadQueued_{ false };
 		bool pendingRebuildTaskQueued_{ false };
 		bool registered_{ false };
 	};

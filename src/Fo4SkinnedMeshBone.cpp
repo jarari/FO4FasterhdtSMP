@@ -12,7 +12,6 @@ namespace
 	bool  g_unclampedResets = true;
 	float g_unclampedResetAngle = 130.0F;
 
-
 	void ResetRigidBody(btRigidBody& a_body, const btTransform& a_transform)
 	{
 		const btVector3 zero(0.0F, 0.0F, 0.0F);
@@ -40,6 +39,7 @@ namespace
 		destinationRotation.normalize();
 		return currentRotation.angleShortestPath(destinationRotation);
 	}
+
 }
 
 namespace Smp
@@ -76,7 +76,8 @@ namespace Smp
 		const std::uint32_t a_index,
 		const std::uint64_t a_buildGroup,
 		RE::NiAVObject* a_originalBone,
-		RE::NiTransform* a_originalWorldTransform)
+		RE::NiTransform* a_originalWorldTransform,
+		RE::NiAVObject* a_originalRootNode)
 	{
 		if (!a_skin || a_index >= a_skin->worldTransforms.size()) {
 			return;
@@ -97,6 +98,9 @@ namespace Smp
 			if (!found->originalWorldTransform && a_originalWorldTransform) {
 				found->originalWorldTransform = a_originalWorldTransform;
 			}
+			if (!found->originalRootNode && a_originalRootNode) {
+				found->originalRootNode = a_originalRootNode;
+			}
 			found->cached = transform;
 			return;
 		}
@@ -107,23 +111,73 @@ namespace Smp
 			.buildGroup = a_buildGroup,
 			.originalBone = a_originalBone,
 			.originalWorldTransform = a_originalWorldTransform,
+			.originalRootNode = a_originalRootNode,
 			.cached = transform,
 		});
 	}
 
+	void Fo4SkinnedMeshBone::CollectSkinWorldTransformSlots(std::vector<ActiveSkinSlot>& a_slots) const
+	{
+		for (const auto& slot : skinWorldTransforms_) {
+			if (!slot.skin || slot.buildGroup == 0) {
+				continue;
+			}
+			a_slots.push_back({
+				.skin = slot.skin.get(),
+				.index = slot.index,
+				.buildGroup = slot.buildGroup,
+			});
+		}
+	}
+
+	void Fo4SkinnedMeshBone::CollectSkinWorldTransformRestoreSlots(std::vector<SkinSlotRestore>& a_slots) const
+	{
+		auto* node = node_.get();
+		if (!node) {
+			return;
+		}
+
+		for (const auto& slot : skinWorldTransforms_) {
+			if (!slot.skin || slot.buildGroup == 0) {
+				continue;
+			}
+			a_slots.push_back({
+				.skin = slot.skin,
+				.index = slot.index,
+				.buildGroup = slot.buildGroup,
+				.reboundBone = node,
+				.reboundWorldTransform = std::addressof(node->world),
+				.originalBone = slot.originalBone,
+				.originalWorldTransform = slot.originalWorldTransform,
+				.originalRootNode = slot.originalRootNode,
+			});
+		}
+	}
+
 	void Fo4SkinnedMeshBone::RemoveSkinWorldTransformsForBuildGroup(const std::uint64_t a_buildGroup)
+	{
+		RemoveSkinWorldTransformsForBuildGroup(a_buildGroup, std::span<const ActiveSkinSlot>{});
+	}
+
+	void Fo4SkinnedMeshBone::RemoveSkinWorldTransformsForBuildGroup(const std::uint64_t a_buildGroup, const std::span<const ActiveSkinSlot> a_activeSlots)
 	{
 		if (a_buildGroup == 0) {
 			return;
 		}
 
-		std::erase_if(skinWorldTransforms_, [this, a_buildGroup](const SkinWorldTransformSlot& a_slot) {
+		std::erase_if(skinWorldTransforms_, [this, a_buildGroup, a_activeSlots](const SkinWorldTransformSlot& a_slot) {
 			if (a_slot.buildGroup == a_buildGroup && a_slot.skin) {
-				const auto keepRebound = std::ranges::any_of(skinWorldTransforms_, [&a_slot, a_buildGroup](const SkinWorldTransformSlot& a_other) {
-					return a_other.buildGroup != a_buildGroup &&
-						a_other.skin.get() == a_slot.skin.get() &&
-						a_other.index == a_slot.index;
-				});
+				const auto keepRebound =
+					std::ranges::any_of(skinWorldTransforms_, [&a_slot, a_buildGroup](const SkinWorldTransformSlot& a_other) {
+						return a_other.buildGroup != a_buildGroup &&
+							a_other.skin.get() == a_slot.skin.get() &&
+							a_other.index == a_slot.index;
+					}) ||
+					std::ranges::any_of(a_activeSlots, [&a_slot, a_buildGroup](const ActiveSkinSlot& a_other) {
+						return a_other.buildGroup != a_buildGroup &&
+							a_other.skin == a_slot.skin.get() &&
+							a_other.index == a_slot.index;
+					});
 				if (keepRebound) {
 					return true;
 				}
@@ -149,6 +203,23 @@ namespace Smp
 						worldTransform = a_slot.originalWorldTransform;
 					}
 				}
+				const auto keepRootRebound =
+					std::ranges::any_of(skinWorldTransforms_, [&a_slot, a_buildGroup](const SkinWorldTransformSlot& a_other) {
+						return a_other.buildGroup != a_buildGroup && a_other.skin.get() == a_slot.skin.get();
+					}) ||
+					std::ranges::any_of(a_activeSlots, [&a_slot, a_buildGroup](const ActiveSkinSlot& a_other) {
+						return a_other.buildGroup != a_buildGroup && a_other.skin == a_slot.skin.get();
+					});
+				if (!keepRootRebound && a_slot.originalRootNode && a_slot.skin->rootNode != a_slot.originalRootNode.get()) {
+					spdlog::debug(
+						"restored FO4 skin root for '{}' buildGroup={} skin={} root={} originalRoot={}",
+						m_name.c_str(),
+						a_buildGroup,
+						static_cast<void*>(a_slot.skin.get()),
+						static_cast<void*>(a_slot.skin->rootNode),
+						static_cast<void*>(a_slot.originalRootNode.get()));
+					a_slot.skin->rootNode = a_slot.originalRootNode.get();
+				}
 			}
 			return a_slot.buildGroup == a_buildGroup;
 		});
@@ -158,6 +229,34 @@ namespace Smp
 	{
 		if (!a_slot.skin || a_slot.index >= a_slot.skin->worldTransforms.size()) {
 			return nullptr;
+		}
+
+		auto* node = node_.get();
+		if (!node) {
+			return nullptr;
+		}
+
+		if (a_slot.index < a_slot.skin->bones.size() && a_slot.skin->bones[a_slot.index] != node) {
+			spdlog::debug(
+				"rebound active FO4 skin bone slot for '{}' buildGroup={} index={} skin={} oldNode={} newNode={}",
+				m_name.c_str(),
+				a_slot.buildGroup,
+				a_slot.index,
+				static_cast<void*>(a_slot.skin.get()),
+				static_cast<void*>(a_slot.skin->bones[a_slot.index]),
+				static_cast<void*>(node));
+			a_slot.skin->bones[a_slot.index] = node;
+		}
+		if (a_slot.skin->worldTransforms[a_slot.index] != std::addressof(node->world)) {
+			spdlog::debug(
+				"rebound active FO4 skin world transform for '{}' buildGroup={} index={} skin={} old={} new={}",
+				m_name.c_str(),
+				a_slot.buildGroup,
+				a_slot.index,
+				static_cast<void*>(a_slot.skin.get()),
+				static_cast<void*>(a_slot.skin->worldTransforms[a_slot.index]),
+				static_cast<void*>(std::addressof(node->world)));
+			a_slot.skin->worldTransforms[a_slot.index] = std::addressof(node->world);
 		}
 
 		auto* current = a_slot.skin->worldTransforms[a_slot.index];
@@ -242,6 +341,11 @@ namespace Smp
 
 		const auto world = Smp::Fo4Transform::ToNiTransformNormalizedScale(transform, node_->world.scale);
 		node_->world = world;
+		if (node_->parent) {
+			node_->local = node_->parent->world.Invert() * world;
+		} else {
+			node_->local = world;
+		}
 
 		std::erase_if(skinWorldTransforms_, [this](SkinWorldTransformSlot& a_slot) {
 			return ResolveSkinWorldTransform(a_slot) == nullptr;
