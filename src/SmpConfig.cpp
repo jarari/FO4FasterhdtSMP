@@ -179,6 +179,7 @@ namespace Smp
 			settings_.smp.maxActiveActors = std::max(ReadInt(smp, "maxActiveActors", maxActiveActors), 1);
 			settings_.smp.maxActorDistance = std::clamp(ReadFloat(smp, "maxActorDistance", settings_.smp.maxActorDistance), 0.0F, 100000.0F);
 			settings_.smp.enablePrototypeDiagnostics = ReadBool(smp, "enablePrototypeDiagnostics", settings_.smp.enablePrototypeDiagnostics);
+			settings_.smp.enableBulletVisualization = ReadBool(smp, "enableBulletVisualization", settings_.smp.enableBulletVisualization);
 			settings_.smp.disableSMPHairWhenWigEquipped = ReadBool(smp, "disableSMPHairWhenWigEquipped", settings_.smp.disableSMPHairWhenWigEquipped);
 			settings_.smp.prototypePhysicsXml = ReadText(smp, "prototypePhysicsXml");
 			settings_.smp.backupNodeByName = SplitCommaList(ReadText(smp, "backupNodeByName"));
@@ -221,6 +222,7 @@ namespace Smp
 		spdlog::debug("config: smp.maxActiveActors = {}", settings_.smp.maxActiveActors);
 		spdlog::debug("config: smp.maxActorDistance = {}", settings_.smp.maxActorDistance);
 		spdlog::debug("config: smp.enablePrototypeDiagnostics = {}", settings_.smp.enablePrototypeDiagnostics);
+		spdlog::debug("config: smp.enableBulletVisualization = {}", settings_.smp.enableBulletVisualization);
 		spdlog::debug("config: smp.disableSMPHairWhenWigEquipped = {}", settings_.smp.disableSMPHairWhenWigEquipped);
 		spdlog::debug("config: smp.prototypePhysicsXml = {}", settings_.smp.prototypePhysicsXml);
 		for (const auto& item : settings_.smp.backupNodeByName) {

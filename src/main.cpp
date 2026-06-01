@@ -1,6 +1,7 @@
 #include "Hooks.h"
 #include "DefaultBBP.h"
 #include "Fo4PhysicsWorld.h"
+#include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsXml.h"
 #include "PrototypePhysicsSystem.h"
@@ -10,6 +11,11 @@
 
 namespace
 {
+	void DrawBulletVisualization()
+	{
+		Smp::Fo4PhysicsWorld::GetSingleton()->DrawBulletVisualization();
+	}
+
 	const char* RuntimeName()
 	{
 		if (REX::FModule::IsRuntimeOG()) {
@@ -47,6 +53,8 @@ namespace
 		}
 		Hooks::ApplyConfig(settings);
 		Smp::Fo4PhysicsWorld::GetSingleton()->ApplyConfig(settings);
+		Smp::ImguiLayer::SetEnabled(settings.smp.enableBulletVisualization);
+		Smp::ImguiLayer::SetDrawCallback(settings.smp.enableBulletVisualization ? &DrawBulletVisualization : nullptr);
 		if (settings.smp.enablePrototypeDiagnostics) {
 			Smp::PrototypePhysicsSystem::GetSingleton()->Register();
 		}

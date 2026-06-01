@@ -5,6 +5,7 @@
 #include "ConfigPaths.h"
 #include "Fo4NiObjectUtils.h"
 #include "Fo4PhysicsWorld.h"
+#include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsName.h"
 #include "PhysicsXmlSelection.h"
@@ -827,6 +828,7 @@ namespace Hooks
 	void HookedMainSwap(RE::Main* a_main)
 	{
 		Smp::Fo4PhysicsWorld::GetSingleton()->WriteBackPrototypeBodies(Smp::WritebackSource::kMainSync);
+		Smp::ImguiLayer::RenderFrame();
 		OriginalMainSwap(a_main);
 	}
 

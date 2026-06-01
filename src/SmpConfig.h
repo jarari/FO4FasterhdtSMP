@@ -29,6 +29,7 @@ namespace Smp
 		int maxActiveActors{ 4 };
 		float maxActorDistance{ 3000.0F };
 		bool enablePrototypeDiagnostics{ false };
+		bool enableBulletVisualization{ false };
 		bool disableSMPHairWhenWigEquipped{ true };
 		std::string prototypePhysicsXml;
 		std::vector<std::string> backupNodeByName;

@@ -7,6 +7,7 @@
 #include "Fo4NiObjectUtils.h"
 #include "Fo4SkinnedMeshBone.h"
 #include "Fo4TransformConversion.h"
+#include "BulletVisualization.h"
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
 #include "PhysicsXmlSelection.h"
@@ -3132,17 +3133,25 @@ namespace
 	{
 		btVector3 center(0.0F, 0.0F, 0.0F);
 		int count = 0;
+		int localSpaceCount = 0;
+		int worldSpaceCount = 0;
 		for (int index = 0; index < a_world.getNumCollisionObjects(); ++index) {
 			auto* body = btRigidBody::upcast(a_world.getCollisionObjectArray()[index]);
 			if (!body) {
 				continue;
 			}
 
-			center += body->getWorldTransform().getOrigin();
+			const auto origin = body->getWorldTransform().getOrigin();
+			if (origin.length2() < 2048.0F * 2048.0F) {
+				++localSpaceCount;
+			} else {
+				++worldSpaceCount;
+			}
+			center += origin;
 			++count;
 		}
 
-		if (count <= 0) {
+		if (count <= 0 || localSpaceCount > 0 || worldSpaceCount == 0) {
 			return btVector3(0.0F, 0.0F, 0.0F);
 		}
 
@@ -3814,6 +3823,12 @@ namespace Smp
 			solverInfo.m_erp = solverErp_;
 		}
 		EnforceActorBudgetLocked();
+	}
+
+	void Fo4PhysicsWorld::DrawBulletVisualization()
+	{
+		std::scoped_lock lock(lock_);
+		Smp::BulletVisualization::DrawWorld(dynamicsWorld_.get());
 	}
 
 	void Fo4PhysicsWorld::Reset()

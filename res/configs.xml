@@ -23,6 +23,7 @@
     <maxActiveActors>4</maxActiveActors>
     <maxActorDistance>3000</maxActorDistance>
     <enablePrototypeDiagnostics>false</enablePrototypeDiagnostics>
+    <enableBulletVisualization>false</enableBulletVisualization>
     <prototypePhysicsXml></prototypePhysicsXml>
   </smp>
   <wind>

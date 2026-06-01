@@ -345,6 +345,7 @@ namespace
 		MakeSkinBonesReal(skin, mesh.name);
 		DecodeSkinBones(skin, mesh.bones, a_result.stats);
 		mesh.vertices.reserve(triShape->numVertices);
+		std::vector<std::uint32_t> vertexRemap(triShape->numVertices, std::numeric_limits<std::uint32_t>::max());
 
 		Smp::Fo4CpuBuffer::ResolvedBuffer vertexBufferData;
 		if (!Smp::Fo4CpuBuffer::ResolveReadable(mesh.name, "vertex", vertexBuffer, requiredVertexBytes, vertexBufferData)) {
@@ -365,51 +366,13 @@ namespace
 		for (std::uint16_t vertexIndex = 0; vertexIndex < triShape->numVertices; ++vertexIndex) {
 			RE::NiPoint3 position{};
 			const auto* vertexBase = vertexData + static_cast<std::size_t>(vertexIndex) * vertexStride;
-			RE::NiPoint2 texCoord0{};
-			RE::NiPoint2 texCoord1{};
-			RE::NiPoint3 normal{};
-			RE::NiPoint3 binormal{};
-			RE::NiPoint3 tangent{};
-			RE::NiColorA color{};
-			RE::NiColorA skinWeights{};
-			std::uint8_t boneIndex0{ 0 };
-			std::uint8_t boneIndex1{ 0 };
-			std::uint8_t boneIndex2{ 0 };
-			std::uint8_t boneIndex3{ 0 };
-
-			RE::BSGraphics::Utility::UnpackVertexData(
-				vertexData,
-				vertexIndex,
-				vertexDesc.desc,
-				std::addressof(position),
-				std::addressof(texCoord0),
-				std::addressof(texCoord1),
-				std::addressof(normal),
-				std::addressof(binormal),
-				std::addressof(tangent),
-				std::addressof(color),
-				std::addressof(skinWeights),
-				std::addressof(boneIndex0),
-				std::addressof(boneIndex1),
-				std::addressof(boneIndex2),
-				std::addressof(boneIndex3));
-			if (vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)) {
-				if (vertexStride < sizeof(float) * 3) {
-					++skippedUnusableVertices;
-					continue;
-				}
-				position.x = ReadUnaligned<float>(vertexBase);
-				position.y = ReadUnaligned<float>(vertexBase + sizeof(float));
-				position.z = ReadUnaligned<float>(vertexBase + sizeof(float) * 2);
+			if (!DecodePosition(vertexBase, vertexStride, vertexDesc, position)) {
+				++skippedUnusableVertices;
+				continue;
 			}
 
 			hdt::Vertex vertex(position.x, position.y, position.z);
-			const std::array weights{ skinWeights.r, skinWeights.g, skinWeights.b, skinWeights.a };
-			const std::array indices{ boneIndex0, boneIndex1, boneIndex2, boneIndex3 };
-			for (std::size_t index = 0; index < weights.size(); ++index) {
-				vertex.weight_[index] = weights[index];
-				vertex.boneIdx_[index] = indices[index];
-			}
+			DecodeSkinning(vertexBase, vertexStride, vertexDesc, vertex);
 			const auto beforeBadBoneIndices = a_result.stats.badBoneIndices;
 			if (!SanitizeVertexSkinning(vertex, mesh.bones, a_result.stats)) {
 				++skippedUnusableVertices;
@@ -417,6 +380,7 @@ namespace
 			}
 			mesh.badBoneIndices += a_result.stats.badBoneIndices - beforeBadBoneIndices;
 			vertex.sortWeight();
+			vertexRemap[vertexIndex] = static_cast<std::uint32_t>(mesh.vertices.size());
 			mesh.vertices.push_back(vertex);
 		}
 		if (skippedUnusableVertices > 0) {
@@ -459,8 +423,24 @@ namespace
 				} else {
 					const auto* indexData = reinterpret_cast<const std::uint16_t*>(indexBufferData.data);
 					mesh.indices.reserve(indexCount);
-					for (std::uint32_t index = 0; index < indexCount; ++index) {
-						mesh.indices.push_back(indexData[index]);
+					for (std::uint32_t index = 0; index + 2 < indexCount; index += 3) {
+						const auto source0 = indexData[index];
+						const auto source1 = indexData[index + 1];
+						const auto source2 = indexData[index + 2];
+						if (source0 >= vertexRemap.size() || source1 >= vertexRemap.size() || source2 >= vertexRemap.size()) {
+							continue;
+						}
+
+						const auto remapped0 = vertexRemap[source0];
+						const auto remapped1 = vertexRemap[source1];
+						const auto remapped2 = vertexRemap[source2];
+						if (remapped0 != std::numeric_limits<std::uint32_t>::max() &&
+							remapped1 != std::numeric_limits<std::uint32_t>::max() &&
+							remapped2 != std::numeric_limits<std::uint32_t>::max()) {
+							mesh.indices.push_back(remapped0);
+							mesh.indices.push_back(remapped1);
+							mesh.indices.push_back(remapped2);
+						}
 					}
 				}
 			}
