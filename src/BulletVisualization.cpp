@@ -437,16 +437,19 @@ namespace
 		btVector3 actorPosition{ 0.0F, 0.0F, 0.0F };
 		btVector3 meshCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 boneCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 localBoneCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 worldBoneCenter{ 0.0F, 0.0F, 0.0F };
+		btVector3 nearOriginBoneCenter{ 0.0F, 0.0F, 0.0F };
+		btVector3 worldLikeBoneCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 rigCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 aabbCenter{ 0.0F, 0.0F, 0.0F };
+		btVector3 vertexAabbMin{ 0.0F, 0.0F, 0.0F };
+		btVector3 vertexAabbMax{ 0.0F, 0.0F, 0.0F };
+		btVector3 vertexAabbCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 objectOrigin{ 0.0F, 0.0F, 0.0F };
 		const char* visualSource{ "none" };
 		std::uint32_t meshSamples{ 0 };
 		std::uint32_t boneSamples{ 0 };
-		std::uint32_t localBoneSamples{ 0 };
-		std::uint32_t worldBoneSamples{ 0 };
+		std::uint32_t nearOriginBoneSamples{ 0 };
+		std::uint32_t worldLikeBoneSamples{ 0 };
 		std::uint32_t rigSamples{ 0 };
 		bool applied{ false };
 	};
@@ -465,13 +468,28 @@ namespace
 		result.aabbCenter = (min + max) * 0.5F;
 
 		for (const auto& position : a_body.vertexPositions_) {
-			result.meshCenter += position.pos();
+			const auto pos = position.pos();
+			result.meshCenter += pos;
+			if (result.meshSamples == 0) {
+				result.vertexAabbMin = pos;
+				result.vertexAabbMax = pos;
+			} else {
+				for (int axis = 0; axis < 3; ++axis) {
+					if (pos[axis] < result.vertexAabbMin[axis]) {
+						result.vertexAabbMin[axis] = pos[axis];
+					}
+					if (pos[axis] > result.vertexAabbMax[axis]) {
+						result.vertexAabbMax[axis] = pos[axis];
+					}
+				}
+			}
 			++result.meshSamples;
 		}
 		if (result.meshSamples == 0) {
 			return result;
 		}
 		result.meshCenter /= static_cast<float>(result.meshSamples);
+		result.vertexAabbCenter = (result.vertexAabbMin + result.vertexAabbMax) * 0.5F;
 
 		for (const auto& bone : a_body.skinnedBones_) {
 			if (!bone.ptr) {
@@ -480,11 +498,11 @@ namespace
 			const auto currentOrigin = bone.ptr->m_currentTransform.getOrigin();
 			result.boneCenter += currentOrigin;
 			if (LooksWorldSpace(currentOrigin)) {
-				result.worldBoneCenter += currentOrigin;
-				++result.worldBoneSamples;
+				result.worldLikeBoneCenter += currentOrigin;
+				++result.worldLikeBoneSamples;
 			} else {
-				result.localBoneCenter += currentOrigin;
-				++result.localBoneSamples;
+				result.nearOriginBoneCenter += currentOrigin;
+				++result.nearOriginBoneSamples;
 			}
 			++result.boneSamples;
 
@@ -497,29 +515,39 @@ namespace
 		if (result.boneSamples > 0) {
 			result.boneCenter /= static_cast<float>(result.boneSamples);
 		}
-		if (result.localBoneSamples > 0) {
-			result.localBoneCenter /= static_cast<float>(result.localBoneSamples);
+		if (result.nearOriginBoneSamples > 0) {
+			result.nearOriginBoneCenter /= static_cast<float>(result.nearOriginBoneSamples);
 		}
-		if (result.worldBoneSamples > 0) {
-			result.worldBoneCenter /= static_cast<float>(result.worldBoneSamples);
+		if (result.worldLikeBoneSamples > 0) {
+			result.worldLikeBoneCenter /= static_cast<float>(result.worldLikeBoneSamples);
 		}
 		if (result.rigSamples > 0) {
 			result.rigCenter /= static_cast<float>(result.rigSamples);
 		}
 
-		const auto meshLooksLocal = !LooksWorldSpace(result.aabbCenter);
-		if (meshLooksLocal && result.rigSamples > 0 && result.localBoneSamples > 0) {
-			result.transform.setOrigin(result.rigCenter - result.localBoneCenter);
-			result.visualSource = "rigLocalBoneDelta";
-		} else if (meshLooksLocal && result.worldBoneSamples > 0) {
-			result.transform.setOrigin(result.worldBoneCenter - result.meshCenter);
-			result.visualSource = "worldBoneCenter";
-		} else if (meshLooksLocal && LooksWorldSpace(result.actorPosition)) {
-			result.transform.setOrigin(result.actorPosition);
-			result.visualSource = "actorPosition";
-		}
-		result.applied = meshLooksLocal && LooksWorldSpace(result.transform.getOrigin());
+		result.visualSource = "vertexPositions";
 		return result;
+	}
+
+	void DrawTransformedAabb(ImDrawList& a_drawList, const Projector& a_projector, const btVector3& a_min, const btVector3& a_max, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
+	{
+		if (a_alignment.applied) {
+			const btVector3 corners[8]{
+				{ a_min.x(), a_min.y(), a_min.z() }, { a_max.x(), a_min.y(), a_min.z() },
+				{ a_max.x(), a_max.y(), a_min.z() }, { a_min.x(), a_max.y(), a_min.z() },
+				{ a_min.x(), a_min.y(), a_max.z() }, { a_max.x(), a_min.y(), a_max.z() },
+				{ a_max.x(), a_max.y(), a_max.z() }, { a_min.x(), a_max.y(), a_max.z() },
+			};
+			const int edges[12][2]{
+				{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 4, 5 }, { 5, 6 },
+				{ 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+			};
+			for (const auto& edge : edges) {
+				DrawLine(a_drawList, a_projector, a_alignment.transform * corners[edge[0]], a_alignment.transform * corners[edge[1]], a_color);
+			}
+		} else {
+			DrawAabb(a_drawList, a_projector, a_min, a_max, a_color);
+		}
 	}
 
 	void DrawTransformedLine(ImDrawList& a_drawList, const Projector& a_projector, const btVector3& a_from, const btVector3& a_to, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
@@ -538,26 +566,15 @@ namespace
 
 	void DrawTransformedShapeAabb(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
 	{
+		if (a_alignment.meshSamples > 0) {
+			DrawTransformedAabb(a_drawList, a_projector, a_alignment.vertexAabbMin, a_alignment.vertexAabbMax, a_alignment, a_color);
+			return;
+		}
+
 		btVector3 min;
 		btVector3 max;
 		a_body.bulletShape_.getAabb(a_body.getWorldTransform(), min, max);
-		if (a_alignment.applied) {
-			const btVector3 corners[8]{
-				{ min.x(), min.y(), min.z() }, { max.x(), min.y(), min.z() },
-				{ max.x(), max.y(), min.z() }, { min.x(), max.y(), min.z() },
-				{ min.x(), min.y(), max.z() }, { max.x(), min.y(), max.z() },
-				{ max.x(), max.y(), max.z() }, { min.x(), max.y(), max.z() },
-			};
-			const int edges[12][2]{
-				{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 4, 5 }, { 5, 6 },
-				{ 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-			};
-			for (const auto& edge : edges) {
-				DrawLine(a_drawList, a_projector, a_alignment.transform * corners[edge[0]], a_alignment.transform * corners[edge[1]], a_color);
-			}
-		} else {
-			DrawAabb(a_drawList, a_projector, min, max, a_color);
-		}
+		DrawTransformedAabb(a_drawList, a_projector, min, max, a_alignment, a_color);
 	}
 
 	MeshVisualAlignment DrawSkinnedMeshBody(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const ImU32 a_color)
@@ -714,14 +731,14 @@ namespace Smp::BulletVisualization
 					continue;
 				}
 				spdlog::debug(
-					"bullet visualization mesh name='{}' actor={} buildGroup={} samples(mesh={}, bone={}, localBone={}, worldBone={}, rig={}) visualOffsetApplied={} visualSource={} actorPosition=({}, {}, {}) visualOrigin=({}, {}, {}) objectOrigin=({}, {}, {}) aabbCenter=({}, {}, {}) meshCenter=({}, {}, {}) boneCenter=({}, {}, {}) localBoneCenter=({}, {}, {}) worldBoneCenter=({}, {}, {}) rigCenter=({}, {}, {})",
+					"bullet visualization mesh name='{}' actor={} buildGroup={} samples(mesh={}, bone={}, nearOriginBone={}, worldLikeBone={}, rig={}) visualOffsetApplied={} visualSource={} actorPosition=({}, {}, {}) visualOrigin=({}, {}, {}) objectOrigin=({}, {}, {}) shapeAabbCenter=({}, {}, {}) vertexAabbCenter=({}, {}, {}) meshCenter=({}, {}, {}) boneCenter=({}, {}, {}) nearOriginBoneCenter=({}, {}, {}) worldLikeBoneCenter=({}, {}, {}) rigCenter=({}, {}, {})",
 					mesh->name_.c_str(),
 					static_cast<void*>(mesh->actor_),
 					mesh->buildGroup_,
 					alignment.meshSamples,
 					alignment.boneSamples,
-					alignment.localBoneSamples,
-					alignment.worldBoneSamples,
+					alignment.nearOriginBoneSamples,
+					alignment.worldLikeBoneSamples,
 					alignment.rigSamples,
 					alignment.applied,
 					alignment.visualSource,
@@ -737,18 +754,21 @@ namespace Smp::BulletVisualization
 					alignment.aabbCenter.x(),
 					alignment.aabbCenter.y(),
 					alignment.aabbCenter.z(),
+					alignment.vertexAabbCenter.x(),
+					alignment.vertexAabbCenter.y(),
+					alignment.vertexAabbCenter.z(),
 					alignment.meshCenter.x(),
 					alignment.meshCenter.y(),
 					alignment.meshCenter.z(),
 					alignment.boneCenter.x(),
 					alignment.boneCenter.y(),
 					alignment.boneCenter.z(),
-					alignment.localBoneCenter.x(),
-					alignment.localBoneCenter.y(),
-					alignment.localBoneCenter.z(),
-					alignment.worldBoneCenter.x(),
-					alignment.worldBoneCenter.y(),
-					alignment.worldBoneCenter.z(),
+					alignment.nearOriginBoneCenter.x(),
+					alignment.nearOriginBoneCenter.y(),
+					alignment.nearOriginBoneCenter.z(),
+					alignment.worldLikeBoneCenter.x(),
+					alignment.worldLikeBoneCenter.y(),
+					alignment.worldLikeBoneCenter.z(),
 					alignment.rigCenter.x(),
 					alignment.rigCenter.y(),
 					alignment.rigCenter.z());
