@@ -1231,7 +1231,9 @@ namespace
 		std::string originalName;
 		std::string recordParentName;
 		RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
+		RE::NiTransform recordLocalToParent{ RE::NiTransform::IDENTITY };
 		bool hasLocalToParent{ false };
+		bool hasRecordLocalToParent{ false };
 		bool recordMergeParentBinding{ false };
 	};
 
@@ -2681,17 +2683,20 @@ namespace
 				} else {
 					UpdateNodeWorldFromLocal(clonedNode);
 				}
+				const auto actualLocal = clonedNode->local;
+				const auto recordLocal = resolution.hasLocalToParent ? resolution.localToParent : actualLocal;
 				a_mergedRoots.push_back({
 					.parent = cloneParent,
 					.node = clonedNode,
 					.sourceNode = a_source,
 					.originalName = std::string(sourceName),
 					.recordParentName = resolution.recordBinding ? resolution.parentName : std::string{},
-					.localToParent = resolution.hasLocalToParent ? resolution.localToParent : clonedNode->local,
+					.localToParent = actualLocal,
+					.recordLocalToParent = recordLocal,
 					.hasLocalToParent = true,
+					.hasRecordLocalToParent = true,
 					.recordMergeParentBinding = resolution.recordBinding,
 				});
-				const auto& recordLocal = resolution.hasLocalToParent ? resolution.localToParent : clonedNode->local;
 				spdlog::debug(
 					"cloned armor-owned XML source bone '{}' as plugin-owned prefixed node='{}' node={} under merge parent={} parentName='{}' prefix='{}' storedParent={} constraintParent={} recordBinding={} recordParent='{}' actualLocal=({:.3f},{:.3f},{:.3f}) recordLocal=({:.3f},{:.3f},{:.3f})",
 					sourceName,
@@ -2704,9 +2709,9 @@ namespace
 					resolution.fromConstraint,
 					resolution.recordBinding,
 					resolution.recordBinding ? std::string_view(resolution.parentName) : std::string_view{},
-					clonedNode->local.translate.x,
-					clonedNode->local.translate.y,
-					clonedNode->local.translate.z,
+					actualLocal.translate.x,
+					actualLocal.translate.y,
+					actualLocal.translate.z,
 					recordLocal.translate.x,
 					recordLocal.translate.y,
 					recordLocal.translate.z);
@@ -4999,12 +5004,17 @@ namespace Smp
 					}
 				}
 				if (!staleArmorBuildGroups.empty()) {
+					std::uint32_t resetBodies = 0;
+					for (const auto buildGroup : staleArmorBuildGroups) {
+						resetBodies += ResetPrototypeBuildGroupToReferencePoseLocked(actorState, buildGroup);
+					}
 					spdlog::debug(
-						"clearing stale armor prototype groups before rebuild actor={} bipedObject={} object={} count={}",
+						"clearing stale armor prototype groups before rebuild actor={} bipedObject={} object={} count={} resetBodies={}",
 						static_cast<void*>(a_event.actor),
 						std::to_underlying(scopedEvent.bipedObject),
 						static_cast<void*>(a_object),
-						staleArmorBuildGroups.size());
+						staleArmorBuildGroups.size(),
+						resetBodies);
 					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
 					staleArmorBuildGroups.clear();
 				}
@@ -6074,10 +6084,13 @@ namespace Smp
 					continue;
 				}
 
+				const auto& recordLocal = mergedNode.hasRecordLocalToParent ?
+					mergedNode.recordLocalToParent :
+					(mergedNode.hasLocalToParent ? mergedNode.localToParent : node->local);
 				mergeParentBindings.push_back({
 					.sourceName = std::move(sourceName),
 					.parentName = parentName,
-					.localToParent = mergedNode.hasLocalToParent ? mergedNode.localToParent : node->local,
+					.localToParent = recordLocal,
 					.hasLocalToParent = true,
 				});
 			}
@@ -6337,16 +6350,21 @@ namespace Smp
 				}
 			}
 			if (!staleArmorBuildGroups.empty()) {
+				std::uint32_t resetBodies = 0;
+				for (const auto buildGroup : staleArmorBuildGroups) {
+					resetBodies += ResetPrototypeBuildGroupToReferencePoseLocked(actorState, buildGroup);
+				}
 				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
 				spdlog::debug(
-					"cleared stale prototype groups before pending armor rebuild actor={} bipedObject={} object={} xml='{}' groups={}",
+					"cleared stale prototype groups before pending armor rebuild actor={} bipedObject={} object={} xml='{}' groups={} resetBodies={}",
 					static_cast<void*>(a_actor),
 					std::to_underlying(record.bipedObject),
 					static_cast<void*>(rebuildObject),
 					record.physicsXmlPath,
-					clearedCount);
+					clearedCount,
+					resetBodies);
 			}
 			spdlog::debug(
 				"rebuilding pending armor prototype physics actor={} bipedObject={} object={} xml='{}' stagedStaleGroups={}",
@@ -6680,10 +6698,12 @@ namespace Smp
 		}
 
 		std::uint32_t suspendedStates = 0;
+		std::uint32_t resetBodies = 0;
 		for (auto& actorState : prototypeActors_) {
 			if (!actorState.HasRuntime()) {
 				continue;
 			}
+			resetBodies += ResetPrototypeRuntimeToReferencePoseLocked(actorState, "customization-suspend");
 			SuspendPrototypeRuntimeLocked(actorState);
 			++suspendedStates;
 		}
@@ -6693,9 +6713,10 @@ namespace Smp
 		suspendedActors_.clear();
 		ResetStepClockLocked();
 		spdlog::debug(
-			"suspended {} prototype actor states for character customization menu; trackedStates={}",
+			"suspended {} prototype actor states for character customization menu; trackedStates={} resetBodies={}",
 			suspendedStates,
-			prototypeActors_.size());
+			prototypeActors_.size(),
+			resetBodies);
 	}
 
 	void Fo4PhysicsWorld::ReloadPrototypeStatesForCustomizationMenuLocked()
@@ -8237,7 +8258,9 @@ namespace Smp
 				.sourceName = mergedRoot.originalName,
 				.recordParentName = mergedRoot.recordParentName,
 				.localToParent = mergedRoot.localToParent,
+				.recordLocalToParent = mergedRoot.recordLocalToParent,
 				.hasLocalToParent = mergedRoot.hasLocalToParent,
+				.hasRecordLocalToParent = mergedRoot.hasRecordLocalToParent,
 				.recordMergeParentBinding = mergedRoot.recordMergeParentBinding,
 			});
 		}
@@ -8449,36 +8472,66 @@ namespace Smp
 			return 0;
 		}
 
-		auto findMergedNode = [&a_state, a_buildGroup](const RE::NiAVObject* a_node) -> PrototypeMergedNode* {
-			if (!a_node) {
-				return nullptr;
-			}
-
-			const auto mergedNode = std::ranges::find_if(a_state.mergedNodes, [a_node, a_buildGroup](const PrototypeMergedNode& a_mergedNode) {
-				return a_mergedNode.buildGroup == a_buildGroup && a_mergedNode.node.get() == a_node;
-			});
-			return mergedNode != a_state.mergedNodes.end() ? std::addressof(*mergedNode) : nullptr;
-		};
-
 		std::uint32_t resetBodies = 0;
 		std::uint32_t syncedNodes = 0;
+		std::uint32_t skippedNonMergedBodies = 0;
+		std::uint32_t skippedKinematicBodies = 0;
+		std::vector<RE::NiNode*> dynamicResetNodes;
+		std::vector<RE::NiNode*> updateRoots;
+		const auto isMergedNodeInBuildGroup = [&a_state, a_buildGroup](const RE::NiNode* a_node) {
+			return a_node &&
+				std::ranges::any_of(a_state.mergedNodes, [a_node, a_buildGroup](const PrototypeMergedNode& a_mergedNode) {
+					return a_mergedNode.buildGroup == a_buildGroup && a_mergedNode.node.get() == a_node;
+				});
+		};
 		for (auto& body : a_state.bodies) {
 			if (!PrototypeBodyHasBuildGroup(body, a_buildGroup) || !body.bone) {
 				continue;
 			}
+			if (!isMergedNodeInBuildGroup(body.node)) {
+				++skippedNonMergedBodies;
+				continue;
+			}
+			if (body.bone->m_rig.getInvMass() <= 0.0F) {
+				++skippedKinematicBodies;
+				continue;
+			}
+			if (body.node && std::ranges::find(dynamicResetNodes, body.node) == dynamicResetNodes.end()) {
+				dynamicResetNodes.push_back(body.node);
+			}
+		}
+		const auto shouldResetMergedNode = [&dynamicResetNodes](const RE::NiNode* a_node) {
+			return a_node && std::ranges::find(dynamicResetNodes, a_node) != dynamicResetNodes.end();
+		};
+		for (auto& mergedNode : a_state.mergedNodes) {
+			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
+			if (mergedNode.buildGroup != a_buildGroup || !node || !shouldResetMergedNode(node)) {
+				continue;
+			}
 
-			if (auto* mergedNode = findMergedNode(body.node); mergedNode && mergedNode->node) {
-				if (mergedNode->hasLocalToParent) {
-					mergedNode->node->local = mergedNode->localToParent;
-				}
-				if (auto* node = mergedNode->node->IsNode()) {
-					UpdateNodeWorldFromLocal(node);
-				} else if (mergedNode->node->parent) {
-					mergedNode->node->world = mergedNode->node->parent->world * mergedNode->node->local;
-				} else {
-					mergedNode->node->world = mergedNode->node->local;
-				}
-				++syncedNodes;
+			if (mergedNode.hasLocalToParent) {
+				mergedNode.node->local = mergedNode.localToParent;
+			}
+
+			if (!shouldResetMergedNode(node->parent) &&
+				std::ranges::find(updateRoots, node) == updateRoots.end()) {
+				updateRoots.push_back(node);
+			}
+			++syncedNodes;
+		}
+		for (auto* updateRoot : updateRoots) {
+			UpdateNodeWorldFromLocal(updateRoot);
+		}
+
+		for (auto& body : a_state.bodies) {
+			if (!PrototypeBodyHasBuildGroup(body, a_buildGroup) || !body.bone) {
+				continue;
+			}
+			if (!isMergedNodeInBuildGroup(body.node)) {
+				continue;
+			}
+			if (body.bone->m_rig.getInvMass() <= 0.0F) {
+				continue;
 			}
 
 			body.bone->readTransform(0.0F);
@@ -8486,13 +8539,62 @@ namespace Smp
 			++resetBodies;
 		}
 
-		if (resetBodies > 0) {
+		if (resetBodies > 0 || syncedNodes > 0 || skippedNonMergedBodies > 0 || skippedKinematicBodies > 0) {
 			spdlog::debug(
-				"reset prototype build group to reference pose actor={} buildGroup={} bodies={} syncedPluginNodes={}",
+				"reset prototype build group to reference pose actor={} buildGroup={} dynamicBodies={} syncedPluginNodes={} skippedNonMergedBodies={} skippedKinematicBodies={}",
 				static_cast<void*>(a_state.actor),
 				a_buildGroup,
 				resetBodies,
-				syncedNodes);
+				syncedNodes,
+				skippedNonMergedBodies,
+				skippedKinematicBodies);
+		}
+		return resetBodies;
+	}
+
+	std::uint32_t Fo4PhysicsWorld::ResetPrototypeRuntimeToReferencePoseLocked(
+		PrototypeActorState& a_state,
+		const std::string_view a_reason)
+	{
+		std::vector<std::uint64_t> buildGroups;
+		for (const auto& runtime : a_state.runtimes) {
+			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(runtime.buildGroup);
+			}
+		}
+		for (const auto& prototypeMesh : a_state.meshes) {
+			if (prototypeMesh.buildGroup != 0 && std::ranges::find(buildGroups, prototypeMesh.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(prototypeMesh.buildGroup);
+			}
+		}
+		for (const auto& prototypeConstraint : a_state.constraints) {
+			if (prototypeConstraint.buildGroup != 0 && std::ranges::find(buildGroups, prototypeConstraint.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(prototypeConstraint.buildGroup);
+			}
+		}
+		for (const auto& prototypeBody : a_state.bodies) {
+			if (!prototypeBody.buildGroups.empty()) {
+				for (const auto buildGroup : prototypeBody.buildGroups) {
+					if (buildGroup != 0 && std::ranges::find(buildGroups, buildGroup) == buildGroups.end()) {
+						buildGroups.push_back(buildGroup);
+					}
+				}
+			} else if (prototypeBody.buildGroup != 0 && std::ranges::find(buildGroups, prototypeBody.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(prototypeBody.buildGroup);
+			}
+		}
+
+		std::uint32_t resetBodies = 0;
+		for (const auto buildGroup : buildGroups) {
+			resetBodies += ResetPrototypeBuildGroupToReferencePoseLocked(a_state, buildGroup);
+		}
+		if (resetBodies > 0) {
+			spdlog::debug(
+				"reset prototype runtime to reference pose actor={} reason={} buildGroups={} resetBodies={}",
+				static_cast<void*>(a_state.actor),
+				a_reason,
+				buildGroups.size(),
+				resetBodies);
 		}
 		return resetBodies;
 	}

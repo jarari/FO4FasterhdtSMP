@@ -149,7 +149,9 @@ namespace Smp
 			std::string sourceName;
 			std::string recordParentName;
 			RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
+			RE::NiTransform recordLocalToParent{ RE::NiTransform::IDENTITY };
 			bool hasLocalToParent{ false };
+			bool hasRecordLocalToParent{ false };
 			bool recordMergeParentBinding{ false };
 		};
 
@@ -320,6 +322,7 @@ namespace Smp
 		void LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, std::string_view a_reason) const;
 		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup, std::span<PrototypeBody> a_stagedBodies = {});
 		std::uint32_t ResetPrototypeBuildGroupToReferencePoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
+		std::uint32_t ResetPrototypeRuntimeToReferencePoseLocked(PrototypeActorState& a_state, std::string_view a_reason);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state, const PrototypeBuildGroupRuntime& a_runtime);
 		void LogRootConstraintDiagnosticsLocked(std::string_view a_phase, const PrototypeActorState& a_state);
