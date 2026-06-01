@@ -5,9 +5,13 @@
 #include <algorithm>
 #include <atomic>
 #include <memory>
+#include <tbb/parallel_for_each.h>
+#include <tbb/task_arena.h>
 
 namespace
 {
+	constexpr std::size_t ParallelCollisionPairThreshold = 32;
+
 	__m128 CrossProduct(const __m128 a_lhs, const __m128 a_rhs)
 	{
 		const auto tmp0 = _mm_shuffle_ps(a_lhs, a_lhs, _MM_SHUFFLE(3, 0, 2, 1));
@@ -235,9 +239,9 @@ namespace hdt
 				return 0;
 			}
 
-			for (auto& pair : pairs) {
+			const auto processPair = [this](const std::pair<ColliderTree*, ColliderTree*>& pair) {
 				if (this->numResults.load() >= SkinnedMeshAlgorithm::MaxCollisionCount) {
-					break;
+					return;
 				}
 
 				auto* lhs = pair.first;
@@ -251,8 +255,12 @@ namespace hdt
 
 				Aabb aabbA;
 				auto aabbB = rhs->aabbMe_;
-				std::vector<Aabb*> listA;
-				std::vector<Aabb*> listB;
+
+				thread_local std::vector<Aabb*> listA;
+				thread_local std::vector<Aabb*> listB;
+
+				listA.clear();
+				listB.clear();
 				listA.reserve(sizeA);
 				listB.reserve(sizeB);
 
@@ -263,17 +271,35 @@ namespace hdt
 					}
 				}
 
-				if (!listA.empty()) {
-					aabbB.invalidate();
-					for (auto* candidate = beginB; candidate < endB; ++candidate) {
-						if (candidate->collideWith(aabbA)) {
-							listB.push_back(candidate);
-							aabbB.merge(*candidate);
-						}
+				if (listA.empty()) {
+					return;
+				}
+
+				aabbB.invalidate();
+				for (auto* candidate = beginB; candidate < endB; ++candidate) {
+					if (candidate->collideWith(aabbA)) {
+						listB.push_back(candidate);
+						aabbB.merge(*candidate);
 					}
 				}
 
+				if (listB.empty()) {
+					return;
+				}
+
 				dispatch(lhs, rhs, listA, listB, aabbB);
+			};
+
+			if (pairs.size() >= ParallelCollisionPairThreshold) {
+				// Isolate inner work so a waiting worker cannot steal an outer collision task
+				// that would alias thread_local MergeBuffer/listA/listB state.
+				tbb::this_task_arena::isolate([&]() {
+					tbb::parallel_for_each(pairs.begin(), pairs.end(), processPair);
+				});
+			} else {
+				for (auto& pair : pairs) {
+					processPair(pair);
+				}
 			}
 
 			return static_cast<int>(this->numResults.load());

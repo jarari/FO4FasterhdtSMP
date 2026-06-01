@@ -6,6 +6,8 @@
 
 #include <LinearMath/btPoolAllocator.h>
 
+#include <tbb/parallel_for_each.h>
+
 #include <algorithm>
 
 namespace
@@ -67,6 +69,8 @@ namespace hdt
 			return;
 		}
 
+		pairs_.reserve(static_cast<std::size_t>(pairCount));
+
 		std::vector<SkinnedMeshBody*> bodies;
 		std::vector<PerVertexShape*> extraVertexShapes;
 		bodies.reserve(static_cast<std::size_t>(pairCount) * 2);
@@ -104,26 +108,29 @@ namespace hdt
 
 		std::ranges::sort(bodies);
 		bodies.erase(std::ranges::unique(bodies).begin(), bodies.end());
-		for (auto* body : bodies) {
+		tbb::parallel_for_each(bodies.begin(), bodies.end(), [](SkinnedMeshBody* body) {
 			if (body && body->useBoundingSphere_) {
 				body->internalUpdate();
 			}
-		}
+		});
 
 		std::ranges::sort(extraVertexShapes);
 		extraVertexShapes.erase(std::ranges::unique(extraVertexShapes).begin(), extraVertexShapes.end());
-		for (auto* shape : extraVertexShapes) {
+		tbb::parallel_for_each(extraVertexShapes.begin(), extraVertexShapes.end(), [](PerVertexShape* shape) {
 			if (shape) {
 				shape->internalUpdate();
 			}
-		}
+		});
 
-		for (const auto& [shape0, shape1] : pairs_) {
+		tbb::parallel_for_each(pairs_.begin(), pairs_.end(), [this](const std::pair<SkinnedMeshBody*, SkinnedMeshBody*>& pair) {
+			auto* const shape0 = pair.first;
+			auto* const shape1 = pair.second;
 			const auto collapsed = shape0->shape_ && shape1->shape_ && shape0->shape_->tree_.collapseCollideL(std::addressof(shape1->shape_->tree_));
 			if (collapsed) {
 				SkinnedMeshAlgorithm::processCollision(shape0, shape1, this);
 			}
-		}
+		});
+		pairs_.clear();
 
 		(void)a_dispatcher;
 	}

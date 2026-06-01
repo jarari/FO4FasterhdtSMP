@@ -157,6 +157,34 @@ namespace
 	static_assert(offsetof(Fo4BSFaceGenModelExtraData, bones) == 0x20);
 	static_assert(sizeof(Fo4BSFaceGenModelExtraData) == 0x420);
 
+	float ElapsedMs(const Clock::time_point a_start, const Clock::time_point a_end)
+	{
+		return std::chrono::duration<float, std::milli>(a_end - a_start).count();
+	}
+
+	thread_local float         FrameCollisionMs{ 0.0F };
+	thread_local std::uint32_t FrameCollisionCalls{ 0 };
+
+	void ResetFrameCollisionProfile()
+	{
+		FrameCollisionMs = 0.0F;
+		FrameCollisionCalls = 0;
+	}
+
+	void AddFrameCollisionProfile(const float a_collisionMs)
+	{
+		FrameCollisionMs += std::max(a_collisionMs, 0.0F);
+		++FrameCollisionCalls;
+	}
+
+	float ConsumeFrameCollisionProfile(std::uint32_t& a_collisionCalls)
+	{
+		a_collisionCalls = FrameCollisionCalls;
+		const auto collisionMs = FrameCollisionMs;
+		ResetFrameCollisionProfile();
+		return collisionMs;
+	}
+
 	class OwnedCompoundShape :
 		public btCompoundShape
 	{
@@ -191,6 +219,7 @@ namespace
 
 		void performDiscreteCollisionDetection() override
 		{
+			const auto profileStart = Clock::now();
 			for (int index = 0; index < m_collisionObjects.size(); ++index) {
 				if (auto* rigidBody = btRigidBody::upcast(m_collisionObjects[index])) {
 					if (auto* bone = static_cast<hdt::SkinnedMeshBone*>(rigidBody->getUserPointer())) {
@@ -227,6 +256,7 @@ namespace
 			if (m_dispatcher1) {
 				m_dispatcher1->dispatchAllCollisionPairs(m_broadphasePairCache->getOverlappingPairCache(), dispatchInfo, m_dispatcher1);
 			}
+			AddFrameCollisionProfile(ElapsedMs(profileStart, Clock::now()));
 		}
 
 		void integrateTransforms(const btScalar a_timeStep) override
@@ -307,11 +337,6 @@ namespace
 		const auto dy = a_lhs.y - a_rhs.y;
 		const auto dz = a_lhs.z - a_rhs.z;
 		return dx * dx + dy * dy + dz * dz;
-	}
-
-	float ElapsedMs(const Clock::time_point a_start, const Clock::time_point a_end)
-	{
-		return std::chrono::duration<float, std::milli>(a_end - a_start).count();
 	}
 
 	const char* PrototypeDomainName(const Smp::PrototypeBuildDomain a_domain)
@@ -3881,6 +3906,7 @@ namespace Smp
 			}
 		}
 
+		auto phaseStart = Clock::now();
 		for (auto& actorState : prototypeActors_) {
 			if (actorState.runtimeSoftSuspended) {
 				continue;
@@ -3916,14 +3942,19 @@ namespace Smp
 				return;
 			}
 		}
+		const auto readMs = ElapsedMs(phaseStart, Clock::now());
 
+		phaseStart = Clock::now();
 		UpdateWindLocked();
 		ApplyWindForcesLocked();
+		const auto windMs = ElapsedMs(phaseStart, Clock::now());
 
 		const auto fixedStepSeconds = std::clamp(currentStepSeconds_, kMinimumStepSeconds, fixedStepSeconds_);
 		const auto maximumStepSeconds = std::max(fixedStepSeconds, fixedStepSeconds * static_cast<float>(std::max(maxSubSteps_, 1)));
 		const auto clampedDelta = std::clamp(a_deltaSeconds, kMinimumStepSeconds, maximumStepSeconds);
 
+		ResetFrameCollisionProfile();
+		phaseStart = Clock::now();
 		const auto translationOffset = ApplyTranslationOffset(*dynamicsWorld_);
 		if (auto* world = static_cast<PrototypeDynamicsWorld*>(dynamicsWorld_.get())) {
 			world->StepReference(clampedDelta, fixedStepSeconds);
@@ -3932,6 +3963,15 @@ namespace Smp
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
+		const auto bulletMs = ElapsedMs(phaseStart, Clock::now());
+		std::uint32_t collisionCalls = 0;
+		const auto collisionMs = ConsumeFrameCollisionProfile(collisionCalls);
+
+		pendingStepReadMs_ += readMs;
+		pendingStepWindMs_ += windMs;
+		pendingStepBulletMs_ += bulletMs;
+		pendingStepCollisionMs_ += collisionMs;
+		pendingStepCollisionCalls_ += collisionCalls;
 
 		++simulationFrame_;
 		if (simulationFrame_ == 0) {
@@ -4159,23 +4199,46 @@ namespace Smp
 		std::scoped_lock lock(lock_);
 		if (prototypeActors_.empty()) {
 			pendingWritebackMs_ = 0.0F;
+			pendingMainSyncMs_ = 0.0F;
+			pendingStepReadMs_ = 0.0F;
+			pendingStepWindMs_ = 0.0F;
+			pendingStepBulletMs_ = 0.0F;
+			pendingStepCollisionMs_ = 0.0F;
+			pendingStepCollisionCalls_ = 0;
 			currentMaxActiveActors_ = maxActiveActors_;
 			metricFrameCounter_ = 0;
 			averageStepMs_ = 0.0F;
 			averageWritebackMs_ = 0.0F;
+			averageMainSyncMs_ = 0.0F;
+			averageStepReadMs_ = 0.0F;
+			averageStepWindMs_ = 0.0F;
+			averageStepBulletMs_ = 0.0F;
+			averageStepCollisionMs_ = 0.0F;
 			return;
 		}
 
 		const auto sampleWeight = static_cast<float>(sampleSize_);
 		averageStepMs_ = ((averageStepMs_ * (sampleWeight - 1.0F)) + std::max(a_stepMs, 0.0F)) / sampleWeight;
 		averageWritebackMs_ = ((averageWritebackMs_ * (sampleWeight - 1.0F)) + std::max(pendingWritebackMs_, 0.0F)) / sampleWeight;
+		averageMainSyncMs_ = ((averageMainSyncMs_ * (sampleWeight - 1.0F)) + std::max(pendingMainSyncMs_, 0.0F)) / sampleWeight;
+		averageStepReadMs_ = ((averageStepReadMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepReadMs_, 0.0F)) / sampleWeight;
+		averageStepWindMs_ = ((averageStepWindMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepWindMs_, 0.0F)) / sampleWeight;
+		averageStepBulletMs_ = ((averageStepBulletMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepBulletMs_, 0.0F)) / sampleWeight;
+		averageStepCollisionMs_ = ((averageStepCollisionMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepCollisionMs_, 0.0F)) / sampleWeight;
 		pendingWritebackMs_ = 0.0F;
+		pendingMainSyncMs_ = 0.0F;
+		pendingStepReadMs_ = 0.0F;
+		pendingStepWindMs_ = 0.0F;
+		pendingStepBulletMs_ = 0.0F;
+		pendingStepCollisionMs_ = 0.0F;
 
 		++metricFrameCounter_;
 		if (metricFrameCounter_ < metricFrameInterval_) {
 			return;
 		}
 		metricFrameCounter_ = 0;
+		const auto collisionCalls = pendingStepCollisionCalls_;
+		pendingStepCollisionCalls_ = 0;
 
 		std::size_t bodyCount = 0;
 		std::size_t meshCount = 0;
@@ -4206,7 +4269,7 @@ namespace Smp
 
 		if (totalMs > budgetMs_) {
 			spdlog::debug(
-				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms writeback={:.3f}ms writes(cellJobs/postAnim)={}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
+				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms sync={:.3f}ms writeback={:.3f}ms stepRead={:.3f}ms stepWind={:.3f}ms stepBullet={:.3f}ms collision={:.3f}ms collisionCalls={} writes(mainSync/cellJobs/postAnim)={}/{}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
 				activeActors,
 				currentMaxActiveActors_,
 				maxActiveActors_,
@@ -4215,14 +4278,21 @@ namespace Smp
 				totalMs,
 				budgetMs_,
 				averageStepMs_,
+				averageMainSyncMs_,
 				averageWritebackMs_,
+				averageStepReadMs_,
+				averageStepWindMs_,
+				averageStepBulletMs_,
+				averageStepCollisionMs_,
+				collisionCalls,
+				mainSyncWritebacks_,
 				cellJobsWritebacks_,
 				postAnimationWritebacks_,
 				duplicateCellJobsWritebacks_,
 				duplicatePostAnimationWritebacks_);
 		} else {
 			spdlog::trace(
-				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms writeback={:.3f}ms writes(cellJobs/postAnim)={}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
+				"[SMP Metrics] activeActors={} actorCap={}/{} bodies={} meshes={} avgFrameImpact={:.3f}ms budget={:.3f}ms step={:.3f}ms sync={:.3f}ms writeback={:.3f}ms stepRead={:.3f}ms stepWind={:.3f}ms stepBullet={:.3f}ms collision={:.3f}ms collisionCalls={} writes(mainSync/cellJobs/postAnim)={}/{}/{} duplicateSkips(cellJobs/postAnim)={}/{}",
 				activeActors,
 				currentMaxActiveActors_,
 				maxActiveActors_,
@@ -4231,13 +4301,21 @@ namespace Smp
 				totalMs,
 				budgetMs_,
 				averageStepMs_,
+				averageMainSyncMs_,
 				averageWritebackMs_,
+				averageStepReadMs_,
+				averageStepWindMs_,
+				averageStepBulletMs_,
+				averageStepCollisionMs_,
+				collisionCalls,
+				mainSyncWritebacks_,
 				cellJobsWritebacks_,
 				postAnimationWritebacks_,
 				duplicateCellJobsWritebacks_,
 				duplicatePostAnimationWritebacks_);
 		}
 
+		mainSyncWritebacks_ = 0;
 		cellJobsWritebacks_ = 0;
 		postAnimationWritebacks_ = 0;
 		duplicateCellJobsWritebacks_ = 0;
@@ -4253,6 +4331,10 @@ namespace Smp
 		std::scoped_lock lock(lock_);
 		if (a_wroteAny) {
 			pendingWritebackMs_ += std::max(a_writebackMs, 0.0F);
+			if (a_source == WritebackSource::kMainSync) {
+				pendingMainSyncMs_ += std::max(a_writebackMs, 0.0F);
+				++mainSyncWritebacks_;
+			}
 			IncrementWritebackCounter(a_source, cellJobsWritebacks_, postAnimationWritebacks_);
 		}
 		if (a_skippedDuplicate) {
@@ -4710,7 +4792,19 @@ namespace Smp
 		metricFrameCounter_ = 0;
 		averageStepMs_ = 0.0F;
 		averageWritebackMs_ = 0.0F;
+		averageMainSyncMs_ = 0.0F;
+		averageStepReadMs_ = 0.0F;
+		averageStepWindMs_ = 0.0F;
+		averageStepBulletMs_ = 0.0F;
+		averageStepCollisionMs_ = 0.0F;
 		pendingWritebackMs_ = 0.0F;
+		pendingMainSyncMs_ = 0.0F;
+		pendingStepReadMs_ = 0.0F;
+		pendingStepWindMs_ = 0.0F;
+		pendingStepBulletMs_ = 0.0F;
+		pendingStepCollisionMs_ = 0.0F;
+		pendingStepCollisionCalls_ = 0;
+		mainSyncWritebacks_ = 0;
 		cellJobsWritebacks_ = 0;
 		postAnimationWritebacks_ = 0;
 		duplicateCellJobsWritebacks_ = 0;

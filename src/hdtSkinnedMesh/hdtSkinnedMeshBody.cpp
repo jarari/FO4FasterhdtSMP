@@ -3,6 +3,7 @@
 #include "hdtSkinnedMeshShape.h"
 
 #include <algorithm>
+#include <functional>
 
 #if defined(__AVX2__) || defined(__AVX512F__) || defined(FO4_FASTER_HDTSMP_AVX2) || defined(FO4_FASTER_HDTSMP_AVX512)
 #define HDT_USE_FMA_VERTEX_UPDATE 1
@@ -35,6 +36,22 @@ namespace hdt
 
 	namespace
 	{
+		struct FixedStringLess
+		{
+			bool operator()(const RE::BSFixedString& a_lhs, const RE::BSFixedString& a_rhs) const noexcept
+			{
+				return std::less<const char*>{}(a_lhs.c_str(), a_rhs.c_str());
+			}
+		};
+
+		struct BonePtrLess
+		{
+			bool operator()(const SkinnedMeshBone* a_lhs, const SkinnedMeshBone* a_rhs) const noexcept
+			{
+				return std::less<const SkinnedMeshBone*>{}(a_lhs, a_rhs);
+			}
+		};
+
 		__m128 CalculateVertexState(__m128 a_skinPosition, const Bone& a_bone, __m128 a_weight)
 		{
 			const auto position = a_bone.vertexToWorld_ * vectorFromM128(a_skinPosition);
@@ -195,6 +212,11 @@ namespace hdt
 
 	void SkinnedMeshBody::finishBuild()
 	{
+		std::ranges::sort(canCollideWithTags_, FixedStringLess{});
+		std::ranges::sort(noCollideWithTags_, FixedStringLess{});
+		std::ranges::sort(canCollideWithBones_, BonePtrLess{});
+		std::ranges::sort(noCollideWithBones_, BonePtrLess{});
+
 		bones_.resize(skinnedBones_.size());
 		vertexPositions_.resize(vertices_.size());
 		if (!shape_) {
@@ -236,9 +258,9 @@ namespace hdt
 	bool SkinnedMeshBody::canCollideWith(const SkinnedMeshBone* a_bone) const
 	{
 		if (!canCollideWithBones_.empty()) {
-			return std::ranges::find(canCollideWithBones_, a_bone) != canCollideWithBones_.end();
+			return std::ranges::binary_search(canCollideWithBones_, a_bone, BonePtrLess{});
 		}
-		return std::ranges::find(noCollideWithBones_, a_bone) == noCollideWithBones_.end();
+		return !std::ranges::binary_search(noCollideWithBones_, a_bone, BonePtrLess{});
 	}
 
 	bool SkinnedMeshBody::canCollideWith(const SkinnedMeshBody* a_body) const
@@ -275,7 +297,7 @@ namespace hdt
 
 		if (canCollideWithTags_.empty()) {
 			for (const auto& tag : a_body->tags_) {
-				if (std::ranges::find(noCollideWithTags_, tag) != noCollideWithTags_.end()) {
+				if (std::ranges::binary_search(noCollideWithTags_, tag, FixedStringLess{})) {
 					return false;
 				}
 			}
@@ -283,7 +305,7 @@ namespace hdt
 		}
 
 		for (const auto& tag : a_body->tags_) {
-			if (std::ranges::find(canCollideWithTags_, tag) != canCollideWithTags_.end()) {
+			if (std::ranges::binary_search(canCollideWithTags_, tag, FixedStringLess{})) {
 				return true;
 			}
 		}

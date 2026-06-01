@@ -2,10 +2,10 @@
 
 #include "hdtCollider.h"
 #include "hdtCollisionAlgorithm.h"
+#include "hdtSkinnedMeshBody.h"
 
 namespace hdt
 {
-	class SkinnedMeshBody;
 	class PerVertexShape;
 	class PerTriangleShape;
 
@@ -55,9 +55,9 @@ namespace hdt
 		void remapVertices(const std::vector<std::uint32_t>& a_map) override;
 		void autoGen();
 
-		int getBonePerCollider() override { return 4; }
-		float getColliderBoneWeight(const Collider* a_collider, int a_boneIndex) override;
-		int getColliderBoneIndex(const Collider* a_collider, int a_boneIndex) override;
+		int getBonePerCollider() override final { return 4; }
+		float getColliderBoneWeight(const Collider* a_collider, int a_boneIndex) override final { return owner_->vertices_[a_collider->vertex_].weight_[a_boneIndex]; }
+		int getColliderBoneIndex(const Collider* a_collider, int a_boneIndex) override final { return static_cast<int>(owner_->vertices_[a_collider->vertex_].getBoneIdx(a_boneIndex)); }
 		btVector3 baryCoord(const Collider*, const btVector3&) override { return btVector3(1.0F, 1.0F, 1.0F); }
 		float baryWeight(const btVector3&, int) override { return 1.0F; }
 
@@ -82,9 +82,9 @@ namespace hdt
 		void remapVertices(const std::vector<std::uint32_t>& a_map) override;
 		void addTriangle(int a_vertex0, int a_vertex1, int a_vertex2);
 
-		int getBonePerCollider() override { return 12; }
-		float getColliderBoneWeight(const Collider* a_collider, int a_boneIndex) override;
-		int getColliderBoneIndex(const Collider* a_collider, int a_boneIndex) override;
+		int getBonePerCollider() override final { return 12; }
+		float getColliderBoneWeight(const Collider* a_collider, int a_boneIndex) override final { return owner_->vertices_[a_collider->vertices_[a_boneIndex / 4]].weight_[a_boneIndex % 4]; }
+		int getColliderBoneIndex(const Collider* a_collider, int a_boneIndex) override final { return static_cast<int>(owner_->vertices_[a_collider->vertices_[a_boneIndex / 4]].getBoneIdx(a_boneIndex % 4)); }
 		btVector3 baryCoord(const Collider* a_collider, const btVector3& a_point) override;
 		float baryWeight(const btVector3& a_weight, int a_boneIndex) override { return a_weight[a_boneIndex / 4]; }
 

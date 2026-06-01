@@ -35,16 +35,6 @@ namespace hdt
 		SkinnedMeshShape(a_body, a_attachToOwner)
 	{}
 
-	float PerVertexShape::getColliderBoneWeight(const Collider* a_collider, const int a_boneIndex)
-	{
-		return owner_->vertices_[a_collider->vertex_].weight_[a_boneIndex];
-	}
-
-	int PerVertexShape::getColliderBoneIndex(const Collider* a_collider, const int a_boneIndex)
-	{
-		return static_cast<int>(owner_->vertices_[a_collider->vertex_].getBoneIdx(a_boneIndex));
-	}
-
 	void PerVertexShape::finishBuild()
 	{
 		tree_.optimize();
@@ -60,13 +50,17 @@ namespace hdt
 
 	void PerVertexShape::internalUpdate()
 	{
+		const auto* const __restrict vertices = owner_->vertexPositions_.data();
+		const auto* const __restrict colliders = colliders_.data();
+		auto* const __restrict aabbs = aabbs_.data();
 		const auto size = colliders_.size();
 		const auto marginFactor = _mm_set1_ps(shapeProp_.margin);
+
 		for (std::size_t index = 0; index < size; ++index) {
-			const auto point = owner_->vertexPositions_[colliders_[index].vertex_].data_;
-			const auto radius = _mm_mul_ps(_mm_shuffle_ps(point, point, _MM_SHUFFLE(3, 3, 3, 3)), marginFactor);
-			aabbs_[index].min_ = _mm_sub_ps(point, radius);
-			aabbs_[index].max_ = _mm_add_ps(point, radius);
+			const auto point = vertices[colliders[index].vertex_].data_;
+			const auto radius = _mm_mul_ps(setAll3(point), marginFactor);
+			_mm_store_ps(reinterpret_cast<float*>(std::addressof(aabbs[index].min_)), _mm_sub_ps(point, radius));
+			_mm_store_ps(reinterpret_cast<float*>(std::addressof(aabbs[index].max_)), _mm_add_ps(point, radius));
 		}
 
 		tree_.updateAabb();
@@ -109,16 +103,6 @@ namespace hdt
 		SkinnedMeshShape(a_body)
 	{}
 
-	float PerTriangleShape::getColliderBoneWeight(const Collider* a_collider, const int a_boneIndex)
-	{
-		return owner_->vertices_[a_collider->vertices_[a_boneIndex / 4]].weight_[a_boneIndex % 4];
-	}
-
-	int PerTriangleShape::getColliderBoneIndex(const Collider* a_collider, const int a_boneIndex)
-	{
-		return static_cast<int>(owner_->vertices_[a_collider->vertices_[a_boneIndex / 4]].getBoneIdx(a_boneIndex % 4));
-	}
-
 	btVector3 PerTriangleShape::baryCoord(const Collider* a_collider, const btVector3& a_point)
 	{
 		return BaryCoord(
@@ -153,23 +137,28 @@ namespace hdt
 
 	void PerTriangleShape::internalUpdate()
 	{
-		for (std::size_t index = 0; index < colliders_.size(); ++index) {
-			const auto& collider = colliders_[index];
-			const auto point0 = owner_->vertexPositions_[collider.vertices_[0]].data_;
-			const auto point1 = owner_->vertexPositions_[collider.vertices_[1]].data_;
-			const auto point2 = owner_->vertexPositions_[collider.vertices_[2]].data_;
+		const auto* const __restrict vertices = owner_->vertexPositions_.data();
+		const auto* const __restrict colliders = colliders_.data();
+		auto* const __restrict aabbs = aabbs_.data();
+		const auto size = colliders_.size();
+		const auto marginFactor = _mm_set_ss(shapeProp_.margin);
+		const auto third = _mm_set_ss(3.0F);
+		const auto penetration = _mm_andnot_ps(_mm_set_ss(-0.0F), _mm_set_ss(shapeProp_.penetration));
+
+		for (std::size_t index = 0; index < size; ++index) {
+			const auto& collider = colliders[index];
+			const auto point0 = vertices[collider.vertices_[0]].data_;
+			const auto point1 = vertices[collider.vertices_[1]].data_;
+			const auto point2 = vertices[collider.vertices_[2]].data_;
 
 			auto min = _mm_min_ps(_mm_min_ps(point0, point1), point2);
 			auto max = _mm_max_ps(_mm_max_ps(point0, point1), point2);
 			auto margin = _mm_add_ps(_mm_add_ps(point0, point1), point2);
-			const auto penetration = _mm_andnot_ps(_mm_set_ss(-0.0F), _mm_set_ss(shapeProp_.penetration));
-			alignas(16) float marginValues[4];
-			_mm_store_ps(marginValues, margin);
-			margin = _mm_max_ss(_mm_set_ss(marginValues[3] * shapeProp_.margin / 3.0F), penetration);
-			margin = _mm_shuffle_ps(margin, margin, 0);
+			margin = _mm_div_ss(_mm_mul_ss(setAll3(margin), marginFactor), third);
+			margin = setAll0(_mm_max_ss(margin, penetration));
 
-			aabbs_[index].min_ = _mm_sub_ps(min, margin);
-			aabbs_[index].max_ = _mm_add_ps(max, margin);
+			_mm_store_ps(reinterpret_cast<float*>(std::addressof(aabbs[index].min_)), _mm_sub_ps(min, margin));
+			_mm_store_ps(reinterpret_cast<float*>(std::addressof(aabbs[index].max_)), _mm_add_ps(max, margin));
 		}
 
 		tree_.updateAabb();

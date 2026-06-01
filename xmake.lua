@@ -1,4 +1,5 @@
 -- include subprojects
+includes("packages/tbb")
 includes("packages/bullet3-hdt")
 includes("lib/commonlibf4")
 
