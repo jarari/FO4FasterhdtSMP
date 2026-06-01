@@ -239,7 +239,7 @@ Generic constraint는 아머 천 조각과 헤어 체인의 기본 선택지입�
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`
 - `<a-with-x-point-to-b />` 같은 소문자 dash 표기
 
-Generic field는 linear/angular limit, stiffness, damping, equilibrium, bounce, motor, servo motor, target velocity, max motor force, ERP/CFM을 포함합니다. Non-Hookean field는 파싱하고 경고하지만, 현재 FO4 Bullet 경로에서는 적용하지 않습니다.
+Generic field는 linear/angular limit, stiffness, damping, equilibrium, bounce, motor, servo motor, target velocity, max motor force, ERP/CFM, Non-Hookean damping/stiffness를 포함합니다. 지원되는 Non-Hookean tag는 `<linearNonHookeanDamping>`, `<angularNonHookeanDamping>`, `<linearNonHookeanStiffness>`, `<angularNonHookeanStiffness>`입니다. FO4 경로는 현재 kinematic-to-kinematic constraint를 허용하므로 kinematic XML anchor도 작성된 체인에 참여할 수 있습니다. 다만 kinematic body 두 개만으로는 dynamic motion이 생기지 않습니다.
 
 ### Cone Twist Constraint
 
@@ -303,9 +303,13 @@ Constraint 기본값은 `<generic-constraint-default>`, `<conetwist-constraint-d
 
 - XML summary는 캐시되며 파일 timestamp가 바뀌면 다시 로드됩니다.
 - Body는 매칭된 지오메트리의 skin bone에서 찾습니다. XML에 mesh descriptor가 있으면 매칭된 지오메트리의 모든 skin bone이 후보가 될 수 있습니다.
-- 의심스러운 skin instance, CPU vertex/index buffer 누락, 잘못된 triangle index, 해석되지 않은 본, 중복/self/kinematic-only constraint는 건너뜁니다.
+- 의심스러운 skin instance, CPU vertex/index buffer 누락, 잘못된 triangle index, 해석되지 않은 본, 중복 constraint, self constraint는 건너뜁니다.
+- 아머 build는 trusted actor skeleton을 사용할 수 있을 때 skeleton merge/body setup 동안 actor Havok reference pose를 적용한 뒤, 최종 commit 전에 actor pose를 복원합니다.
+- 성공한 아머 build는 새로 관찰한 plugin-owned cloned node에서 merge-parent metadata를 저장합니다. Source hierarchy가 애매한 rebuild에서는 이 metadata를 사용해 armor-owned XML 본을 의도한 actor parent 아래에 배치합니다.
+- 성공한 아머 build 이후 plugin-owned cloned armor node는 저장된 merge local pose로 리셋되고, Bullet body는 NiNode transform에서 다시 읽습니다. 이것은 구현 동작이며, XML 작성자는 여전히 안정적인 kinematic root와 정상적인 초기 local transform을 제공해야 합니다.
 - Rebuild 직후에는 오래된 pose 폭주를 줄이기 위해 몇 프레임 동안 본 transform을 reset/read합니다.
-- Loading screen 중에는 물리를 중지하고 resume 시 현재 node pose로 body를 리셋합니다.
+- Loading screen 중에는 물리를 중지하고 loading 종료 뒤 추적 중인 armor record를 rebuild/resume합니다.
+- 활성 actor 범위 밖의 NPC는 soft suspend됩니다. 범위 밖에서 새로 build된 아머는 저장된 reference merge pose로 리셋된 뒤 Bullet runtime에서 즉시 제거됩니다. 한 프레임 settle simulation은 사용하지 않습니다.
 - LooksMenu 중에는 활성 prototype state를 중지하고 닫힌 뒤 armor record를 다시 로드합니다.
 - `<disable1stPersonViewPhysics>`가 true이면 1인칭 player physics를 건너뛰거나 중지합니다.
 - `<disableSMPHairWhenWigEquipped>`가 true이면 hair biped slot에 wig가 있을 때 hair-domain mesh body를 비활성화합니다.
@@ -321,6 +325,8 @@ Constraint 기본값은 `<generic-constraint-default>`, `<conetwist-constraint-d
 6. 직접 `NiStringExtraData`를 추가하거나 `defaultBBPs.xml` map을 추가합니다.
 7. 처음에는 작은 angular limit로 시작하고, 안정된 뒤에만 범위를 늘립니다.
 
+아머 체인에서는 `Pelvis` 같은 실제 actor skeleton 본이 의도한 anchor이고 실제 actor skeleton에 존재할 때만 그 이름을 사용하십시오. 아머 NIF에만 존재하는 아머 전용 본은 XML 본으로 작성해야 합니다. 런타임은 그런 본에 대해 prefixed plugin-owned node를 clone하고 skin을 그 clone에 bind합니다.
+
 헤어는 hair/headpart 서브트리에 직접 `NiStringExtraData`를 붙이는 방식을 우선하고, 낮은 mass와 높은 damping을 사용하며, triangle collision보다 `<per-vertex-shape>`를 먼저 시도하는 것이 좋습니다.
 
 ## 문제 해결
@@ -331,4 +337,6 @@ Constraint 기본값은 `<generic-constraint-default>`, `<conetwist-constraint-d
 - Mesh collision이 없으면 `BSTriShape` 이름, skin data, CPU vertex/index 사용 가능 여부를 확인합니다.
 - Per-triangle collision이 건너뛰어지면 CPU index buffer를 읽을 수 없는 상태일 수 있습니다.
 - Body 위치가 어긋나면 `<centerOfMassTransform>`을 조정합니다.
+- 아머 전용 본이 잘못된 위치에 bind되면 해당 본이 XML에 선언되어 있고 지오메트리가 그 본에 skin되어 있는지 확인합니다. raw unprefixed armor/source leftover는 actor `Root` 바로 아래에 복사된 경우를 포함해 writeback target으로 의도적으로 거부됩니다.
+- 활성 범위 밖의 NPC가 멈춰 있거나 reset된 것처럼 보이면 active actor distance/budget 설정을 확인합니다. 범위 밖 actor는 armor record를 유지하면서 Bullet runtime만 soft suspend될 수 있습니다.
 - 움직임이 폭주하면 angular limit를 줄이고, mass를 낮추고, damping을 높이거나 kinematic root를 사용합니다.

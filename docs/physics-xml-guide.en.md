@@ -239,7 +239,7 @@ Supported frame modes:
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`
 - Lowercase dashed forms such as `<a-with-x-point-to-b />`
 
-Supported generic fields include linear/angular limits, stiffness, damping, equilibrium, bounce, motors, servo motors, target velocity, max motor force, and ERP/CFM fields. Non-Hookean fields are parsed and warned about, but the current FO4 Bullet path does not apply them.
+Supported generic fields include linear/angular limits, stiffness, damping, equilibrium, bounce, motors, servo motors, target velocity, max motor force, ERP/CFM fields, and Non-Hookean damping/stiffness. The supported Non-Hookean tags are `<linearNonHookeanDamping>`, `<angularNonHookeanDamping>`, `<linearNonHookeanStiffness>`, and `<angularNonHookeanStiffness>`. FO4 currently allows kinematic-to-kinematic constraints so kinematic XML anchors can still participate in an authored chain, but two kinematic bodies do not create dynamic motion by themselves.
 
 ### Cone Twist Constraint
 
@@ -303,9 +303,13 @@ When all `<requires>` shapes exist and one of the `<source>` shapes is present, 
 
 - XML summaries are cached and reloaded when the file timestamp changes.
 - Bodies are matched from skin bones on matched geometry. If XML has mesh descriptors, all skin bones from matched geometry can be considered.
-- The runtime skips suspicious skin instances, missing CPU vertex/index buffers, invalid triangle indices, unresolved bones, and duplicate/self/kinematic-only constraints.
+- The runtime skips suspicious skin instances, missing CPU vertex/index buffers, invalid triangle indices, unresolved bones, duplicate constraints, and self constraints.
+- Armor builds apply the actor Havok reference pose during skeleton merge/body setup when a trusted actor skeleton is available, then restore the actor pose before final commit.
+- Successful armor builds store merge-parent metadata from the freshly observed plugin-owned cloned nodes. Rebuilds use that metadata to place armor-owned XML bones under the intended actor parent when the source hierarchy is ambiguous.
+- After a successful armor build, plugin-owned cloned armor nodes are reset to their stored merge local pose and their Bullet bodies are reread from NiNode transforms. This reset is implementation behavior; XML authors should still provide a stable kinematic root and sane initial local transforms.
 - Bone transforms are reset/read for several frames after rebuilds to avoid exploding from stale poses.
-- Loading screens suspend physics and reset bodies to current node poses on resume.
+- Loading screens suspend physics and rebuild/resume tracked armor records after loading finishes.
+- NPCs outside the active actor range are soft-suspended. Fresh out-of-range armor builds are reset to their stored reference merge pose before the runtime is immediately removed from Bullet; there is no one-frame settle simulation.
 - LooksMenu suspends active prototype states and reloads armor records after customization closes.
 - If `<disable1stPersonViewPhysics>` is true, first-person player physics is skipped/suspended.
 - If `<disableSMPHairWhenWigEquipped>` is true, hair-domain mesh bodies are disabled while hair biped slots are occupied.
@@ -321,6 +325,8 @@ When all `<requires>` shapes exist and one of the `<source>` shapes is present, 
 6. Add direct `NiStringExtraData` or a `defaultBBPs.xml` map.
 7. Start with small angular limits and increase only after the chain is stable.
 
+For armor chains, use real actor skeleton bones such as `Pelvis` only when they are intended anchors and actually exist on the actor skeleton. Armor-specific bones that only exist in the armor NIF should be XML bones; the runtime will clone prefixed plugin-owned nodes for them and bind skins to those clones.
+
 For hair, prefer direct `NiStringExtraData` on the hair/headpart subtree, low mass, higher damping, and `<per-vertex-shape>` before trying triangle collision.
 
 ## Troubleshooting
@@ -331,4 +337,6 @@ For hair, prefer direct `NiStringExtraData` on the hair/headpart subtree, low ma
 - If mesh collision is missing, check the `BSTriShape` name, skin data, and CPU vertex/index availability.
 - If per-triangle collision is skipped, the CPU index buffer may not be readable.
 - If a body appears offset, adjust `<centerOfMassTransform>`.
+- If an armor-specific bone binds to the wrong place, verify that the bone is declared in XML and that the geometry is skinned to that bone. Raw unprefixed armor/source leftovers are intentionally rejected as writeback targets, including leftovers copied directly under actor `Root`.
+- If an NPC outside the active range appears frozen or reset, check the active actor distance/budget settings. Out-of-range actors can keep their armor record while their Bullet runtime is soft-suspended.
 - If motion explodes, reduce angular limits, reduce mass, increase damping, or use a kinematic root.
