@@ -1,0 +1,29 @@
+#pragma once
+
+#include "RE/N/NiTransform.h"
+
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
+
+namespace RE
+{
+	class NiAVObject;
+	class NiNode;
+}
+
+namespace Smp::NiObject
+{
+	std::optional<std::string> FindStringExtraData(RE::NiAVObject* a_object, std::string_view a_name);
+	void CollectNodePointers(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_nodes);
+	void CollectNodePointersWithInheritedExclusions(
+		RE::NiAVObject* a_root,
+		const std::unordered_set<RE::NiAVObject*>& a_explicitExclusions,
+		std::unordered_set<RE::NiAVObject*>& a_inheritedExclusions,
+		std::vector<RE::NiAVObject*>& a_nodes);
+	bool IsDescendantOf(RE::NiAVObject* a_object, RE::NiAVObject* a_ancestor);
+	RE::NiTransform BuildLocalToAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor);
+	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
+}

@@ -4,10 +4,12 @@
 #include "ConfigPaths.h"
 #include "DefaultBBP.h"
 #include "Fo4MeshExtractor.h"
+#include "Fo4NiObjectUtils.h"
 #include "Fo4SkinnedMeshBone.h"
 #include "Fo4TransformConversion.h"
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
+#include "PhysicsXmlSelection.h"
 #include "SmpConfig.h"
 #include "hdtSkinnedMesh/hdtDispatcher.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
@@ -72,7 +74,6 @@ namespace
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
 	constexpr std::uint64_t kPendingRebuildRetryIntervalFrames = 15;
-	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 	std::atomic<std::uint32_t> PrototypeArmorRenameId{ 0 };
 	std::atomic<std::uint32_t> PrototypeHeadRenameId{ 0 };
 	using Clock = std::chrono::steady_clock;
@@ -268,11 +269,7 @@ namespace
 		}
 	};
 
-	struct ArmorPhysicsXmlSelection
-	{
-		std::filesystem::path path;
-		Smp::DefaultBBP::NameMap meshNameMap;
-	};
+	using ArmorPhysicsXmlSelection = Smp::PhysicsXmlSelection::ArmorSelection;
 
 	struct ArmorPhysicsXmlBuildCandidate
 	{
@@ -666,33 +663,7 @@ namespace
 
 	std::optional<std::filesystem::path> FindDirectPhysicsXmlExtraData(RE::NiAVObject* a_object)
 	{
-		if (!a_object || !a_object->extra) {
-			return std::nullopt;
-		}
-
-		for (auto* extra : *a_object->extra) {
-			auto* stringExtra = netimmerse_cast<RE::NiStringExtraData*>(extra);
-			if (!stringExtra) {
-				continue;
-			}
-
-			const std::string_view name(stringExtra->name);
-			const auto data = Smp::ConfigPaths::Trim(std::string(std::string_view(stringExtra->data)));
-			if (data.empty()) {
-				continue;
-			}
-
-			if (!Smp::PhysicsNamesEqual(name, kPhysicsXmlExtraName)) {
-				continue;
-			}
-
-			if (auto path = Smp::ConfigPaths::ResolveExistingConfigPath(data, true)) {
-				return path;
-			}
-			spdlog::warn("found '{}' NiStringExtraData on object={} but XML path could not be resolved: {}", kPhysicsXmlExtraName, static_cast<void*>(a_object), data);
-		}
-
-		return std::nullopt;
+		return Smp::PhysicsXmlSelection::FindDirectPhysicsXmlExtraData(a_object);
 	}
 
 	RE::NiNode* ResolveFaceGenOriginalRoot(RE::NiAVObject* a_object)
@@ -1097,18 +1068,7 @@ namespace
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object)
 	{
-		if (auto directXml = FindDirectPhysicsXmlExtraData(a_object)) {
-			return ArmorPhysicsXmlSelection{ .path = *directXml };
-		}
-
-		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(a_object)) {
-			return ArmorPhysicsXmlSelection{
-				.path = defaultBbp->physicsXml,
-				.meshNameMap = std::move(defaultBbp->meshNameMap),
-			};
-		}
-
-		return std::nullopt;
+		return Smp::PhysicsXmlSelection::FindArmorPhysicsXml(a_object);
 	}
 
 	bool IsResetCandidate(const Smp::LifecycleEventType a_type)
@@ -1142,44 +1102,17 @@ namespace
 
 	const Smp::DefaultBBP::NameSet* FindMeshAliases(const Smp::DefaultBBP::NameMap& a_meshNameMap, const std::string_view a_name)
 	{
-		const auto found = std::ranges::find_if(a_meshNameMap, [a_name](const auto& a_entry) {
-			return Smp::PhysicsNamesEqual(a_entry.first, a_name);
-		});
-		return found == a_meshNameMap.end() ? nullptr : std::addressof(found->second);
+		return Smp::PhysicsXmlSelection::FindMeshAliases(a_meshNameMap, a_name);
 	}
 
 	bool MeshNameMatches(const std::string_view a_descriptorName, const std::string_view a_geometryName, const Smp::DefaultBBP::NameMap& a_meshNameMap)
 	{
-		if (Smp::PhysicsNamesEqual(a_descriptorName, a_geometryName)) {
-			return true;
-		}
-
-		const auto* aliases = FindMeshAliases(a_meshNameMap, a_descriptorName);
-		if (!aliases) {
-			return false;
-		}
-
-		return std::ranges::any_of(*aliases, [a_geometryName](const std::string& a_alias) {
-			return Smp::PhysicsNamesEqual(a_alias, a_geometryName);
-		});
+		return Smp::PhysicsXmlSelection::MeshNameMatches(a_descriptorName, a_geometryName, a_meshNameMap);
 	}
 
 	std::vector<std::string> BuildMeshMatchNames(const Smp::PhysicsXmlSummary& a_summary, const Smp::DefaultBBP::NameMap& a_meshNameMap)
 	{
-		std::vector<std::string> result;
-		for (const auto& meshDescriptor : a_summary.meshDescriptors) {
-			result.push_back(meshDescriptor.name);
-			if (const auto* aliases = FindMeshAliases(a_meshNameMap, meshDescriptor.name)) {
-				for (const auto& alias : *aliases) {
-					if (std::ranges::find_if(result, [&alias](const std::string& a_existing) {
-							return Smp::PhysicsNamesEqual(a_existing, alias);
-						}) == result.end()) {
-						result.push_back(alias);
-					}
-				}
-			}
-		}
-		return result;
+		return Smp::PhysicsXmlSelection::BuildMeshMatchNames(a_summary, a_meshNameMap);
 	}
 
 	bool IsNamedPrototypeMesh(const std::vector<std::string>& a_meshNames, RE::BSGeometry* a_geometry)
@@ -1343,26 +1276,7 @@ namespace
 
 	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
 	{
-		if (!a_root || a_name.empty()) {
-			return nullptr;
-		}
-
-		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
-			return a_root->IsNode();
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindNodeByName(child.get(), a_name)) {
-				return found;
-			}
-		}
-
-		return nullptr;
+		return Smp::NiObject::FindNodeByName(a_root, a_name);
 	}
 
 	bool IsExcludedMergeSearchObject(
@@ -1446,17 +1360,7 @@ namespace
 
 	bool IsObjectDescendantOf(RE::NiAVObject* a_object, RE::NiAVObject* a_ancestor)
 	{
-		if (!a_object || !a_ancestor) {
-			return false;
-		}
-
-		for (auto* current = a_object; current; current = current->parent) {
-			if (current == a_ancestor) {
-				return true;
-			}
-		}
-
-		return false;
+		return Smp::NiObject::IsDescendantOf(a_object, a_ancestor);
 	}
 
 	void CollectParentInheritedExclusions(
@@ -2479,15 +2383,7 @@ namespace
 
 	RE::NiTransform BuildLocalToSourceAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor)
 	{
-		if (!a_node) {
-			return RE::NiTransform::IDENTITY;
-		}
-
-		auto localToAncestor = a_node->local;
-		for (auto* parent = a_node->parent; parent && parent != a_ancestor; parent = parent->parent) {
-			localToAncestor = parent->local * localToAncestor;
-		}
-		return localToAncestor;
+		return Smp::NiObject::BuildLocalToAncestor(a_node, a_ancestor);
 	}
 
 	RE::NiNode* FindTrustedActorSkeletonNodeForName(

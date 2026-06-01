@@ -1,10 +1,13 @@
 #include "Hooks.h"
 
+#include "ActorSkeletonBinding.h"
 #include "BSSkin.h"
 #include "ConfigPaths.h"
+#include "Fo4NiObjectUtils.h"
 #include "Fo4PhysicsWorld.h"
 #include "LifecycleEvents.h"
 #include "PhysicsName.h"
+#include "PhysicsXmlSelection.h"
 #include "SmpConfig.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BGSHeadPart.h"
@@ -29,7 +32,6 @@
 
 #include <atomic>
 #include <optional>
-#include <unordered_set>
 #include <unordered_map>
 
 namespace Hooks
@@ -98,7 +100,6 @@ namespace Hooks
 	std::mutex               BackupNodeLock;
 	std::vector<std::string> BackupNodeNames;
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
-	constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
 
@@ -129,28 +130,13 @@ namespace Hooks
 
 	std::optional<std::string> FindPhysicsXmlExtraData(RE::NiAVObject* a_object)
 	{
-		if (!a_object || !a_object->extra) {
+		auto path = Smp::PhysicsXmlSelection::FindDirectPhysicsXmlExtraData(
+			a_object,
+			Smp::PhysicsXmlSelection::DirectXmlLogContext::kOriginalModelObject);
+		if (!path) {
 			return std::nullopt;
 		}
-
-		for (auto* extra : *a_object->extra) {
-			auto* stringExtra = netimmerse_cast<RE::NiStringExtraData*>(extra);
-			if (!stringExtra) {
-				continue;
-			}
-
-			const std::string_view name(stringExtra->name);
-			const auto data = Smp::ConfigPaths::Trim(std::string(std::string_view(stringExtra->data)));
-			if (data.empty() || !Smp::PhysicsNamesEqual(name, kPhysicsXmlExtraName)) {
-				continue;
-			}
-
-			if (auto path = Smp::ConfigPaths::ResolveExistingConfigPath(data, true)) {
-				return path->string();
-			}
-			spdlog::warn("found '{}' NiStringExtraData on original model object={} but XML path could not be resolved: {}", kPhysicsXmlExtraName, static_cast<void*>(a_object), data);
-		}
-		return std::nullopt;
+		return path->string();
 	}
 
 	RE::NiPointer<RE::NiAVObject> ClonePhysicsMergeSource(RE::NiNode* a_root)
@@ -169,337 +155,60 @@ namespace Hooks
 		return clone ? static_cast<RE::NiAVObject*>(clone->IsNode()) : nullptr;
 	}
 
-	void CollectNodePointers(RE::NiAVObject* a_root, std::vector<RE::NiAVObject*>& a_nodes)
+	struct PreAttachPhysicsContext
 	{
-		if (!a_root) {
-			return;
-		}
+		std::optional<std::string> selectedXml;
+		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
+		std::vector<RE::NiAVObject*> mergeSearchExclusions;
+		std::vector<Smp::MergeParentBinding> mergeParentBindings;
+		RE::NiPointer<RE::NiAVObject> mergeSourceObject;
+	};
 
-		a_nodes.push_back(a_root);
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			CollectNodePointers(child.get(), a_nodes);
-		}
-	}
-
-	bool IsExcludedNodePointer(RE::NiAVObject* a_object, const std::unordered_set<RE::NiAVObject*>& a_exclusions)
-	{
-		return a_object && a_exclusions.contains(a_object);
-	}
-
-	void CollectNodePointersWithInheritedExclusions(
-		RE::NiAVObject* a_root,
-		const std::unordered_set<RE::NiAVObject*>& a_explicitExclusions,
-		std::unordered_set<RE::NiAVObject*>& a_inheritedExclusions,
-		std::vector<RE::NiAVObject*>& a_nodes)
-	{
-		if (!a_root) {
-			return;
-		}
-
-		const auto parentExcluded = a_root->parent && IsExcludedNodePointer(a_root->parent, a_inheritedExclusions);
-		const auto excluded = IsExcludedNodePointer(a_root, a_explicitExclusions) || parentExcluded;
-		if (excluded) {
-			a_inheritedExclusions.insert(a_root);
-		} else {
-			a_nodes.push_back(a_root);
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			CollectNodePointersWithInheritedExclusions(child.get(), a_explicitExclusions, a_inheritedExclusions, a_nodes);
-		}
-	}
-
-	void CollectTrustedNodeNames(
-		const std::vector<RE::NiAVObject*>& a_trustedNodes,
-		std::unordered_map<std::string, RE::NiAVObject*>& a_nameToNode)
-	{
-		for (auto* node : a_trustedNodes) {
-			const auto nodeName = node ? node->GetName() : std::string_view{};
-			if (nodeName.empty()) {
-				continue;
-			}
-			if (!std::ranges::any_of(a_nameToNode, [nodeName](const auto& a_entry) {
-					return Smp::PhysicsNamesEqual(a_entry.first, nodeName);
-				})) {
-				a_nameToNode.emplace(std::string(nodeName), node);
-			}
-		}
-	}
-
-	RE::NiAVObject* FindTrustedNodeByName(
-		const std::unordered_map<std::string, RE::NiAVObject*>& a_nameToNode,
-		const std::string_view a_name)
-	{
-		if (a_name.empty()) {
-			return nullptr;
-		}
-		for (const auto& [name, node] : a_nameToNode) {
-			if (Smp::PhysicsNamesEqual(name, a_name)) {
-				return node;
-			}
-		}
-		return nullptr;
-	}
-
-	RE::NiAVObject* FindNearestTrustedSourceParent(
-		RE::NiNode* a_source,
-		const std::unordered_map<std::string, RE::NiAVObject*>& a_nameToNode)
-	{
-		if (!a_source) {
-			return nullptr;
-		}
-		for (auto* sourceParent = a_source->parent; sourceParent; sourceParent = sourceParent->parent) {
-			if (auto* trustedParent = FindTrustedNodeByName(a_nameToNode, sourceParent->GetName())) {
-				return trustedParent;
-			}
-		}
-		return nullptr;
-	}
-
-	bool IsDescendantOf(RE::NiAVObject* a_object, RE::NiAVObject* a_ancestor)
-	{
-		if (!a_object || !a_ancestor) {
-			return false;
-		}
-
-		for (auto* current = a_object; current; current = current->parent) {
-			if (current == a_ancestor) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	void CollectSourceParentMismatchedTrustedNodes(
-		RE::NiNode* a_source,
-		const std::unordered_map<std::string, RE::NiAVObject*>& a_nameToNode,
-		std::unordered_set<RE::NiAVObject*>& a_rejected)
-	{
-		if (!a_source) {
-			return;
-		}
-
-		const auto sourceName = a_source->GetName();
-		auto*      trustedNode = FindTrustedNodeByName(a_nameToNode, sourceName);
-		auto*      trustedParent = FindNearestTrustedSourceParent(a_source, a_nameToNode);
-		if (trustedNode && trustedParent && trustedNode != trustedParent && !IsDescendantOf(trustedNode, trustedParent)) {
-			std::vector<RE::NiAVObject*> rejectedSubtree;
-			CollectNodePointers(trustedNode, rejectedSubtree);
-			for (auto* rejectedNode : rejectedSubtree) {
-				if (rejectedNode) {
-					a_rejected.insert(rejectedNode);
-				}
-			}
-			spdlog::debug(
-				"removed pre-attach trusted actor candidate '{}' node={} parent={} parentName='{}' because source intended parent is {} parentName='{}'",
-				sourceName,
-				static_cast<void*>(trustedNode),
-				static_cast<void*>(trustedNode->parent),
-				trustedNode->parent ? std::string_view(trustedNode->parent->GetName()) : std::string_view{},
-				static_cast<void*>(trustedParent),
-				std::string_view(trustedParent->GetName()));
-		}
-
-		for (auto& child : a_source->children) {
-			if (auto* childNode = child ? child->IsNode() : nullptr) {
-				CollectSourceParentMismatchedTrustedNodes(childNode, a_nameToNode, a_rejected);
-			}
-		}
-	}
-
-	void PruneTrustedActorSkeletonNodesBySourceParents(
-		RE::NiAVObject* a_sourceObject,
-		std::vector<RE::NiAVObject*>& a_trustedNodes)
-	{
-		auto* sourceRoot = a_sourceObject ? a_sourceObject->IsNode() : nullptr;
-		if (!sourceRoot || a_trustedNodes.empty()) {
-			return;
-		}
-
-		std::unordered_map<std::string, RE::NiAVObject*> nameToNode;
-		CollectTrustedNodeNames(a_trustedNodes, nameToNode);
-		if (nameToNode.empty()) {
-			return;
-		}
-
-		std::unordered_set<RE::NiAVObject*> rejected;
-		CollectSourceParentMismatchedTrustedNodes(sourceRoot, nameToNode, rejected);
-		if (rejected.empty()) {
-			return;
-		}
-
-		const auto before = a_trustedNodes.size();
-		std::erase_if(a_trustedNodes, [&rejected](RE::NiAVObject* a_node) {
-			return a_node && rejected.contains(a_node);
-		});
-		spdlog::debug(
-			"pruned {} stale pre-attach trusted actor candidates using source parent bindings sourceRoot={} name='{}'",
-			before - a_trustedNodes.size(),
-			static_cast<void*>(sourceRoot),
-			std::string_view(sourceRoot->GetName()));
-	}
-
-	std::vector<RE::NiAVObject*> CaptureTrustedActorSkeletonNodesBeforeAttach(
+	PreAttachPhysicsContext PreparePreAttachPhysicsContext(
 		RE::BipedAnim* a_biped,
+		RE::NiNode* a_sourceRoot,
 		RE::NiAVObject* a_sourceObject,
-		const bool a_firstPerson)
+		const bool a_firstPerson,
+		const bool a_cloneMergeSource,
+		const char* a_sourceLabel)
 	{
-		std::vector<RE::NiAVObject*> trustedNodes;
+		PreAttachPhysicsContext context;
+		context.selectedXml = FindPhysicsXmlExtraData(a_sourceObject);
+		if (!context.selectedXml) {
+			return context;
+		}
+
 		auto* actor = ResolveActor(a_biped);
-		auto* actorRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
-		if (!actorRoot && actor) {
-			actorRoot = actor->Get3D();
-		}
-		if (!actorRoot) {
-			return trustedNodes;
-		}
+		context.trustedActorSkeletonNodes = Smp::ActorSkeletonBinding::CaptureTrustedActorSkeletonNodesBeforeAttach(
+			actor,
+			a_biped,
+			a_sourceObject,
+			a_firstPerson);
+		Smp::ActorSkeletonBinding::PruneTrustedActorSkeletonNodesBySourceParents(a_sourceObject, context.trustedActorSkeletonNodes);
+		context.mergeParentBindings = Smp::ActorSkeletonBinding::BuildPreAttachMergeParentBindings(a_sourceObject, context.trustedActorSkeletonNodes);
 
-		std::unordered_set<RE::NiAVObject*> exclusions;
-		auto addExclusion = [&exclusions](RE::NiAVObject* a_object) {
-			if (a_object) {
-				exclusions.insert(a_object);
-			}
-		};
-		addExclusion(a_sourceObject);
-		if (a_biped) {
-			for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
-				const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
-				auto* bipObject = a_biped->GetBipObject(bipedObject);
-				if (bipObject && bipObject->partClone) {
-					addExclusion(bipObject->partClone.get());
-				}
-			}
-		}
-
-		auto inheritedExclusions = exclusions;
-		CollectNodePointersWithInheritedExclusions(actorRoot, exclusions, inheritedExclusions, trustedNodes);
-		return trustedNodes;
-	}
-
-	const std::string* FindTrustedActorNodeName(
-		const std::vector<std::string>& a_trustedActorNodeNames,
-		const std::string_view a_name)
-	{
-		if (a_name.empty()) {
-			return nullptr;
-		}
-
-		const auto found = std::ranges::find_if(a_trustedActorNodeNames, [a_name](const std::string& a_trustedName) {
-			return Smp::PhysicsNamesEqual(a_trustedName, a_name);
-		});
-		return found == a_trustedActorNodeNames.end() ? nullptr : std::addressof(*found);
-	}
-
-	RE::NiTransform BuildLocalToSourceAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor)
-	{
-		if (!a_node) {
-			return RE::NiTransform::IDENTITY;
-		}
-
-		auto localToAncestor = a_node->local;
-		for (auto* parent = a_node->parent; parent && parent != a_ancestor; parent = parent->parent) {
-			localToAncestor = parent->local * localToAncestor;
-		}
-		return localToAncestor;
-	}
-
-	void CollectPreAttachMergeParentBindings(
-		RE::NiNode* a_source,
-		const std::vector<std::string>& a_trustedActorNodeNames,
-		std::vector<Smp::MergeParentBinding>& a_bindings)
-	{
-		if (!a_source) {
-			return;
-		}
-
-		const auto sourceName = a_source->GetName();
-		if (!sourceName.empty()) {
-			for (auto* sourceParent = a_source->parent; sourceParent; sourceParent = sourceParent->parent) {
-				const auto sourceParentName = sourceParent->GetName();
-				const auto* trustedParentName = FindTrustedActorNodeName(a_trustedActorNodeNames, sourceParentName);
-				if (!trustedParentName) {
-					continue;
-				}
-
-				const auto alreadyRecorded = std::ranges::any_of(a_bindings, [sourceName](const Smp::MergeParentBinding& a_binding) {
-					return Smp::PhysicsNamesEqual(a_binding.sourceName, sourceName);
-				});
-				if (!alreadyRecorded) {
-					a_bindings.push_back({
-						.sourceName = std::string(sourceName),
-						.parentName = *trustedParentName,
-						.localToParent = BuildLocalToSourceAncestor(a_source, sourceParent),
-						.hasLocalToParent = true,
-					});
-				}
-				break;
-			}
-		}
-
-		for (auto& child : a_source->children) {
-			if (auto* childNode = child ? child->IsNode() : nullptr) {
-				CollectPreAttachMergeParentBindings(childNode, a_trustedActorNodeNames, a_bindings);
-			}
-		}
-	}
-
-	std::vector<Smp::MergeParentBinding> BuildPreAttachMergeParentBindings(
-		RE::NiAVObject* a_sourceObject,
-		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
-	{
-		std::vector<Smp::MergeParentBinding> bindings;
-		auto* sourceRoot = a_sourceObject ? a_sourceObject->IsNode() : nullptr;
-		if (!sourceRoot || a_trustedActorSkeletonNodes.empty()) {
-			return bindings;
-		}
-
-		std::vector<std::string> trustedActorNodeNames;
-		trustedActorNodeNames.reserve(a_trustedActorSkeletonNodes.size());
-		for (auto* nodeObject : a_trustedActorSkeletonNodes) {
-			const auto nodeName = nodeObject ? nodeObject->GetName() : std::string_view{};
-			if (nodeName.empty()) {
-				continue;
-			}
-			const auto duplicate = std::ranges::any_of(trustedActorNodeNames, [nodeName](const std::string& a_existing) {
-				return Smp::PhysicsNamesEqual(a_existing, nodeName);
-			});
-			if (!duplicate) {
-				trustedActorNodeNames.emplace_back(nodeName);
-			}
-		}
-		if (trustedActorNodeNames.empty()) {
-			return bindings;
-		}
-
-		CollectPreAttachMergeParentBindings(sourceRoot, trustedActorNodeNames, bindings);
-		if (!bindings.empty()) {
+		if (a_cloneMergeSource) {
+			Smp::NiObject::CollectNodePointers(a_sourceObject, context.mergeSearchExclusions);
 			spdlog::debug(
-				"captured {} pre-attach source parent bindings from original armor skeleton root={} name='{}'",
-				bindings.size(),
-				static_cast<void*>(sourceRoot),
-				std::string_view(sourceRoot->GetName()));
-			for (const auto& binding : bindings) {
+				"pre-scanned armor physics XML {} from {}={} name='{}'",
+				*context.selectedXml,
+				a_sourceLabel,
+				static_cast<void*>(a_sourceRoot),
+				a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{});
+
+			context.mergeSourceObject = ClonePhysicsMergeSource(a_sourceRoot);
+			if (context.mergeSourceObject) {
+				auto* mergeSourceNode = context.mergeSourceObject->IsNode();
 				spdlog::debug(
-					"pre-attach source parent binding source='{}' parent='{}' localToParent=({:.3f},{:.3f},{:.3f})",
-					binding.sourceName,
-					binding.parentName,
-					binding.localToParent.translate.x,
-					binding.localToParent.translate.y,
-					binding.localToParent.translate.z);
+					"preserved armor merge source clone={} name='{}' children={} from original model root={}",
+					static_cast<void*>(context.mergeSourceObject.get()),
+					std::string_view(context.mergeSourceObject->GetName()),
+					mergeSourceNode ? mergeSourceNode->children.size() : 0,
+					static_cast<void*>(a_sourceRoot));
 			}
 		}
-		return bindings;
+
+		return context;
 	}
 
 	std::vector<std::string> GetBackupNodeNames()
@@ -881,35 +590,13 @@ namespace Hooks
 	RE::NiAVObject* HookedBipedAnimApplySkinnedObjects(RE::BipedAnim* a_biped, RE::NiNode* a_originalModelRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
-		auto selectedXml = FindPhysicsXmlExtraData(originalModelObject);
-		auto trustedActorSkeletonNodes = selectedXml ?
-			CaptureTrustedActorSkeletonNodesBeforeAttach(a_biped, originalModelObject, a_firstPerson) :
-			std::vector<RE::NiAVObject*>{};
-		if (selectedXml) {
-			PruneTrustedActorSkeletonNodesBySourceParents(originalModelObject, trustedActorSkeletonNodes);
-		}
-		auto preAttachMergeParentBindings = selectedXml ?
-			BuildPreAttachMergeParentBindings(originalModelObject, trustedActorSkeletonNodes) :
-			std::vector<Smp::MergeParentBinding>{};
-		std::vector<RE::NiAVObject*> mergeSearchExclusions;
-		if (selectedXml) {
-			CollectNodePointers(originalModelObject, mergeSearchExclusions);
-			spdlog::debug(
-				"pre-scanned armor physics XML {} from original model root={} name='{}'",
-				*selectedXml,
-				static_cast<void*>(a_originalModelRoot),
-				a_originalModelRoot ? std::string_view(a_originalModelRoot->GetName()) : std::string_view{});
-		}
-		auto mergeSourceObject = selectedXml ? ClonePhysicsMergeSource(a_originalModelRoot) : RE::NiPointer<RE::NiAVObject>{};
-		if (mergeSourceObject) {
-			auto* mergeSourceNode = mergeSourceObject->IsNode();
-			spdlog::debug(
-				"preserved armor merge source clone={} name='{}' children={} from original model root={}",
-				static_cast<void*>(mergeSourceObject.get()),
-				std::string_view(mergeSourceObject->GetName()),
-				mergeSourceNode ? mergeSourceNode->children.size() : 0,
-				static_cast<void*>(a_originalModelRoot));
-		}
+		auto preAttach = PreparePreAttachPhysicsContext(
+			a_biped,
+			a_originalModelRoot,
+			originalModelObject,
+			a_firstPerson,
+			true,
+			"original model root");
 
 		const auto backupNodeNames = GetBackupNodeNames();
 		const auto backupBones = backupNodeNames.empty() ? BackupBoneMap{} : CaptureBackupBones(a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr, backupNodeNames);
@@ -932,11 +619,11 @@ namespace Hooks
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
 			.sourceObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr,
-			.mergeSourceObject = mergeSourceObject.get(),
-			.trustedActorSkeletonNodes = std::move(trustedActorSkeletonNodes),
-			.mergeSearchExclusions = std::move(mergeSearchExclusions),
-			.mergeParentBindings = std::move(preAttachMergeParentBindings),
-			.physicsXmlPath = selectedXml.value_or(std::string{}),
+			.mergeSourceObject = preAttach.mergeSourceObject.get(),
+			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
+			.mergeSearchExclusions = std::move(preAttach.mergeSearchExclusions),
+			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
+			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});
 		return attachedObject;
@@ -945,16 +632,13 @@ namespace Hooks
 	RE::NiAVObject* HookedBipedAnimAttachSkinnedObject(RE::BipedAnim* a_biped, RE::NiNode* a_destinationRoot, RE::NiNode* a_sourceRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
 		auto* sourceObject = a_sourceRoot ? static_cast<RE::NiAVObject*>(a_sourceRoot) : nullptr;
-		auto selectedXml = FindPhysicsXmlExtraData(sourceObject);
-		auto trustedActorSkeletonNodes = selectedXml ?
-			CaptureTrustedActorSkeletonNodesBeforeAttach(a_biped, sourceObject, a_firstPerson) :
-			std::vector<RE::NiAVObject*>{};
-		if (selectedXml) {
-			PruneTrustedActorSkeletonNodesBySourceParents(sourceObject, trustedActorSkeletonNodes);
-		}
-		auto preAttachMergeParentBindings = selectedXml ?
-			BuildPreAttachMergeParentBindings(sourceObject, trustedActorSkeletonNodes) :
-			std::vector<Smp::MergeParentBinding>{};
+		auto preAttach = PreparePreAttachPhysicsContext(
+			a_biped,
+			a_sourceRoot,
+			sourceObject,
+			a_firstPerson,
+			false,
+			"source root");
 		const auto backupNodeNames = GetBackupNodeNames();
 		const auto backupBones = backupNodeNames.empty() ? BackupBoneMap{} : CaptureBackupBones(a_sourceRoot ? static_cast<RE::NiAVObject*>(a_sourceRoot) : static_cast<RE::NiAVObject*>(a_destinationRoot), backupNodeNames);
 
@@ -974,11 +658,11 @@ namespace Hooks
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
 			.sourceObject = bipObject ? bipObject->partClone.get() : nullptr,
-			.trustedActorSkeletonNodes = std::move(trustedActorSkeletonNodes),
-			.mergeParentBindings = std::move(preAttachMergeParentBindings),
+			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
+			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
 			.destinationRoot = a_destinationRoot,
 			.sourceRoot = a_sourceRoot,
-			.physicsXmlPath = selectedXml.value_or(std::string{}),
+			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});
 		return attachedObject;
