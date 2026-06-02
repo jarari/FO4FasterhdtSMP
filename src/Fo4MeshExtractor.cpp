@@ -340,6 +340,7 @@ namespace
 
 		Smp::Fo4DecodedSkinnedMesh mesh;
 		mesh.geometry = a_geometry;
+		mesh.skinRootNode = skin->rootNode;
 		const auto name = a_geometry->GetName();
 		mesh.name = name.empty() ? std::string{} : std::string(name);
 		MakeSkinBonesReal(skin, mesh.name);

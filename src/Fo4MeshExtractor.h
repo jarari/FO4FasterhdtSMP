@@ -22,6 +22,7 @@ namespace Smp
 	struct Fo4DecodedSkinnedMesh
 	{
 		RE::BSGeometry* geometry{ nullptr };
+		RE::NiAVObject* skinRootNode{ nullptr };
 		std::string name;
 		std::uint32_t badBoneIndices{ 0 };
 		std::vector<Fo4DecodedSkinBone> bones;

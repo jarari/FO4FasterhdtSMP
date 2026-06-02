@@ -3185,6 +3185,30 @@ namespace
 		}
 	}
 
+	void RefreshSkinnedMeshWorldState(btDiscreteDynamicsWorld& a_world)
+	{
+		for (int index = 0; index < a_world.getNumCollisionObjects(); ++index) {
+			auto* body = btRigidBody::upcast(a_world.getCollisionObjectArray()[index]);
+			if (!body || !body->getUserPointer()) {
+				continue;
+			}
+
+			auto* bone = static_cast<hdt::SkinnedMeshBone*>(body->getUserPointer());
+			bone->internalUpdate();
+		}
+
+		for (int index = 0; index < a_world.getNumCollisionObjects(); ++index) {
+			auto* object = a_world.getCollisionObjectArray()[index];
+			if (!object || !object->getCollisionShape() || object->getCollisionShape()->getShapeType() != CUSTOM_CONCAVE_SHAPE_TYPE) {
+				continue;
+			}
+
+			auto* meshBody = static_cast<hdt::SkinnedMeshBody*>(object);
+			meshBody->internalUpdate();
+			meshBody->updateBoundingSphereAabb();
+		}
+	}
+
 	std::unique_ptr<btCollisionShape> CreateCollisionShape(const Smp::PhysicsShapeDescriptor& a_descriptor)
 	{
 		switch (a_descriptor.kind) {
@@ -3273,6 +3297,86 @@ namespace
 		const auto max = hdt::vectorFromM128(bounds.max_);
 		const auto center = (min + max) * 0.5F;
 		return hdt::BoundingSphere(center, center.distance(max));
+	}
+
+	struct PointCloudStats
+	{
+		btVector3 center{ 0.0F, 0.0F, 0.0F };
+		btVector3 aabbCenter{ 0.0F, 0.0F, 0.0F };
+		std::uint32_t samples{ 0 };
+	};
+
+	PointCloudStats CalculateSkinVertexStats(const std::vector<hdt::Vertex>& a_vertices)
+	{
+		PointCloudStats result;
+		if (a_vertices.empty()) {
+			return result;
+		}
+
+		hdt::Aabb bounds;
+		for (const auto& vertex : a_vertices) {
+			result.center += vertex.skinPos_;
+			bounds.merge(vertex.skinPos_);
+			++result.samples;
+		}
+
+		result.center /= static_cast<float>(result.samples);
+		const auto min = hdt::vectorFromM128(bounds.min_);
+		const auto max = hdt::vectorFromM128(bounds.max_);
+		result.aabbCenter = (min + max) * 0.5F;
+		return result;
+	}
+
+	PointCloudStats CalculateVertexPositionStats(const std::vector<hdt::VertexPos>& a_vertices)
+	{
+		PointCloudStats result;
+		if (a_vertices.empty()) {
+			return result;
+		}
+
+		hdt::Aabb bounds;
+		for (const auto& vertex : a_vertices) {
+			const auto position = vertex.pos();
+			result.center += position;
+			bounds.merge(position);
+			++result.samples;
+		}
+
+		result.center /= static_cast<float>(result.samples);
+		const auto min = hdt::vectorFromM128(bounds.min_);
+		const auto max = hdt::vectorFromM128(bounds.max_);
+		result.aabbCenter = (min + max) * 0.5F;
+		return result;
+	}
+
+	PointCloudStats CalculateSkinnedBoneStats(const hdt::SkinnedMeshBody& a_body)
+	{
+		PointCloudStats result;
+		if (a_body.skinnedBones_.empty()) {
+			return result;
+		}
+
+		hdt::Aabb bounds;
+		for (const auto& bone : a_body.skinnedBones_) {
+			if (!bone.ptr) {
+				continue;
+			}
+
+			const auto origin = bone.ptr->m_currentTransform.getOrigin();
+			result.center += origin;
+			bounds.merge(origin);
+			++result.samples;
+		}
+
+		if (result.samples == 0) {
+			return result;
+		}
+
+		result.center /= static_cast<float>(result.samples);
+		const auto min = hdt::vectorFromM128(bounds.min_);
+		const auto max = hdt::vectorFromM128(bounds.max_);
+		result.aabbCenter = (min + max) * 0.5F;
+		return result;
 	}
 
 	btVector3 ToBulletVector(const Smp::XmlVector3& a_value)
@@ -3975,6 +4079,9 @@ namespace Smp
 			world->StepReference(clampedDelta, fixedStepSeconds);
 		}
 		RestoreTranslationOffset(*dynamicsWorld_, translationOffset);
+		if (!translationOffset.fuzzyZero()) {
+			RefreshSkinnedMeshWorldState(*dynamicsWorld_);
+		}
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
@@ -8952,6 +9059,67 @@ namespace Smp
 			}
 
 			meshBody->internalUpdate();
+			const auto rawVertexStats = CalculateSkinVertexStats(decodedMesh.vertices);
+			const auto skinnedVertexStats = CalculateVertexPositionStats(meshBody->vertexPositions_);
+			const auto skinnedBoneStats = CalculateSkinnedBoneStats(*meshBody);
+			const auto skinRootTransform = decodedMesh.skinRootNode ?
+				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(decodedMesh.skinRootNode->world) :
+				hdt::btQsTransform::getIdentity();
+			const auto geometryTransform = decodedMesh.geometry ?
+				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(decodedMesh.geometry->world) :
+				hdt::btQsTransform::getIdentity();
+			const auto rawCenterThroughSkinRoot = skinRootTransform * rawVertexStats.center;
+			const auto rawCenterThroughGeometry = geometryTransform * rawVertexStats.center;
+			const auto actorPosition = a_state.actor ? a_state.actor->GetPosition() : RE::NiPoint3{};
+			spdlog::debug(
+				"mesh coordinate diagnostic actor={} mesh='{}' buildGroup={} domain={} samples(raw={}, skinned={}, bones={}) actorPos=({:.3f},{:.3f},{:.3f}) geometry={} geometryName='{}' geometryWorld=({:.3f},{:.3f},{:.3f}) skinRoot={} skinRootName='{}' skinRootWorld=({:.3f},{:.3f},{:.3f}) rawCenter=({:.3f},{:.3f},{:.3f}) rawAabbCenter=({:.3f},{:.3f},{:.3f}) rawCenterViaGeometry=({:.3f},{:.3f},{:.3f}) rawCenterViaSkinRoot=({:.3f},{:.3f},{:.3f}) vertexCenter=({:.3f},{:.3f},{:.3f}) vertexAabbCenter=({:.3f},{:.3f},{:.3f}) boneCenter=({:.3f},{:.3f},{:.3f}) boneAabbCenter=({:.3f},{:.3f},{:.3f}) objectOrigin=({:.3f},{:.3f},{:.3f})",
+				static_cast<void*>(a_state.actor),
+				decodedMesh.name,
+				a_buildGroup,
+				PrototypeDomainName(a_domain),
+				rawVertexStats.samples,
+				skinnedVertexStats.samples,
+				skinnedBoneStats.samples,
+				actorPosition.x,
+				actorPosition.y,
+				actorPosition.z,
+				static_cast<void*>(decodedMesh.geometry),
+				decodedMesh.geometry ? std::string_view(decodedMesh.geometry->GetName()) : std::string_view{},
+				geometryTransform.getOrigin().x(),
+				geometryTransform.getOrigin().y(),
+				geometryTransform.getOrigin().z(),
+				static_cast<void*>(decodedMesh.skinRootNode),
+				decodedMesh.skinRootNode ? std::string_view(decodedMesh.skinRootNode->GetName()) : std::string_view{},
+				skinRootTransform.getOrigin().x(),
+				skinRootTransform.getOrigin().y(),
+				skinRootTransform.getOrigin().z(),
+				rawVertexStats.center.x(),
+				rawVertexStats.center.y(),
+				rawVertexStats.center.z(),
+				rawVertexStats.aabbCenter.x(),
+				rawVertexStats.aabbCenter.y(),
+				rawVertexStats.aabbCenter.z(),
+				rawCenterThroughGeometry.x(),
+				rawCenterThroughGeometry.y(),
+				rawCenterThroughGeometry.z(),
+				rawCenterThroughSkinRoot.x(),
+				rawCenterThroughSkinRoot.y(),
+				rawCenterThroughSkinRoot.z(),
+				skinnedVertexStats.center.x(),
+				skinnedVertexStats.center.y(),
+				skinnedVertexStats.center.z(),
+				skinnedVertexStats.aabbCenter.x(),
+				skinnedVertexStats.aabbCenter.y(),
+				skinnedVertexStats.aabbCenter.z(),
+				skinnedBoneStats.center.x(),
+				skinnedBoneStats.center.y(),
+				skinnedBoneStats.center.z(),
+				skinnedBoneStats.aabbCenter.x(),
+				skinnedBoneStats.aabbCenter.y(),
+				skinnedBoneStats.aabbCenter.z(),
+				meshBody->getWorldTransform().getOrigin().x(),
+				meshBody->getWorldTransform().getOrigin().y(),
+				meshBody->getWorldTransform().getOrigin().z());
 
 			PrototypeMesh prototypeMesh;
 			prototypeMesh.name = decodedMesh.name;

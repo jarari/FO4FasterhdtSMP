@@ -3,7 +3,6 @@
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBone.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshShape.h"
-#include "RE/A/Actor.h"
 #include "RE/B/BSGraphics.h"
 #include "RE/M/Main.h"
 #include "RE/N/NiCamera.h"
@@ -34,12 +33,6 @@ namespace
 	constexpr ImU32 kFallbackColor = IM_COL32(230, 230, 230, 180);
 	constexpr ImU32 kTextColor = IM_COL32(255, 255, 255, 255);
 	constexpr int kCurveSegments = 24;
-	constexpr float kWorldSpaceThreshold = 2048.0F;
-
-	bool LooksWorldSpace(const btVector3& a_position)
-	{
-		return a_position.length2() >= kWorldSpaceThreshold * kWorldSpaceThreshold;
-	}
 
 	struct Projector
 	{
@@ -431,36 +424,20 @@ namespace
 		DrawFallbackAabb(a_drawList, a_projector, a_shape, a_transform, a_color);
 	}
 
-	struct MeshVisualAlignment
+	struct MeshVisualStats
 	{
-		btTransform transform{ btTransform::getIdentity() };
-		btVector3 actorPosition{ 0.0F, 0.0F, 0.0F };
 		btVector3 meshCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 boneCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 nearOriginBoneCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 worldLikeBoneCenter{ 0.0F, 0.0F, 0.0F };
-		btVector3 rigCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 aabbCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 vertexAabbMin{ 0.0F, 0.0F, 0.0F };
 		btVector3 vertexAabbMax{ 0.0F, 0.0F, 0.0F };
 		btVector3 vertexAabbCenter{ 0.0F, 0.0F, 0.0F };
 		btVector3 objectOrigin{ 0.0F, 0.0F, 0.0F };
-		const char* visualSource{ "none" };
 		std::uint32_t meshSamples{ 0 };
-		std::uint32_t boneSamples{ 0 };
-		std::uint32_t nearOriginBoneSamples{ 0 };
-		std::uint32_t worldLikeBoneSamples{ 0 };
-		std::uint32_t rigSamples{ 0 };
-		bool applied{ false };
 	};
 
-	MeshVisualAlignment CalculateMeshVisualAlignment(const hdt::SkinnedMeshBody& a_body)
+	MeshVisualStats CalculateMeshVisualStats(const hdt::SkinnedMeshBody& a_body)
 	{
-		MeshVisualAlignment result;
-		if (a_body.actor_) {
-			const auto actorPosition = a_body.actor_->GetPosition();
-			result.actorPosition = btVector3(actorPosition.x, actorPosition.y, actorPosition.z);
-		}
+		MeshVisualStats result;
 		result.objectOrigin = a_body.getWorldTransform().getOrigin();
 		btVector3 min;
 		btVector3 max;
@@ -490,99 +467,28 @@ namespace
 		}
 		result.meshCenter /= static_cast<float>(result.meshSamples);
 		result.vertexAabbCenter = (result.vertexAabbMin + result.vertexAabbMax) * 0.5F;
-
-		for (const auto& bone : a_body.skinnedBones_) {
-			if (!bone.ptr) {
-				continue;
-			}
-			const auto currentOrigin = bone.ptr->m_currentTransform.getOrigin();
-			result.boneCenter += currentOrigin;
-			if (LooksWorldSpace(currentOrigin)) {
-				result.worldLikeBoneCenter += currentOrigin;
-				++result.worldLikeBoneSamples;
-			} else {
-				result.nearOriginBoneCenter += currentOrigin;
-				++result.nearOriginBoneSamples;
-			}
-			++result.boneSamples;
-
-			const auto rigOrigin = bone.ptr->m_rig.getWorldTransform().getOrigin();
-			if (LooksWorldSpace(rigOrigin)) {
-				result.rigCenter += rigOrigin;
-				++result.rigSamples;
-			}
-		}
-		if (result.boneSamples > 0) {
-			result.boneCenter /= static_cast<float>(result.boneSamples);
-		}
-		if (result.nearOriginBoneSamples > 0) {
-			result.nearOriginBoneCenter /= static_cast<float>(result.nearOriginBoneSamples);
-		}
-		if (result.worldLikeBoneSamples > 0) {
-			result.worldLikeBoneCenter /= static_cast<float>(result.worldLikeBoneSamples);
-		}
-		if (result.rigSamples > 0) {
-			result.rigCenter /= static_cast<float>(result.rigSamples);
-		}
-
-		result.visualSource = "vertexPositions";
 		return result;
 	}
 
-	void DrawTransformedAabb(ImDrawList& a_drawList, const Projector& a_projector, const btVector3& a_min, const btVector3& a_max, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
+	void DrawMeshAabb(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const MeshVisualStats& a_stats, const ImU32 a_color)
 	{
-		if (a_alignment.applied) {
-			const btVector3 corners[8]{
-				{ a_min.x(), a_min.y(), a_min.z() }, { a_max.x(), a_min.y(), a_min.z() },
-				{ a_max.x(), a_max.y(), a_min.z() }, { a_min.x(), a_max.y(), a_min.z() },
-				{ a_min.x(), a_min.y(), a_max.z() }, { a_max.x(), a_min.y(), a_max.z() },
-				{ a_max.x(), a_max.y(), a_max.z() }, { a_min.x(), a_max.y(), a_max.z() },
-			};
-			const int edges[12][2]{
-				{ 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, { 4, 5 }, { 5, 6 },
-				{ 6, 7 }, { 7, 4 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-			};
-			for (const auto& edge : edges) {
-				DrawLine(a_drawList, a_projector, a_alignment.transform * corners[edge[0]], a_alignment.transform * corners[edge[1]], a_color);
-			}
-		} else {
-			DrawAabb(a_drawList, a_projector, a_min, a_max, a_color);
-		}
-	}
-
-	void DrawTransformedLine(ImDrawList& a_drawList, const Projector& a_projector, const btVector3& a_from, const btVector3& a_to, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
-	{
-		if (a_alignment.applied) {
-			DrawLine(a_drawList, a_projector, a_alignment.transform * a_from, a_alignment.transform * a_to, a_color);
-		} else {
-			DrawLine(a_drawList, a_projector, a_from, a_to, a_color);
-		}
-	}
-
-	void DrawTransformedPoint(ImDrawList& a_drawList, const Projector& a_projector, const btVector3& a_world, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
-	{
-		DrawPoint(a_drawList, a_projector, a_alignment.applied ? a_alignment.transform * a_world : a_world, a_color);
-	}
-
-	void DrawTransformedShapeAabb(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const MeshVisualAlignment& a_alignment, const ImU32 a_color)
-	{
-		if (a_alignment.meshSamples > 0) {
-			DrawTransformedAabb(a_drawList, a_projector, a_alignment.vertexAabbMin, a_alignment.vertexAabbMax, a_alignment, a_color);
+		if (a_stats.meshSamples > 0) {
+			DrawAabb(a_drawList, a_projector, a_stats.vertexAabbMin, a_stats.vertexAabbMax, a_color);
 			return;
 		}
 
 		btVector3 min;
 		btVector3 max;
 		a_body.bulletShape_.getAabb(a_body.getWorldTransform(), min, max);
-		DrawTransformedAabb(a_drawList, a_projector, min, max, a_alignment, a_color);
+		DrawAabb(a_drawList, a_projector, min, max, a_color);
 	}
 
-	MeshVisualAlignment DrawSkinnedMeshBody(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const ImU32 a_color)
+	MeshVisualStats DrawSkinnedMeshBody(ImDrawList& a_drawList, const Projector& a_projector, const hdt::SkinnedMeshBody& a_body, const ImU32 a_color)
 	{
-		const auto visualAlignment = CalculateMeshVisualAlignment(a_body);
+		const auto stats = CalculateMeshVisualStats(a_body);
 		if (!a_body.shape_) {
-			DrawTransformedShapeAabb(a_drawList, a_projector, a_body, visualAlignment, a_color);
-			return visualAlignment;
+			DrawMeshAabb(a_drawList, a_projector, a_body, stats, a_color);
+			return stats;
 		}
 
 		if (const auto* triangleShape = a_body.shape_->asPerTriangleShape()) {
@@ -597,29 +503,26 @@ namespace
 				const auto p0 = a_body.vertexPositions_[i0].pos();
 				const auto p1 = a_body.vertexPositions_[i1].pos();
 				const auto p2 = a_body.vertexPositions_[i2].pos();
-				DrawTransformedLine(a_drawList, a_projector, p0, p1, visualAlignment, a_color);
-				DrawTransformedLine(a_drawList, a_projector, p1, p2, visualAlignment, a_color);
-				DrawTransformedLine(a_drawList, a_projector, p2, p0, visualAlignment, a_color);
+				DrawLine(a_drawList, a_projector, p0, p1, a_color);
+				DrawLine(a_drawList, a_projector, p1, p2, a_color);
+				DrawLine(a_drawList, a_projector, p2, p0, a_color);
 			}
-			if (visualAlignment.applied) {
-				DrawTransformedShapeAabb(a_drawList, a_projector, a_body, visualAlignment, IM_COL32(120, 255, 140, 70));
-			}
-			return visualAlignment;
+			return stats;
 		}
 
 		if (const auto* vertexShape = a_body.shape_->asPerVertexShape()) {
 			for (const auto& collider : vertexShape->colliders_) {
 				const auto vertex = static_cast<std::size_t>(collider.vertex_);
 				if (vertex < a_body.vertexPositions_.size()) {
-					DrawTransformedPoint(a_drawList, a_projector, a_body.vertexPositions_[vertex].pos(), visualAlignment, a_color);
+					DrawPoint(a_drawList, a_projector, a_body.vertexPositions_[vertex].pos(), a_color);
 				}
 			}
-			DrawTransformedShapeAabb(a_drawList, a_projector, a_body, visualAlignment, IM_COL32(120, 255, 140, 90));
-			return visualAlignment;
+			DrawMeshAabb(a_drawList, a_projector, a_body, stats, IM_COL32(120, 255, 140, 90));
+			return stats;
 		}
 
-		DrawTransformedShapeAabb(a_drawList, a_projector, a_body, visualAlignment, a_color);
-		return visualAlignment;
+		DrawMeshAabb(a_drawList, a_projector, a_body, stats, a_color);
+		return stats;
 	}
 }
 
@@ -641,8 +544,7 @@ namespace Smp::BulletVisualization
 		std::uint32_t rigidBodies = 0;
 		std::uint32_t meshBodies = 0;
 		std::uint32_t fallbackObjects = 0;
-		std::uint32_t meshVisualOffsets = 0;
-		std::vector<std::pair<const hdt::SkinnedMeshBody*, MeshVisualAlignment>> meshDebug;
+		std::vector<std::pair<const hdt::SkinnedMeshBody*, MeshVisualStats>> meshDebug;
 		for (int index = 0; index < objectCount; ++index) {
 			const auto* object = a_world->getCollisionObjectArray()[index];
 			const auto* shape = object ? object->getCollisionShape() : nullptr;
@@ -668,12 +570,9 @@ namespace Smp::BulletVisualization
 
 			if (shape->getShapeType() == CUSTOM_CONCAVE_SHAPE_TYPE) {
 				const auto* mesh = static_cast<const hdt::SkinnedMeshBody*>(object);
-				const auto alignment = DrawSkinnedMeshBody(*drawList, projector, *mesh, color);
-				if (alignment.applied) {
-					++meshVisualOffsets;
-				}
-				meshDebug.emplace_back(mesh, alignment);
-				DrawText(*drawList, projector, alignment.applied ? alignment.transform * alignment.meshCenter : alignment.meshCenter, label);
+				const auto stats = DrawSkinnedMeshBody(*drawList, projector, *mesh, color);
+				meshDebug.emplace_back(mesh, stats);
+				DrawText(*drawList, projector, stats.meshCenter, label);
 			} else {
 				DrawShape(*drawList, projector, *shape, object->getWorldTransform(), color);
 				DrawText(*drawList, projector, object->getWorldTransform().getOrigin(), label);
@@ -684,11 +583,10 @@ namespace Smp::BulletVisualization
 		std::snprintf(
 			status,
 			sizeof(status),
-			"SMP Bullet vis: objects=%d rigid=%u meshes=%u meshOffsets=%u projected=%u/%u camera=%p %s caches=%u adj=(%.0f %.0f %.0f)/(%.0f %.0f %.0f) size=%.0fx%.0f",
+			"SMP Bullet vis: objects=%d rigid=%u meshes=%u projected=%u/%u camera=%p %s caches=%u adj=(%.0f %.0f %.0f)/(%.0f %.0f %.0f) size=%.0fx%.0f",
 				objectCount,
 				rigidBodies,
 				meshBodies,
-				meshVisualOffsets,
 				projector.projectSuccesses,
 				projector.projectAttempts,
 				static_cast<const void*>(projector.camera),
@@ -707,11 +605,10 @@ namespace Smp::BulletVisualization
 		static std::uint32_t frameCounter = 0;
 		if (++frameCounter % 120 == 0) {
 			spdlog::debug(
-				"bullet visualization frame objects={} rigidBodies={} meshes={} meshVisualOffsets={} fallbackObjects={} projected={}/{} camera={} source={} caches={} posAdjust=({}, {}, {}) currentPosAdjust=({}, {}, {}) size={}x{}",
+				"bullet visualization frame objects={} rigidBodies={} meshes={} fallbackObjects={} projected={}/{} camera={} source={} caches={} posAdjust=({}, {}, {}) currentPosAdjust=({}, {}, {}) size={}x{}",
 				objectCount,
 				rigidBodies,
 				meshBodies,
-				meshVisualOffsets,
 				fallbackObjects,
 				projector.projectSuccesses,
 				projector.projectAttempts,
@@ -726,52 +623,28 @@ namespace Smp::BulletVisualization
 				projector.currentPosAdjust.z,
 				projector.width,
 				projector.height);
-			for (const auto& [mesh, alignment] : meshDebug) {
+			for (const auto& [mesh, stats] : meshDebug) {
 				if (!mesh) {
 					continue;
 				}
 				spdlog::debug(
-					"bullet visualization mesh name='{}' actor={} buildGroup={} samples(mesh={}, bone={}, nearOriginBone={}, worldLikeBone={}, rig={}) visualOffsetApplied={} visualSource={} actorPosition=({}, {}, {}) visualOrigin=({}, {}, {}) objectOrigin=({}, {}, {}) shapeAabbCenter=({}, {}, {}) vertexAabbCenter=({}, {}, {}) meshCenter=({}, {}, {}) boneCenter=({}, {}, {}) nearOriginBoneCenter=({}, {}, {}) worldLikeBoneCenter=({}, {}, {}) rigCenter=({}, {}, {})",
+					"bullet visualization mesh name='{}' actor={} buildGroup={} samples(mesh={}) objectOrigin=({}, {}, {}) shapeAabbCenter=({}, {}, {}) vertexAabbCenter=({}, {}, {}) meshCenter=({}, {}, {})",
 					mesh->name_.c_str(),
 					static_cast<void*>(mesh->actor_),
 					mesh->buildGroup_,
-					alignment.meshSamples,
-					alignment.boneSamples,
-					alignment.nearOriginBoneSamples,
-					alignment.worldLikeBoneSamples,
-					alignment.rigSamples,
-					alignment.applied,
-					alignment.visualSource,
-					alignment.actorPosition.x(),
-					alignment.actorPosition.y(),
-					alignment.actorPosition.z(),
-					alignment.transform.getOrigin().x(),
-					alignment.transform.getOrigin().y(),
-					alignment.transform.getOrigin().z(),
-					alignment.objectOrigin.x(),
-					alignment.objectOrigin.y(),
-					alignment.objectOrigin.z(),
-					alignment.aabbCenter.x(),
-					alignment.aabbCenter.y(),
-					alignment.aabbCenter.z(),
-					alignment.vertexAabbCenter.x(),
-					alignment.vertexAabbCenter.y(),
-					alignment.vertexAabbCenter.z(),
-					alignment.meshCenter.x(),
-					alignment.meshCenter.y(),
-					alignment.meshCenter.z(),
-					alignment.boneCenter.x(),
-					alignment.boneCenter.y(),
-					alignment.boneCenter.z(),
-					alignment.nearOriginBoneCenter.x(),
-					alignment.nearOriginBoneCenter.y(),
-					alignment.nearOriginBoneCenter.z(),
-					alignment.worldLikeBoneCenter.x(),
-					alignment.worldLikeBoneCenter.y(),
-					alignment.worldLikeBoneCenter.z(),
-					alignment.rigCenter.x(),
-					alignment.rigCenter.y(),
-					alignment.rigCenter.z());
+					stats.meshSamples,
+					stats.objectOrigin.x(),
+					stats.objectOrigin.y(),
+					stats.objectOrigin.z(),
+					stats.aabbCenter.x(),
+					stats.aabbCenter.y(),
+					stats.aabbCenter.z(),
+					stats.vertexAabbCenter.x(),
+					stats.vertexAabbCenter.y(),
+					stats.vertexAabbCenter.z(),
+					stats.meshCenter.x(),
+					stats.meshCenter.y(),
+					stats.meshCenter.z());
 			}
 		}
 	}
