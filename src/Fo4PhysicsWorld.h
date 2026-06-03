@@ -64,7 +64,7 @@ namespace Smp
 		public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
 	public:
-		~Fo4PhysicsWorld() override;
+		~Fo4PhysicsWorld() noexcept override;
 
 		static Fo4PhysicsWorld* GetSingleton();
 
@@ -87,6 +87,8 @@ namespace Smp
 		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_source) override;
 
 	private:
+		struct AsyncStepState;
+
 		Fo4PhysicsWorld() = default;
 		Fo4PhysicsWorld(const Fo4PhysicsWorld&) = delete;
 		Fo4PhysicsWorld(Fo4PhysicsWorld&&) = delete;
@@ -329,8 +331,11 @@ namespace Smp
 		void LogRootConstraintDiagnosticsLocked(std::string_view a_phase, const PrototypeActorState& a_state);
 		void UpdateMeshDisableStatesLocked(PrototypeActorState& a_state);
 		void ResetStepClockLocked();
+		void WaitForAsyncStep();
+		void RunSecondStepLocked(float a_deltaSeconds, float a_fixedStepSeconds);
 
 		std::mutex lock_;
+		std::unique_ptr<AsyncStepState> asyncStepState_;
 		std::unique_ptr<btDefaultCollisionConfiguration> collisionConfiguration_;
 		std::unique_ptr<hdt::CollisionDispatcher> dispatcher_;
 		std::unique_ptr<btBroadphaseInterface> broadphase_;

@@ -58,6 +58,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tbb/parallel_for.h>
+#include <tbb/task_group.h>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -216,6 +218,23 @@ namespace
 
 			clearForces();
 			return 0;
+		}
+
+		void applyGravity() override
+		{
+			const auto worldGravity = getGravity();
+			for (int index = 0; index < m_collisionObjects.size(); ++index) {
+				auto* body = btRigidBody::upcast(m_collisionObjects[index]);
+				if (!body || body->isStaticOrKinematicObject() || (body->getFlags() & BT_DISABLE_WORLD_GRAVITY)) {
+					continue;
+				}
+
+				if (const auto* bone = static_cast<hdt::SkinnedMeshBone*>(body->getUserPointer())) {
+					body->setGravity(worldGravity * std::clamp(bone->m_gravityFactor, 0.0F, 1.0F));
+				}
+			}
+
+			btDiscreteDynamicsWorld::applyGravity();
 		}
 
 		void performDiscreteCollisionDetection() override
@@ -3840,9 +3859,17 @@ namespace
 
 namespace Smp
 {
-	Fo4PhysicsWorld::~Fo4PhysicsWorld()
+	struct Fo4PhysicsWorld::AsyncStepState
 	{
-		Reset();
+		tbb::task_group tasks;
+	};
+
+	Fo4PhysicsWorld::~Fo4PhysicsWorld() noexcept
+	{
+		try {
+			Reset();
+		} catch (...) {
+		}
 	}
 
 	Fo4PhysicsWorld* Fo4PhysicsWorld::GetSingleton()
@@ -3869,12 +3896,14 @@ namespace Smp
 
 	bool Fo4PhysicsWorld::Initialize()
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		return InitializeLocked();
 	}
 
 	void Fo4PhysicsWorld::ApplyConfig(const RuntimeSettings& a_settings)
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		solverIterations_ = a_settings.solver.numIterations;
 		solverErp_ = a_settings.solver.erp;
@@ -3931,14 +3960,23 @@ namespace Smp
 
 	void Fo4PhysicsWorld::DrawBulletVisualization()
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		Smp::BulletVisualization::DrawWorld(dynamicsWorld_.get());
 	}
 
 	void Fo4PhysicsWorld::Reset()
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		ResetLocked();
+	}
+
+	void Fo4PhysicsWorld::WaitForAsyncStep()
+	{
+		if (asyncStepState_) {
+			asyncStepState_->tasks.wait();
+		}
 	}
 
 	void Fo4PhysicsWorld::ResetStepClockLocked()
@@ -3958,6 +3996,7 @@ namespace Smp
 			return;
 		}
 
+		WaitForAsyncStep();
 		if (IsGamePaused()) {
 			std::scoped_lock lock(lock_);
 			ResetStepClockLocked();
@@ -3997,6 +4036,7 @@ namespace Smp
 
 	void Fo4PhysicsWorld::Step(const float a_deltaSeconds)
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		if (!dynamicsWorld_ || a_deltaSeconds <= 0.0F) {
 			return;
@@ -4025,19 +4065,18 @@ namespace Smp
 			}
 		}
 
-		auto phaseStart = Clock::now();
-		for (auto& actorState : prototypeActors_) {
-			if (actorState.runtimeSoftSuspended) {
-				continue;
-			}
-			UpdateMeshDisableStatesLocked(actorState);
-			const auto resettingRead = actorState.resetReadFrames > 0;
-			const auto readDelta = PreparePrototypeActorForReadLocked(actorState, actorState.resetReadFrames > 0 ? 0.0F : a_deltaSeconds);
+		struct ActorReadTask
+		{
+			PrototypeActorState* actorState{ nullptr };
+			float readDelta{ 0.0F };
+		};
+		const auto processReadTask = [this](const ActorReadTask& a_task) {
+			auto& actorState = *a_task.actorState;
 			if (!actorState.runtimes.empty()) {
 				for (const auto& runtime : actorState.runtimes) {
 					for (auto* bone : runtime.bones) {
 						if (bone) {
-							bone->readTransform(readDelta);
+							bone->readTransform(a_task.readDelta);
 						}
 					}
 					ScalePrototypeConstraintsLocked(actorState, runtime);
@@ -4045,15 +4084,31 @@ namespace Smp
 			} else {
 				for (auto& prototypeBody : actorState.bodies) {
 					if (prototypeBody.bone) {
-						prototypeBody.bone->readTransform(readDelta);
+						prototypeBody.bone->readTransform(a_task.readDelta);
 					}
 				}
 				ScalePrototypeConstraintsLocked(actorState);
 			}
+		};
+
+		auto phaseStart = Clock::now();
+		std::vector<ActorReadTask> readTasks;
+		readTasks.reserve(prototypeActors_.size());
+		for (auto& actorState : prototypeActors_) {
+			if (actorState.runtimeSoftSuspended) {
+				continue;
+			}
+			UpdateMeshDisableStatesLocked(actorState);
+			const auto resettingRead = actorState.resetReadFrames > 0;
+			const auto readDelta = PreparePrototypeActorForReadLocked(actorState, actorState.resetReadFrames > 0 ? 0.0F : a_deltaSeconds);
+			readTasks.push_back({ std::addressof(actorState), readDelta });
 			if (actorState.resetReadFrames > 0) {
 				--actorState.resetReadFrames;
 			}
 			if (resettingRead) {
+				for (const auto& task : readTasks) {
+					processReadTask(task);
+				}
 				if (dynamicsWorld_) {
 					dynamicsWorld_->clearForces();
 				}
@@ -4061,6 +4116,9 @@ namespace Smp
 				return;
 			}
 		}
+		tbb::parallel_for(std::size_t{ 0 }, readTasks.size(), [&](const std::size_t a_index) {
+			processReadTask(readTasks[a_index]);
+		});
 		const auto readMs = ElapsedMs(phaseStart, Clock::now());
 
 		phaseStart = Clock::now();
@@ -4072,11 +4130,28 @@ namespace Smp
 		const auto maximumStepSeconds = std::max(fixedStepSeconds, fixedStepSeconds * static_cast<float>(std::max(maxSubSteps_, 1)));
 		const auto clampedDelta = std::clamp(a_deltaSeconds, kMinimumStepSeconds, maximumStepSeconds);
 
+		pendingStepReadMs_ += readMs;
+		pendingStepWindMs_ += windMs;
+		if (!asyncStepState_) {
+			asyncStepState_ = std::make_unique<AsyncStepState>();
+		}
+		asyncStepState_->tasks.run([this, clampedDelta, fixedStepSeconds]() {
+			RunSecondStepLocked(clampedDelta, fixedStepSeconds);
+		});
+	}
+
+	void Fo4PhysicsWorld::RunSecondStepLocked(const float a_deltaSeconds, const float a_fixedStepSeconds)
+	{
+		std::scoped_lock lock(lock_);
+		if (!dynamicsWorld_ || a_deltaSeconds <= 0.0F || a_fixedStepSeconds <= 0.0F) {
+			return;
+		}
+
 		ResetFrameCollisionProfile();
-		phaseStart = Clock::now();
+		auto phaseStart = Clock::now();
 		const auto translationOffset = ApplyTranslationOffset(*dynamicsWorld_);
 		if (auto* world = static_cast<PrototypeDynamicsWorld*>(dynamicsWorld_.get())) {
-			world->StepReference(clampedDelta, fixedStepSeconds);
+			world->StepReference(a_deltaSeconds, a_fixedStepSeconds);
 		}
 		RestoreTranslationOffset(*dynamicsWorld_, translationOffset);
 		if (!translationOffset.fuzzyZero()) {
@@ -4089,8 +4164,6 @@ namespace Smp
 		std::uint32_t collisionCalls = 0;
 		const auto collisionMs = ConsumeFrameCollisionProfile(collisionCalls);
 
-		pendingStepReadMs_ += readMs;
-		pendingStepWindMs_ += windMs;
 		pendingStepBulletMs_ += bulletMs;
 		pendingStepCollisionMs_ += collisionMs;
 		pendingStepCollisionCalls_ += collisionCalls;
@@ -4469,6 +4542,7 @@ namespace Smp
 		const auto start = Clock::now();
 		bool wroteAny = false;
 		bool skippedDuplicate = false;
+		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
 			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
@@ -4538,6 +4612,7 @@ namespace Smp
 		const auto start = Clock::now();
 		bool wroteAny = false;
 		bool skippedDuplicate = false;
+		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
 			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
@@ -4608,6 +4683,7 @@ namespace Smp
 
 	void Fo4PhysicsWorld::ProcessPendingRebuilds()
 	{
+		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		pendingRebuildTaskQueued_ = false;
 		if (characterCustomizationMenuDepth_ > 0) {
@@ -4624,6 +4700,7 @@ namespace Smp
 
 	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>*)
 	{
+		WaitForAsyncStep();
 		if (IsAttachCandidate(a_event.type)) {
 			if (a_event.type == LifecycleEventType::kActorSet3D && !a_event.object) {
 				std::scoped_lock lock(lock_);
@@ -4786,6 +4863,7 @@ namespace Smp
 
 	RE::BSEventNotifyControl Fo4PhysicsWorld::ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
 	{
+		WaitForAsyncStep();
 		const auto menuName = LowerMenuName(a_event.menuName);
 		if (menuName == "loadingmenu") {
 			std::scoped_lock lock(lock_);

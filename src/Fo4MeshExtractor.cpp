@@ -12,6 +12,11 @@
 #include <bit>
 #include <cstring>
 
+#if defined(__AVX2__) || defined(__AVX512F__) || defined(FO4_FASTER_HDTSMP_AVX2) || defined(FO4_FASTER_HDTSMP_AVX512)
+#	include <immintrin.h>
+#	define FO4SMP_USE_F16C_SKINNING 1
+#endif
+
 namespace
 {
 
@@ -100,10 +105,18 @@ namespace
 		}
 
 		const auto* skinData = a_vertex + skinOffset;
+#ifdef FO4SMP_USE_F16C_SKINNING
+		const auto halfWeights = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(skinData));
+		_mm_storeu_ps(a_output.weight_, _mm_cvtph_ps(halfWeights));
+		for (std::size_t index = 0; index < 4; ++index) {
+			a_output.boneIdx_[index] = skinData[8 + index];
+		}
+#else
 		for (std::size_t index = 0; index < 4; ++index) {
 			a_output.weight_[index] = HalfToFloat(ReadUnaligned<std::uint16_t>(skinData + index * sizeof(std::uint16_t)));
 			a_output.boneIdx_[index] = skinData[8 + index];
 		}
+#endif
 	}
 
 	bool MatchesMeshName(RE::BSGeometry* a_geometry, std::span<const std::string> a_meshNames)
