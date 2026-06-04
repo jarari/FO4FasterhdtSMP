@@ -222,6 +222,14 @@ namespace Hooks
 		}
 	}
 
+	bool IsClassicHolsteredWeaponBoneName(const std::string_view a_name)
+	{
+		return a_name.size() >= 3 &&
+			a_name[0] == 'V' &&
+			a_name[1] == 'H' &&
+			a_name[2] == 'W';
+	}
+
 	void RenameTree(RE::NiNode* a_root, const std::string_view a_prefix, std::vector<Smp::MergeRename>& a_map)
 	{
 		if (!a_root) {
@@ -328,6 +336,10 @@ namespace Hooks
 
 			if (Smp::PhysicsNamesEqual(childName, "BSFaceGenNiNodeSkinned")) {
 				spdlog::debug("Skipping facegen ninode in skeleton merge.");
+				continue;
+			}
+			if (IsClassicHolsteredWeaponBoneName(childName)) {
+				spdlog::debug("Skipping Classic Holstered Weapon helper bone '{}' in skeleton merge.", std::string_view(childName));
 				continue;
 			}
 

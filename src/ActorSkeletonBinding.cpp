@@ -7,6 +7,8 @@
 #include "RE/N/NiNode.h"
 #include "RE/T/TESObjectREFR.h"
 
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -14,6 +16,14 @@ namespace Smp::ActorSkeletonBinding
 {
 	namespace
 	{
+		bool IsClassicHolsteredWeaponBoneName(const std::string_view a_name)
+		{
+			return a_name.size() >= 3 &&
+				a_name[0] == 'V' &&
+				a_name[1] == 'H' &&
+				a_name[2] == 'W';
+		}
+
 		void CollectTrustedNodeNames(
 			const std::vector<RE::NiAVObject*>& a_trustedNodes,
 			std::unordered_map<std::string, RE::NiAVObject*>& a_nameToNode)
@@ -21,6 +31,9 @@ namespace Smp::ActorSkeletonBinding
 			for (auto* node : a_trustedNodes) {
 				const auto nodeName = node ? node->GetName() : std::string_view{};
 				if (nodeName.empty()) {
+					continue;
+				}
+				if (IsClassicHolsteredWeaponBoneName(nodeName)) {
 					continue;
 				}
 				if (!std::ranges::any_of(a_nameToNode, [nodeName](const auto& a_entry) {
@@ -72,7 +85,7 @@ namespace Smp::ActorSkeletonBinding
 
 			const auto sourceName = a_source->GetName();
 			auto* trustedNode = FindTrustedNodeByName(a_nameToNode, sourceName);
-			auto* trustedParent = FindNearestTrustedSourceParent(a_source, a_nameToNode);
+			auto* trustedParent = IsClassicHolsteredWeaponBoneName(sourceName) ? nullptr : FindNearestTrustedSourceParent(a_source, a_nameToNode);
 			if (trustedNode && trustedParent && trustedNode != trustedParent && !NiObject::IsDescendantOf(trustedNode, trustedParent)) {
 				std::vector<RE::NiAVObject*> rejectedSubtree;
 				NiObject::CollectNodePointers(trustedNode, rejectedSubtree);
@@ -105,7 +118,7 @@ namespace Smp::ActorSkeletonBinding
 			}
 
 			const auto name = a_object->GetName();
-			if (!name.empty() && IsAutoRenamedPhysicsName(name)) {
+			if (!name.empty() && (IsAutoRenamedPhysicsName(name) || IsClassicHolsteredWeaponBoneName(name))) {
 				a_exclusions.insert(a_object);
 			}
 
@@ -143,9 +156,12 @@ namespace Smp::ActorSkeletonBinding
 			}
 
 			const auto sourceName = a_source->GetName();
-			if (!sourceName.empty()) {
+			if (!sourceName.empty() && !IsClassicHolsteredWeaponBoneName(sourceName)) {
 				for (auto* sourceParent = a_source->parent; sourceParent; sourceParent = sourceParent->parent) {
 					const auto sourceParentName = sourceParent->GetName();
+					if (IsClassicHolsteredWeaponBoneName(sourceParentName)) {
+						continue;
+					}
 					const auto* trustedParentName = FindTrustedActorNodeName(a_trustedActorNodeNames, sourceParentName);
 					if (!trustedParentName) {
 						continue;
@@ -259,6 +275,9 @@ namespace Smp::ActorSkeletonBinding
 		for (auto* nodeObject : a_trustedActorSkeletonNodes) {
 			const auto nodeName = nodeObject ? nodeObject->GetName() : std::string_view{};
 			if (nodeName.empty()) {
+				continue;
+			}
+			if (IsClassicHolsteredWeaponBoneName(nodeName)) {
 				continue;
 			}
 			if (!std::ranges::any_of(trustedActorNodeNames, [nodeName](const std::string& a_existing) {
