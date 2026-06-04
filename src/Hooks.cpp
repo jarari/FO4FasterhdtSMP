@@ -103,6 +103,7 @@ namespace Hooks
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
+	std::atomic<std::uint32_t> ArmorMergeId{ 1 };
 
 	struct PendingPreparedHeadPart
 	{
@@ -140,9 +141,67 @@ namespace Hooks
 		return path->string();
 	}
 
-	RE::NiPointer<RE::NiAVObject> ClonePhysicsMergeSource(RE::NiNode* a_root)
+	struct PreAttachPhysicsContext
 	{
-		if (!a_root) {
+		std::optional<std::string> selectedXml;
+		RE::NiPointer<RE::NiAVObject> mergeSourceObject;
+		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
+		std::vector<Smp::MergeParentBinding> mergeParentBindings;
+		std::vector<Smp::MergeRename> mergeRenameMap;
+		std::string mergeRenamePrefix;
+	};
+
+	RE::NiNode* FindNode(RE::NiAVObject* a_object, const std::string_view a_name)
+	{
+		if (!a_object || a_name.empty()) {
+			return nullptr;
+		}
+
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+
+		const auto nodeName = node->GetName();
+		if (!nodeName.empty() && Smp::PhysicsNamesEqual(nodeName, a_name)) {
+			return node;
+		}
+
+		for (auto& child : node->children) {
+			if (auto* found = FindNode(child.get(), a_name)) {
+				return found;
+			}
+		}
+		return nullptr;
+	}
+
+	RE::NiNode* GetSkeletonMergeRoot(RE::Actor* a_actor, const bool a_firstPerson)
+	{
+		auto* actorRoot = a_actor ? a_actor->Get3D(a_firstPerson) : nullptr;
+		if (!actorRoot && a_actor) {
+			actorRoot = a_actor->Get3D();
+		}
+		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
+		if (!actorRootNode) {
+			return nullptr;
+		}
+
+		if (auto* rootNode = FindNode(actorRootNode, "Root")) {
+			return rootNode;
+		}
+		return actorRootNode;
+	}
+
+	std::string MakeArmorMergePrefix()
+	{
+		char buffer[48]{};
+		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Armor_%08X ", ArmorMergeId.fetch_add(1, std::memory_order_relaxed));
+		return buffer;
+	}
+
+	RE::NiPointer<RE::NiAVObject> CloneNodeExact(RE::NiNode* a_source)
+	{
+		if (!a_source) {
 			return nullptr;
 		}
 
@@ -151,26 +210,150 @@ namespace Hooks
 		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
 		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
 
-		auto* clone = a_root->CreateClone(cloneProcess);
-		a_root->ProcessClone(cloneProcess);
-		return clone ? static_cast<RE::NiAVObject*>(clone->IsNode()) : nullptr;
+		auto* cloneObject = a_source->CreateClone(cloneProcess);
+		a_source->ProcessClone(cloneProcess);
+		return cloneObject ? static_cast<RE::NiAVObject*>(cloneObject->IsNode()) : nullptr;
 	}
 
-	struct PreAttachPhysicsContext
+	void SetNodeName(RE::NiNode* a_node, const std::string& a_name)
 	{
-		std::optional<std::string> selectedXml;
-		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
-		std::vector<RE::NiAVObject*> mergeSearchExclusions;
-		std::vector<Smp::MergeParentBinding> mergeParentBindings;
-		RE::NiPointer<RE::NiAVObject> mergeSourceObject;
-	};
+		if (a_node) {
+			a_node->name = a_name.c_str();
+		}
+	}
+
+	void RenameTree(RE::NiNode* a_root, const std::string_view a_prefix, std::vector<Smp::MergeRename>& a_map)
+	{
+		if (!a_root) {
+			return;
+		}
+
+		const auto name = a_root->GetName();
+		if (!name.empty()) {
+			std::string renamed{ a_prefix };
+			renamed += std::string_view(name);
+			if (!std::ranges::any_of(a_map, [name](const Smp::MergeRename& a_entry) {
+					return Smp::PhysicsNamesEqual(a_entry.sourceName, name);
+				})) {
+				a_map.push_back({
+					.sourceName = std::string(name),
+					.renamedName = renamed,
+				});
+				spdlog::debug("Rename Bone {} -> {}.", std::string_view(name), renamed);
+			}
+			SetNodeName(a_root, renamed);
+		}
+
+		for (auto& child : a_root->children) {
+			if (auto* childNode = child ? child->IsNode() : nullptr) {
+				RenameTree(childNode, a_prefix, a_map);
+			}
+		}
+	}
+
+	void StripNonNodeChildren(RE::NiNode* a_root)
+	{
+		if (!a_root) {
+			return;
+		}
+
+		std::vector<RE::NiAVObject*> detachedChildren;
+		for (auto& child : a_root->children) {
+			auto* object = child.get();
+			if (!object) {
+				continue;
+			}
+
+			if (auto* node = object->IsNode()) {
+				StripNonNodeChildren(node);
+			} else {
+				detachedChildren.push_back(object);
+			}
+		}
+
+		for (auto* child : detachedChildren) {
+			a_root->DetachChild(child);
+		}
+	}
+
+	RE::NiNode* CloneNodeTree(RE::NiNode* a_source, const std::string_view a_prefix, std::vector<Smp::MergeRename>& a_map, const bool a_renameSource)
+	{
+		if (!a_source) {
+			return nullptr;
+		}
+
+		RE::NiCloningProcess cloneProcess;
+		cloneProcess.appendChar = '$';
+		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
+		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
+
+		auto* clone = a_source->CreateClone(cloneProcess);
+		a_source->ProcessClone(cloneProcess);
+		auto* cloneNode = clone ? clone->IsNode() : nullptr;
+		if (!cloneNode) {
+			return nullptr;
+		}
+
+		if (a_renameSource) {
+			RenameTree(a_source, a_prefix, a_map);
+		}
+		RenameTree(cloneNode, a_prefix, a_map);
+		StripNonNodeChildren(cloneNode);
+		return cloneNode;
+	}
+
+	void DoSkeletonMerge(
+		RE::NiNode* a_destination,
+		RE::NiNode* a_source,
+		const std::string_view a_prefix,
+		std::vector<Smp::MergeRename>& a_map,
+		RE::NiNode* a_destinationRoot,
+		const bool a_renameSource)
+	{
+		if (!a_destination || !a_source || !a_destinationRoot) {
+			return;
+		}
+
+		for (auto& child : a_source->children) {
+			auto* sourceChild = child ? child->IsNode() : nullptr;
+			if (!sourceChild) {
+				continue;
+			}
+
+			const auto childName = sourceChild->GetName();
+			if (childName.empty()) {
+				DoSkeletonMerge(a_destination, sourceChild, a_prefix, a_map, a_destinationRoot, a_renameSource);
+				continue;
+			}
+
+			if (Smp::PhysicsNamesEqual(childName, "BSFaceGenNiNodeSkinned")) {
+				spdlog::debug("Skipping facegen ninode in skeleton merge.");
+				continue;
+			}
+
+			if (auto* destinationChild = FindNode(a_destinationRoot, childName)) {
+				DoSkeletonMerge(destinationChild, sourceChild, a_prefix, a_map, a_destinationRoot, a_renameSource);
+			} else if (auto* clone = CloneNodeTree(sourceChild, a_prefix, a_map, a_renameSource)) {
+				a_destination->AttachChild(clone, false);
+			}
+		}
+	}
+
+	void DoSkeletonMerge(
+		RE::NiNode* a_destination,
+		RE::NiNode* a_source,
+		const std::string_view a_prefix,
+		std::vector<Smp::MergeRename>& a_map,
+		const bool a_renameSource = true)
+	{
+		DoSkeletonMerge(a_destination, a_source, a_prefix, a_map, a_destination, a_renameSource);
+	}
 
 	PreAttachPhysicsContext PreparePreAttachPhysicsContext(
 		RE::BipedAnim* a_biped,
 		RE::NiNode* a_sourceRoot,
 		RE::NiAVObject* a_sourceObject,
 		const bool a_firstPerson,
-		const bool a_cloneMergeSource,
 		const char* a_sourceLabel)
 	{
 		PreAttachPhysicsContext context;
@@ -187,27 +370,25 @@ namespace Hooks
 			a_firstPerson);
 		Smp::ActorSkeletonBinding::PruneTrustedActorSkeletonNodesBySourceParents(a_sourceObject, context.trustedActorSkeletonNodes);
 		context.mergeParentBindings = Smp::ActorSkeletonBinding::BuildPreAttachMergeParentBindings(a_sourceObject, context.trustedActorSkeletonNodes);
-
-		if (a_cloneMergeSource) {
-			Smp::NiObject::CollectNodePointers(a_sourceObject, context.mergeSearchExclusions);
+		context.mergeRenamePrefix = MakeArmorMergePrefix();
+		context.mergeSourceObject = CloneNodeExact(a_sourceRoot);
+		if (auto* mergeRoot = GetSkeletonMergeRoot(actor, a_firstPerson)) {
+			DoSkeletonMerge(mergeRoot, a_sourceRoot, context.mergeRenamePrefix, context.mergeRenameMap, false);
 			spdlog::debug(
-				"pre-scanned armor physics XML {} from {}={} name='{}'",
-				*context.selectedXml,
-				a_sourceLabel,
+				"merged pre-attach armor skeleton source={} name='{}' into actor merge root={} name='{}' prefix='{}' renamedBones={}",
 				static_cast<void*>(a_sourceRoot),
-				a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{});
-
-			context.mergeSourceObject = ClonePhysicsMergeSource(a_sourceRoot);
-			if (context.mergeSourceObject) {
-				auto* mergeSourceNode = context.mergeSourceObject->IsNode();
-				spdlog::debug(
-					"preserved armor merge source clone={} name='{}' children={} from original model root={}",
-					static_cast<void*>(context.mergeSourceObject.get()),
-					std::string_view(context.mergeSourceObject->GetName()),
-					mergeSourceNode ? mergeSourceNode->children.size() : 0,
-					static_cast<void*>(a_sourceRoot));
-			}
+				a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{},
+				static_cast<void*>(mergeRoot),
+				std::string_view(mergeRoot->GetName()),
+				context.mergeRenamePrefix,
+				context.mergeRenameMap.size());
 		}
+		spdlog::debug(
+			"pre-scanned armor physics XML {} from {}={} name='{}'",
+			*context.selectedXml,
+			a_sourceLabel,
+			static_cast<void*>(a_sourceRoot),
+			a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{});
 
 		return context;
 	}
@@ -596,7 +777,6 @@ namespace Hooks
 			a_originalModelRoot,
 			originalModelObject,
 			a_firstPerson,
-			true,
 			"original model root");
 
 		const auto backupNodeNames = GetBackupNodeNames();
@@ -622,8 +802,9 @@ namespace Hooks
 			.sourceObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr,
 			.mergeSourceObject = preAttach.mergeSourceObject.get(),
 			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
-			.mergeSearchExclusions = std::move(preAttach.mergeSearchExclusions),
 			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
+			.mergeRenameMap = std::move(preAttach.mergeRenameMap),
+			.mergeRenamePrefix = std::move(preAttach.mergeRenamePrefix),
 			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});
@@ -638,7 +819,6 @@ namespace Hooks
 			a_sourceRoot,
 			sourceObject,
 			a_firstPerson,
-			false,
 			"source root");
 		const auto backupNodeNames = GetBackupNodeNames();
 		const auto backupBones = backupNodeNames.empty() ? BackupBoneMap{} : CaptureBackupBones(a_sourceRoot ? static_cast<RE::NiAVObject*>(a_sourceRoot) : static_cast<RE::NiAVObject*>(a_destinationRoot), backupNodeNames);
@@ -659,10 +839,13 @@ namespace Hooks
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
 			.sourceObject = bipObject ? bipObject->partClone.get() : nullptr,
+			.mergeSourceObject = preAttach.mergeSourceObject.get(),
 			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
 			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
+			.mergeRenameMap = std::move(preAttach.mergeRenameMap),
 			.destinationRoot = a_destinationRoot,
 			.sourceRoot = a_sourceRoot,
+			.mergeRenamePrefix = std::move(preAttach.mergeRenamePrefix),
 			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});

@@ -27,10 +27,15 @@ namespace
 
 namespace Smp
 {
+	bool IsAutoRenamedPhysicsName(const std::string_view a_name)
+	{
+		return StartsWithInsensitive(a_name, kAutoRenamePrefix);
+	}
+
 	std::string NormalizePhysicsName(const std::string_view a_name)
 	{
 		auto value = a_name;
-		if (StartsWithInsensitive(value, kAutoRenamePrefix)) {
+		if (IsAutoRenamedPhysicsName(value)) {
 			if (const auto separator = value.find(' '); separator != std::string_view::npos && separator + 1 < value.size()) {
 				value = value.substr(separator + 1);
 			}

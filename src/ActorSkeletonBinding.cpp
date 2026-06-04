@@ -98,6 +98,27 @@ namespace Smp::ActorSkeletonBinding
 			}
 		}
 
+		void CollectAutoRenamedNodes(RE::NiAVObject* a_object, std::unordered_set<RE::NiAVObject*>& a_exclusions)
+		{
+			if (!a_object) {
+				return;
+			}
+
+			const auto name = a_object->GetName();
+			if (!name.empty() && IsAutoRenamedPhysicsName(name)) {
+				a_exclusions.insert(a_object);
+			}
+
+			auto* node = a_object->IsNode();
+			if (!node) {
+				return;
+			}
+
+			for (auto& child : node->children) {
+				CollectAutoRenamedNodes(child.get(), a_exclusions);
+			}
+		}
+
 		const std::string* FindTrustedActorNodeName(
 			const std::vector<std::string>& a_trustedActorNodeNames,
 			const std::string_view a_name)
@@ -184,6 +205,7 @@ namespace Smp::ActorSkeletonBinding
 				}
 			}
 		}
+		CollectAutoRenamedNodes(actorRoot, exclusions);
 
 		auto inheritedExclusions = exclusions;
 		NiObject::CollectNodePointersWithInheritedExclusions(actorRoot, exclusions, inheritedExclusions, trustedNodes);

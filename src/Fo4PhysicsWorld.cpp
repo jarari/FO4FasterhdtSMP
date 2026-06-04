@@ -1306,19 +1306,6 @@ namespace
 		});
 	}
 
-	bool RebindSkinBoneSlot(RE::BSSkin::Instance* a_skin, const std::uint32_t a_index, RE::NiNode* a_node)
-	{
-		if (!a_skin || !a_node || a_index >= a_skin->bones.size()) {
-			return false;
-		}
-
-		a_skin->bones[a_index] = a_node;
-		if (a_index < a_skin->worldTransforms.size()) {
-			a_skin->worldTransforms[a_index] = std::addressof(a_node->world);
-		}
-		return true;
-	}
-
 	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
 	{
 		return Smp::NiObject::FindNodeByName(a_root, a_name);
@@ -1326,16 +1313,9 @@ namespace
 
 	bool IsExcludedMergeSearchObject(
 		RE::NiAVObject* a_object,
-		RE::NiAVObject* a_excludedRootA,
-		RE::NiAVObject* a_excludedRootB,
-		RE::NiAVObject* a_excludedRootC,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects)
 	{
 		if (!a_object) {
-			return true;
-		}
-
-		if (a_object == a_excludedRootA || a_object == a_excludedRootB || a_object == a_excludedRootC) {
 			return true;
 		}
 
@@ -1506,9 +1486,18 @@ namespace
 		std::unordered_set<RE::NiAVObject*> result;
 		result.reserve(a_event.trustedActorSkeletonNodes.size());
 		for (auto* object : a_event.trustedActorSkeletonNodes) {
-			if (IsProbablyValidNiObject(object)) {
-				result.insert(object);
+			if (!IsProbablyValidNiObject(object)) {
+				continue;
 			}
+			auto* node = object->IsNode();
+			if (!IsProbablyValidNiObject(node)) {
+				continue;
+			}
+			const auto name = node->GetName();
+			if (!name.empty() && Smp::IsAutoRenamedPhysicsName(name)) {
+				continue;
+			}
+			result.insert(node);
 		}
 		return result;
 	}
@@ -1533,13 +1522,20 @@ namespace
 
 	void AddActorSkeletonLookupNode(ActorSkeletonLookup& a_lookup, RE::NiAVObject* a_object)
 	{
-		auto* node = a_object ? a_object->IsNode() : nullptr;
-		if (!node) {
+		if (!IsProbablyValidNiObject(a_object)) {
+			return;
+		}
+
+		auto* node = a_object->IsNode();
+		if (!IsProbablyValidNiObject(node)) {
 			return;
 		}
 
 		const auto name = node->GetName();
 		if (name.empty()) {
+			return;
+		}
+		if (Smp::IsAutoRenamedPhysicsName(name)) {
 			return;
 		}
 
@@ -1559,17 +1555,21 @@ namespace
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
 	{
 		if (!a_object ||
-			IsExcludedMergeSearchObject(a_object, a_excludedRootA, a_excludedRootB, a_excludedRootC, a_excludedObjects) ||
+			IsExcludedMergeSearchObject(a_object, a_excludedObjects) ||
 			a_knownArmorNodes.contains(a_object)) {
 			return;
 		}
 
-		AddActorSkeletonLookupNode(a_lookup, a_object);
-
 		auto* node = a_object->IsNode();
-		if (!node) {
+		if (!IsProbablyValidNiObject(node)) {
 			return;
 		}
+		const auto name = node->GetName();
+		if (!name.empty() && Smp::IsAutoRenamedPhysicsName(name)) {
+			return;
+		}
+
+		AddActorSkeletonLookupNode(a_lookup, node);
 
 		for (auto& child : node->children) {
 			CollectActorSkeletonLookupNodes(a_lookup, child.get(), a_excludedRootA, a_excludedRootB, a_excludedRootC, a_excludedObjects, a_knownArmorNodes);
@@ -1611,15 +1611,12 @@ namespace
 	RE::NiNode* FindNodeByNameExcludingKnownNodes(
 		RE::NiAVObject* a_root,
 		const std::string_view a_name,
-		RE::NiAVObject* a_excludedRootA,
-		RE::NiAVObject* a_excludedRootB,
-		RE::NiAVObject* a_excludedRootC,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
 	{
 		if (!a_root ||
 			a_name.empty() ||
-			IsExcludedMergeSearchObject(a_root, a_excludedRootA, a_excludedRootB, a_excludedRootC, a_excludedObjects) ||
+			IsExcludedMergeSearchObject(a_root, a_excludedObjects) ||
 			a_knownArmorNodes.contains(a_root)) {
 			return nullptr;
 		}
@@ -1634,7 +1631,7 @@ namespace
 		}
 
 		for (auto& child : node->children) {
-			if (auto* found = FindNodeByNameExcludingKnownNodes(child.get(), a_name, a_excludedRootA, a_excludedRootB, a_excludedRootC, a_excludedObjects, a_knownArmorNodes)) {
+			if (auto* found = FindNodeByNameExcludingKnownNodes(child.get(), a_name, a_excludedObjects, a_knownArmorNodes)) {
 				return found;
 			}
 		}
@@ -2036,9 +2033,6 @@ namespace
 			auto* boneNode = FindNodeByNameExcludingKnownNodes(
 				a_root,
 				boneName,
-				nullptr,
-				nullptr,
-				nullptr,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes);
 			if (!IsTrustedActorSkeletonCandidate(boneNode, a_trustedActorSkeletonNodes)) {
@@ -2186,6 +2180,21 @@ namespace
 			}) != a_summary.boneNames.end();
 	}
 
+	std::uint32_t CountDynamicDecodedSkinBones(
+		const Smp::Fo4MeshExtractionResult& a_extraction,
+		const Smp::PhysicsXmlSummary& a_summary)
+	{
+		std::uint32_t count = 0;
+		for (const auto& mesh : a_extraction.meshes) {
+			for (const auto& bone : mesh.bones) {
+				if (!bone.name.empty() && IsDynamicXmlBone(a_summary, bone.name)) {
+					++count;
+				}
+			}
+		}
+		return count;
+	}
+
 	bool HasDynamicXmlDescendant(RE::NiNode* a_node, const Smp::PhysicsXmlSummary& a_summary)
 	{
 		if (!a_node) {
@@ -2277,9 +2286,6 @@ namespace
 		RE::NiAVObject* a_actorRoot,
 		RE::NiNode* a_sourceNode,
 		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		RE::NiAVObject* a_excludedRootA,
-		RE::NiAVObject* a_excludedRootB,
-		RE::NiAVObject* a_excludedRootC,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
@@ -2294,9 +2300,6 @@ namespace
 			actorNode = FindNodeByNameExcludingKnownNodes(
 				a_actorRoot,
 				sourceName,
-				a_excludedRootA,
-				a_excludedRootB,
-				a_excludedRootC,
 				a_excludedObjects,
 				a_knownArmorNodes);
 		}
@@ -2326,14 +2329,14 @@ namespace
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
 	{
 		(void)a_sourceRoot;
+		(void)a_excludedRootA;
+		(void)a_excludedRootB;
+		(void)a_excludedRootC;
 		auto* actorNode = FindActorSkeletonLookupNode(a_actorSkeletonLookup, a_name);
 		if (!actorNode) {
 			actorNode = FindNodeByNameExcludingKnownNodes(
 				a_actorRoot,
 				a_name,
-				a_excludedRootA,
-				a_excludedRootB,
-				a_excludedRootC,
 				a_excludedObjects,
 				a_knownArmorNodes);
 		}
@@ -2372,9 +2375,6 @@ namespace
 				a_actorRoot,
 				a_sourceNode,
 				a_actorSkeletonLookup,
-				nullptr,
-				nullptr,
-				nullptr,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes,
 				a_trustedActorSkeletonNodes);
@@ -2388,9 +2388,6 @@ namespace
 					expectedParent = FindNodeByNameExcludingKnownNodes(
 						a_actorRoot,
 						storedParent->parentName,
-						nullptr,
-						nullptr,
-						nullptr,
 						a_actorSkeletonSearchExclusions,
 						a_knownArmorNodes);
 				}
@@ -2444,9 +2441,6 @@ namespace
 			actorNode = FindNodeByNameExcludingKnownNodes(
 				a_actorRoot,
 				a_name,
-				nullptr,
-				nullptr,
-				nullptr,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes);
 		}
@@ -2572,9 +2566,6 @@ namespace
 				a_actorRoot,
 				a_source,
 				a_actorSkeletonLookup,
-				nullptr,
-				nullptr,
-				nullptr,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes,
 				a_trustedActorSkeletonNodes);
@@ -2685,6 +2676,138 @@ namespace
 			}
 
 			CloneSourceSkeletonIntoPartTree(a_cloneParent, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
+		}
+	}
+
+	RE::NiNode* FindCurrentRenameMapSourceNode(
+		RE::NiAVObject* a_root,
+		const std::string_view a_name,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+	{
+		if (!a_root || a_name.empty()) {
+			return nullptr;
+		}
+
+		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
+			auto* node = a_root->IsNode();
+			if (node && (a_trustedActorSkeletonNodes.empty() || !a_trustedActorSkeletonNodes.contains(node))) {
+				return node;
+			}
+		}
+
+		auto* rootNode = a_root->IsNode();
+		if (!rootNode) {
+			return nullptr;
+		}
+
+		for (auto& child : rootNode->children) {
+			if (auto* found = FindCurrentRenameMapSourceNode(child.get(), a_name, a_trustedActorSkeletonNodes)) {
+				return found;
+			}
+		}
+
+		return nullptr;
+	}
+
+	void RegisterMergedRenameMapNodes(
+		RE::NiAVObject* a_actorRoot,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const std::vector<Smp::MergeRename>& a_mergeRenameMap,
+		const std::vector<Smp::MergeParentBinding>& a_mergeParentBindings,
+		std::vector<MergedSkeletonNode>& a_renamedNodes,
+		std::vector<MergedRootNode>& a_mergedRoots)
+	{
+		if (!a_actorRoot || a_mergeRenameMap.empty()) {
+			return;
+		}
+
+		auto findParentBinding = [&a_mergeParentBindings](const std::string_view a_sourceName) -> const Smp::MergeParentBinding* {
+			if (a_sourceName.empty()) {
+				return nullptr;
+			}
+
+			const auto found = std::ranges::find_if(a_mergeParentBindings, [a_sourceName](const Smp::MergeParentBinding& a_binding) {
+				return Smp::PhysicsNamesEqual(a_binding.sourceName, a_sourceName);
+			});
+			return found == a_mergeParentBindings.end() ? nullptr : std::addressof(*found);
+		};
+
+		std::unordered_set<std::string> registeredNames;
+		for (const auto& entry : a_mergeRenameMap) {
+			if (entry.sourceName.empty() || entry.renamedName.empty()) {
+				continue;
+			}
+
+			const auto sourceKey = NormalizeActorLookupName(entry.sourceName);
+			if (sourceKey.empty() || registeredNames.contains(sourceKey)) {
+				continue;
+			}
+
+			auto* node = FindNodeByName(a_actorRoot, entry.renamedName);
+			if (!node) {
+				auto* sourceNode = FindCurrentRenameMapSourceNode(
+					a_actorRoot,
+					entry.sourceName,
+					a_trustedActorSkeletonNodes);
+				if (!sourceNode) {
+					spdlog::debug(
+						"skipping merged armor rename map source='{}' renamed='{}' because renamed/source nodes were not found under actor root={}",
+						entry.sourceName,
+						entry.renamedName,
+						static_cast<void*>(a_actorRoot));
+					continue;
+				}
+
+				sourceNode->name = entry.renamedName.c_str();
+				node = sourceNode;
+				spdlog::debug(
+					"re-applied pre-merged armor rename source='{}' renamed='{}' node={} parent={} parentName='{}'",
+					entry.sourceName,
+					entry.renamedName,
+					static_cast<void*>(node),
+					static_cast<void*>(node->parent),
+					node->parent ? std::string_view(node->parent->GetName()) : std::string_view{});
+			}
+
+			a_renamedNodes.push_back({
+				.originalName = entry.sourceName,
+				.renamedName = entry.renamedName,
+				.node = node,
+			});
+
+			const auto* parentBinding = findParentBinding(entry.sourceName);
+			const auto hasRecordBinding = parentBinding && !parentBinding->parentName.empty();
+			const auto hasRecordLocal = parentBinding && parentBinding->hasLocalToParent;
+			const auto recordLocal = hasRecordLocal ? parentBinding->localToParent : node->local;
+			a_mergedRoots.push_back({
+				.parent = node->parent,
+				.node = node,
+				.sourceNode = nullptr,
+				.originalName = entry.sourceName,
+				.recordParentName = hasRecordBinding ? parentBinding->parentName : (node->parent ? std::string(node->parent->GetName()) : std::string{}),
+				.localToParent = node->local,
+				.recordLocalToParent = recordLocal,
+				.hasLocalToParent = true,
+				.hasRecordLocalToParent = true,
+				.recordMergeParentBinding = hasRecordBinding,
+			});
+			registeredNames.insert(sourceKey);
+
+			spdlog::debug(
+				"registered pre-merged armor rename source='{}' renamed='{}' node={} parent={} parentName='{}' recordBinding={} recordParent='{}' local=({:.3f},{:.3f},{:.3f}) recordLocal=({:.3f},{:.3f},{:.3f})",
+				entry.sourceName,
+				entry.renamedName,
+				static_cast<void*>(node),
+				static_cast<void*>(node->parent),
+				node->parent ? std::string_view(node->parent->GetName()) : std::string_view{},
+				hasRecordBinding,
+				hasRecordBinding ? std::string_view(parentBinding->parentName) : std::string_view{},
+				node->local.translate.x,
+				node->local.translate.y,
+				node->local.translate.z,
+				recordLocal.translate.x,
+				recordLocal.translate.y,
+				recordLocal.translate.z);
 		}
 	}
 
@@ -2956,78 +3079,6 @@ namespace
 		}
 
 		return false;
-	}
-
-	void RebindMatchedSkinSlots(
-		std::vector<MatchedSkinBone>& a_matchedBones,
-		const std::vector<MergedSkeletonNode>& a_renamedNodes,
-		RE::NiAVObject* a_object,
-		RE::NiAVObject* a_skeletonRoot)
-	{
-		if (!a_object) {
-			return;
-		}
-
-		if (auto* geometry = a_object->IsGeometry()) {
-			auto* skin = geometry->skinInstance ? geometry->skinInstance.get() : nullptr;
-			if (!skin || skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
-				return;
-			}
-
-			for (std::uint32_t index = 0; index < skin->bones.size(); ++index) {
-				auto* skinBoneObject = skin->bones[index];
-				if (skinBoneObject && !IsProbablyValidNiObject(skinBoneObject)) {
-					spdlog::warn(
-						"skipping invalid skin bone pointer={} slot={} while rebinding geometry '{}'",
-						static_cast<void*>(skinBoneObject),
-						index,
-						geometry->GetName());
-					continue;
-				}
-				auto* skinBone = skinBoneObject ? skinBoneObject->IsNode() : nullptr;
-				if (!skinBone) {
-					continue;
-				}
-
-				const auto name = skinBoneObject->GetName();
-				if (name.empty()) {
-					continue;
-				}
-
-				auto* matched = FindMatchedSkinBoneByMergedName(a_matchedBones, a_renamedNodes, name);
-				if (!matched) {
-					continue;
-				}
-
-				if (matched->node) {
-					AddSkinWorldTransformSlot(*matched, skin, index);
-					const auto rebound = RebindSkinBoneSlot(skin, index, matched->node);
-					if (rebound && a_skeletonRoot) {
-						skin->rootNode = a_skeletonRoot;
-					}
-					if (rebound && skinBone != matched->node) {
-						spdlog::debug(
-							"prototype rebound skin bone '{}' slot={} oldNode={} newNode={} skin={} root={}",
-							matched->name,
-							index,
-							static_cast<void*>(skinBone),
-							static_cast<void*>(matched->node),
-							static_cast<void*>(skin),
-							static_cast<void*>(a_skeletonRoot));
-					}
-				}
-			}
-			return;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			RebindMatchedSkinSlots(a_matchedBones, a_renamedNodes, child.get(), a_skeletonRoot);
-		}
 	}
 
 	btTransform ToBulletTransform(const Smp::XmlTransform& a_transform)
@@ -5132,9 +5183,6 @@ namespace Smp
 					armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 				}
 				auto* biped = ResolveEventBiped(a_event);
-				if (armorRecords.empty()) {
-					armorRecords = CollectCachedArmorRecordsForBipedLocked(a_event.actor, biped, a_event.firstPerson);
-				}
 				const auto hasBiped = biped != nullptr;
 				if (!armorRecords.empty() || !hasBiped) {
 					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords));
@@ -5196,7 +5244,6 @@ namespace Smp
 			if (!scopedEvent.biped) {
 				scopedEvent.biped = ResolveEventBiped(scopedEvent);
 			}
-			CachePrototypeArmorRecordLocked(scopedEvent, selectedXml, a_selection.meshNameMap);
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
 			if (armorAttach) {
@@ -5233,7 +5280,7 @@ namespace Smp
 						static_cast<void*>(a_object),
 						staleArmorBuildGroups.size(),
 						resetBodies);
-					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
+					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, scopedEvent.mergeRenameMap.empty());
 					staleArmorBuildGroups.clear();
 				}
 			}
@@ -5248,7 +5295,7 @@ namespace Smp
 					a_object,
 					scopedEvent.sourceObject,
 					scopedEvent.mergeSourceObject,
-					scopedEvent.trustedActorSkeletonNodes,
+					scopedEvent.mergeRenameMap,
 					buildResult.buildGroup);
 			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
 				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
@@ -5270,8 +5317,8 @@ namespace Smp
 						.attachedObject = a_object,
 						.sourceObject = scopedEvent.sourceObject,
 						.mergeSourceObject = scopedEvent.mergeSourceObject,
-						.trustedActorSkeletonNodes = scopedEvent.trustedActorSkeletonNodes,
 						.mergeParentBindings = scopedEvent.mergeParentBindings,
+						.mergeRenameMap = scopedEvent.mergeRenameMap,
 						.cpuCopyRetryCount = 1,
 					},
 				});
@@ -5970,6 +6017,12 @@ namespace Smp
 				a_existing.sourceObject.get() == a_record.sourceObject.get() &&
 				ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
 		});
+		if (existing == a_records.end()) {
+			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const PrototypeArmorRecord& a_existing) {
+				return a_existing.bipedObject == a_record.bipedObject &&
+					ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
+			});
+		}
 		if (existing != a_records.end()) {
 			if (!a_record.attachedObject && existing->attachedObject) {
 				a_record.attachedObject = existing->attachedObject;
@@ -5980,93 +6033,17 @@ namespace Smp
 			if (!a_record.mergeSourceObject && existing->mergeSourceObject) {
 				a_record.mergeSourceObject = existing->mergeSourceObject;
 			}
-			if (a_record.trustedActorSkeletonNodes.empty() && !existing->trustedActorSkeletonNodes.empty()) {
-				a_record.trustedActorSkeletonNodes = existing->trustedActorSkeletonNodes;
-			}
 			if (a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
 				a_record.mergeParentBindings = existing->mergeParentBindings;
+			}
+			if (a_record.mergeRenameMap.empty() && !existing->mergeRenameMap.empty()) {
+				a_record.mergeRenameMap = existing->mergeRenameMap;
 			}
 			appendBuildGroups(a_record.buildGroups, existing->buildGroups);
 			*existing = std::move(a_record);
 		} else {
 			a_records.push_back(std::move(a_record));
 		}
-	}
-
-	void Fo4PhysicsWorld::CachePrototypeArmorRecordLocked(
-		const LifecycleEvent& a_event,
-		const std::string_view a_physicsXmlPath,
-		const DefaultBBP::NameMap& a_meshNameMap)
-	{
-		if (!IsArmorAttachCandidate(a_event.type) || a_physicsXmlPath.empty()) {
-			return;
-		}
-
-		const auto modelKey = MakeArmorModelCacheKey(a_event.bipObject, a_event.bipedObject);
-		if (modelKey.empty()) {
-			return;
-		}
-
-		prototypeArmorCacheByModel_[modelKey] = PrototypeArmorCacheRecord{
-			.bipedObject = a_event.bipedObject,
-			.physicsXmlPath = std::string(a_physicsXmlPath),
-			.meshNameMap = a_meshNameMap,
-			.mergeParentBindings = a_event.mergeParentBindings,
-		};
-		spdlog::debug(
-			"cached pre-scanned armor physics XML actor={} bipedObject={} modelKey='{}' xml='{}'",
-			static_cast<void*>(a_event.actor),
-			std::to_underlying(a_event.bipedObject),
-			modelKey,
-			a_physicsXmlPath);
-	}
-
-	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectCachedArmorRecordsForBipedLocked(
-		RE::Actor* a_actor,
-		RE::BipedAnim* a_biped,
-		const bool a_firstPerson)
-	{
-		std::vector<PrototypeArmorRecord> records;
-		if (!a_biped || prototypeArmorCacheByModel_.empty()) {
-			return records;
-		}
-
-		for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
-			const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
-			auto* bipObject = a_biped->GetBipObject(bipedObject);
-			auto* partClone = bipObject ? bipObject->partClone.get() : nullptr;
-			if (!partClone) {
-				continue;
-			}
-
-			const auto modelKey = MakeArmorModelCacheKey(bipObject, bipedObject);
-			if (modelKey.empty()) {
-				continue;
-			}
-
-			const auto cached = prototypeArmorCacheByModel_.find(modelKey);
-			if (cached == prototypeArmorCacheByModel_.end()) {
-				continue;
-			}
-
-			records.push_back({
-				.bipedObject = cached->second.bipedObject,
-				.physicsXmlPath = cached->second.physicsXmlPath,
-				.meshNameMap = cached->second.meshNameMap,
-				.attachedObject = partClone,
-				.sourceObject = partClone,
-				.mergeParentBindings = cached->second.mergeParentBindings,
-			});
-			spdlog::debug(
-				"restored cached armor physics XML actor={} firstPerson={} bipedObject={} modelKey='{}' xml='{}'",
-				static_cast<void*>(a_actor),
-				a_firstPerson,
-				std::to_underlying(bipedObject),
-				modelKey,
-				cached->second.physicsXmlPath);
-		}
-
-		return records;
 	}
 
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
@@ -6273,18 +6250,23 @@ namespace Smp
 	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event)
 	{
 		std::vector<PrototypeArmorRecord> records;
-		if (!IsArmorAttachCandidate(a_event.type) || a_event.physicsXmlPath.empty()) {
+		if (!IsArmorAttachCandidate(a_event.type) || a_event.physicsXmlPath.empty() || !a_event.object) {
+			return records;
+		}
+
+		const auto bipedObject = ResolveEventBipedObject(a_event);
+		if (bipedObject == RE::BIPED_OBJECT::kTotal) {
 			return records;
 		}
 
 		records.push_back({
-			.bipedObject = a_event.bipedObject,
+			.bipedObject = bipedObject,
 			.physicsXmlPath = a_event.physicsXmlPath,
 			.attachedObject = a_event.object,
 			.sourceObject = a_event.sourceObject,
 			.mergeSourceObject = a_event.mergeSourceObject,
-			.trustedActorSkeletonNodes = a_event.trustedActorSkeletonNodes,
 			.mergeParentBindings = a_event.mergeParentBindings,
+			.mergeRenameMap = a_event.mergeRenameMap,
 		});
 		return records;
 	}
@@ -6297,7 +6279,7 @@ namespace Smp
 		RE::NiAVObject* a_attachedObject,
 		RE::NiAVObject* a_sourceObject,
 		RE::NiAVObject* a_mergeSourceObject,
-		std::vector<RE::NiAVObject*> a_trustedActorSkeletonNodes,
+		std::vector<MergeRename> a_mergeRenameMap,
 		const std::uint64_t a_buildGroup)
 	{
 		if (a_bipedObject == RE::BIPED_OBJECT::kTotal || a_physicsXmlPath.empty()) {
@@ -6305,9 +6287,22 @@ namespace Smp
 		}
 
 		std::vector<MergeParentBinding> mergeParentBindings;
+		std::vector<MergeRename> mergeRenameMap = std::move(a_mergeRenameMap);
 		if (a_buildGroup != 0) {
 			for (const auto& mergedNode : a_state.mergedNodes) {
 				auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
+				if (mergedNode.buildGroup == a_buildGroup && node && !mergedNode.sourceName.empty()) {
+					const auto nodeName = node->GetName();
+					const auto alreadyMapped = std::ranges::any_of(mergeRenameMap, [&mergedNode](const MergeRename& a_entry) {
+						return PhysicsNamesEqual(a_entry.sourceName, mergedNode.sourceName);
+					});
+					if (!alreadyMapped && !nodeName.empty() && !PhysicsNamesEqual(mergedNode.sourceName, nodeName)) {
+						mergeRenameMap.push_back({
+							.sourceName = mergedNode.sourceName,
+							.renamedName = std::string(nodeName),
+						});
+					}
+				}
 				const auto parentName = !mergedNode.recordParentName.empty() ?
 					mergedNode.recordParentName :
 					(mergedNode.parent ? std::string(mergedNode.parent->GetName()) : std::string{});
@@ -6357,6 +6352,12 @@ namespace Smp
 				a_record.sourceObject.get() == a_sourceObject &&
 				ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml;
 		});
+		if (existing == a_state.armorRecords.end()) {
+			existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				return a_record.bipedObject == a_bipedObject &&
+					ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml;
+			});
+		}
 		if (existing != a_state.armorRecords.end()) {
 			existing->physicsXmlPath = std::move(a_physicsXmlPath);
 			existing->meshNameMap = a_meshNameMap;
@@ -6365,10 +6366,8 @@ namespace Smp
 			if (a_mergeSourceObject) {
 				existing->mergeSourceObject = a_mergeSourceObject;
 			}
-			if (!a_trustedActorSkeletonNodes.empty()) {
-				existing->trustedActorSkeletonNodes = std::move(a_trustedActorSkeletonNodes);
-			}
 			existing->mergeParentBindings = std::move(mergeParentBindings);
+			existing->mergeRenameMap = std::move(mergeRenameMap);
 			appendBuildGroup(existing->buildGroups, a_buildGroup);
 		} else {
 			std::vector<std::uint64_t> buildGroups;
@@ -6380,8 +6379,8 @@ namespace Smp
 				.attachedObject = a_attachedObject,
 				.sourceObject = a_sourceObject,
 				.mergeSourceObject = a_mergeSourceObject,
-				.trustedActorSkeletonNodes = std::move(a_trustedActorSkeletonNodes),
 				.mergeParentBindings = std::move(mergeParentBindings),
+				.mergeRenameMap = std::move(mergeRenameMap),
 				.buildGroups = std::move(buildGroups),
 			});
 		}
@@ -6526,6 +6525,74 @@ namespace Smp
 			return false;
 		}
 
+		if (a_pending.armorRecords.size() > 1) {
+			auto recordScore = [](const PrototypeArmorRecord& a_record) {
+				auto score = 0;
+				if (!a_record.mergeRenameMap.empty()) {
+					score += 8;
+				}
+				if (!a_record.mergeParentBindings.empty()) {
+					score += 2;
+				}
+				return score;
+			};
+			auto fillMissingRecordState = [](PrototypeArmorRecord& a_target, const PrototypeArmorRecord& a_source) {
+				if (!a_target.attachedObject && a_source.attachedObject) {
+					a_target.attachedObject = a_source.attachedObject;
+				}
+				if (!a_target.sourceObject && a_source.sourceObject) {
+					a_target.sourceObject = a_source.sourceObject;
+				}
+				if (a_target.meshNameMap.empty() && !a_source.meshNameMap.empty()) {
+					a_target.meshNameMap = a_source.meshNameMap;
+				}
+				if (a_target.mergeParentBindings.empty() && !a_source.mergeParentBindings.empty()) {
+					a_target.mergeParentBindings = a_source.mergeParentBindings;
+				}
+				if (a_target.mergeRenameMap.empty() && !a_source.mergeRenameMap.empty()) {
+					a_target.mergeRenameMap = a_source.mergeRenameMap;
+				}
+				for (const auto buildGroup : a_source.buildGroups) {
+					if (buildGroup != 0 && std::ranges::find(a_target.buildGroups, buildGroup) == a_target.buildGroups.end()) {
+						a_target.buildGroups.push_back(buildGroup);
+					}
+				}
+			};
+
+			std::vector<PrototypeArmorRecord> mergedRecords;
+			for (auto& record : a_pending.armorRecords) {
+				if (record.bipedObject == RE::BIPED_OBJECT::kTotal || record.physicsXmlPath.empty()) {
+					continue;
+				}
+
+				const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
+				auto existing = std::ranges::find_if(mergedRecords, [&](const PrototypeArmorRecord& a_existing) {
+					return a_existing.bipedObject == record.bipedObject &&
+						ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
+				});
+				if (existing == mergedRecords.end()) {
+					mergedRecords.push_back(std::move(record));
+					continue;
+				}
+
+				if (recordScore(record) > recordScore(*existing)) {
+					fillMissingRecordState(record, *existing);
+					*existing = std::move(record);
+				} else {
+					fillMissingRecordState(*existing, record);
+				}
+			}
+			if (mergedRecords.size() != a_pending.armorRecords.size()) {
+				spdlog::debug(
+					"collapsed duplicate pending armor records actor={} firstPerson={} before rebuild oldCount={} newCount={}",
+					static_cast<void*>(a_actor),
+					a_pending.firstPerson,
+					a_pending.armorRecords.size(),
+					mergedRecords.size());
+			}
+			a_pending.armorRecords = std::move(mergedRecords);
+		}
+
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		for (auto it = a_pending.armorRecords.begin(); it != a_pending.armorRecords.end();) {
 			auto& record = *it;
@@ -6541,7 +6608,7 @@ namespace Smp
 				continue;
 			}
 			auto* rebuildObject = record.attachedObject && IsProbablyValidNiObject(record.attachedObject.get()) ? record.attachedObject.get() : partClone;
-			auto* rebuildSourceObject = record.mergeSourceObject ? partClone : (record.sourceObject && IsProbablyValidNiObject(record.sourceObject.get()) ? record.sourceObject.get() : partClone);
+			auto* rebuildSourceObject = record.sourceObject && IsProbablyValidNiObject(record.sourceObject.get()) ? record.sourceObject.get() : partClone;
 			auto* rebuildSourceRoot = rebuildSourceObject ? rebuildSourceObject->IsNode() : partClone->IsNode();
 
 			const auto selectedSummary = loader->LoadSummary(record.physicsXmlPath);
@@ -6563,9 +6630,8 @@ namespace Smp
 				.bipedObject = record.bipedObject,
 				.object = rebuildObject,
 				.sourceObject = rebuildSourceObject,
-				.mergeSourceObject = record.mergeSourceObject.get(),
-				.trustedActorSkeletonNodes = record.trustedActorSkeletonNodes,
 				.mergeParentBindings = record.mergeParentBindings,
+				.mergeRenameMap = record.mergeRenameMap,
 				.sourceRoot = rebuildSourceRoot,
 				.physicsXmlPath = record.physicsXmlPath,
 				.firstPerson = a_pending.firstPerson,
@@ -6590,7 +6656,7 @@ namespace Smp
 				for (const auto buildGroup : staleArmorBuildGroups) {
 					resetBodies += ResetPrototypeBuildGroupToReferencePoseLocked(actorState, buildGroup);
 				}
-				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
+				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, record.mergeRenameMap.empty());
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
 				spdlog::debug(
@@ -6609,14 +6675,6 @@ namespace Smp
 				static_cast<void*>(rebuildObject),
 				record.physicsXmlPath,
 				staleArmorBuildGroups.size());
-			if (record.mergeSourceObject) {
-				spdlog::debug(
-					"pending armor rebuild will use preserved merge source actor={} bipedObject={} source={} sourceName='{}'",
-					static_cast<void*>(a_actor),
-					std::to_underlying(record.bipedObject),
-					static_cast<void*>(record.mergeSourceObject.get()),
-					std::string_view(record.mergeSourceObject->GetName()));
-			}
 			for (const auto& binding : record.mergeParentBindings) {
 				spdlog::debug(
 					"pending armor rebuild merge parent binding actor={} bipedObject={} xml='{}' source='{}' parent='{}' hasLocal={} localToParent=({:.3f},{:.3f},{:.3f})",
@@ -6629,6 +6687,15 @@ namespace Smp
 					binding.localToParent.translate.x,
 					binding.localToParent.translate.y,
 					binding.localToParent.translate.z);
+			}
+			for (const auto& rename : record.mergeRenameMap) {
+				spdlog::debug(
+					"pending armor rebuild rename map actor={} bipedObject={} xml='{}' source='{}' renamed='{}'",
+					static_cast<void*>(a_actor),
+					std::to_underlying(record.bipedObject),
+					record.physicsXmlPath,
+					rename.sourceName,
+					rename.renamedName);
 			}
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor);
 			if (buildResult.succeeded) {
@@ -6644,7 +6711,7 @@ namespace Smp
 					rebuildObject,
 					rebuildSourceObject,
 					record.mergeSourceObject.get(),
-					record.trustedActorSkeletonNodes,
+					record.mergeRenameMap,
 					buildResult.buildGroup);
 				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, resumeEvent);
 			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
@@ -6722,14 +6789,6 @@ namespace Smp
 				continue;
 			}
 
-			auto* cachedBiped = actor->GetBiped(it->firstPerson).get();
-			if (!cachedBiped && !it->firstPerson) {
-				cachedBiped = actor->GetBiped().get();
-			}
-			if (it->armorRecords.empty()) {
-				it->armorRecords = CollectCachedArmorRecordsForBipedLocked(actor, cachedBiped, it->firstPerson);
-			}
-
 			bool fullActorRebuild = false;
 			if (it->forceArmorRescan) {
 				auto* root = actor->Get3D(it->firstPerson);
@@ -6776,15 +6835,23 @@ namespace Smp
 					}
 				}
 
-				for (auto& record : CollectCachedArmorRecordsForBipedLocked(actor, biped, it->firstPerson)) {
-					MergePrototypeArmorRecord(it->armorRecords, std::move(record));
-				}
 				it->forceArmorRescan = false;
 				if (it->armorRecords.empty()) {
-					spdlog::debug(
-						"dropping full actor prototype physics rebuild for actor={} firstPerson={} because model cache found no SMP armor records",
-						static_cast<void*>(actor),
-						it->firstPerson);
+					const LifecycleEvent rebuildEvent{
+						.type = LifecycleEventType::kActorSet3D,
+						.actor = actor,
+						.biped = biped,
+						.object = root,
+						.firstPerson = it->firstPerson,
+					};
+					if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
+						spdlog::debug(
+							"processing full actor prototype physics rebuild for actor={} root={} firstPerson={} with no queued armor records",
+							static_cast<void*>(actor),
+							static_cast<void*>(root),
+							it->firstPerson);
+						BuildPrototypeForEventLocked(rebuildEvent);
+					}
 					it = pendingActorRebuilds_.erase(it);
 					continue;
 				}
@@ -7593,7 +7660,7 @@ namespace Smp
 		return true;
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups)
+	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, const bool a_detachMergedNodes)
 	{
 		if (a_buildGroups.empty()) {
 			return;
@@ -7741,12 +7808,12 @@ namespace Smp
 		const auto bodyCount = std::erase_if(a_state.bodies, [](const PrototypeBody& a_body) {
 			return a_body.buildGroups.empty();
 		});
-		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [&containsGroup](PrototypeMergedNode& a_node) {
+		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [&containsGroup, a_detachMergedNodes](PrototypeMergedNode& a_node) {
 			if (!containsGroup(a_node.buildGroup)) {
 				return false;
 			}
 			auto* node = a_node.node ? a_node.node->IsNode() : nullptr;
-			if (a_node.parent && node && node->parent == a_node.parent) {
+			if (a_detachMergedNodes && a_node.parent && node && node->parent == a_node.parent) {
 				a_node.parent->DetachChild(a_node.node.get());
 			}
 			return true;
@@ -8109,7 +8176,25 @@ namespace Smp
 				sourceRoot = clonedRoot;
 			}
 		}
-		if (sourceRoot) {
+		const auto usePreMergedRenameMap = a_domain == PrototypeBuildDomain::kArmor && !a_event.mergeRenameMap.empty();
+		if (usePreMergedRenameMap) {
+			RegisterMergedRenameMapNodes(
+				actorRoot,
+				trustedActorSkeletonNodes,
+				a_event.mergeRenameMap,
+				a_event.mergeParentBindings,
+				mergedSkeletonNodes,
+				mergedRootNodes);
+			if (sourceRoot && mergedSkeletonNodes.size() < a_event.mergeRenameMap.size()) {
+				spdlog::debug(
+					"pre-merged armor rename map only resolved {}/{} nodes; rebuilding missing armor skeleton from preserved source={} sourceName='{}'",
+					mergedSkeletonNodes.size(),
+					a_event.mergeRenameMap.size(),
+					static_cast<void*>(sourceRoot),
+					std::string_view(sourceRoot->GetName()));
+			}
+		}
+		if ((!usePreMergedRenameMap || (sourceRoot && mergedSkeletonNodes.size() < a_event.mergeRenameMap.size())) && sourceRoot) {
 			UpdateNodeWorldFromLocal(sourceRoot);
 			auto* liveCloneParent = actorRootNode;
 			if (!liveCloneParent) {
@@ -8120,7 +8205,7 @@ namespace Smp
 			}
 
 			const auto sourceRootName = sourceRoot->GetName();
-			const auto sourceRootIsActorBone = FindTrustedActorSkeletonNodeForSource(actorRoot, sourceRoot, actorSkeletonLookup, nullptr, nullptr, nullptr, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes) != nullptr;
+			const auto sourceRootIsActorBone = FindTrustedActorSkeletonNodeForSource(actorRoot, sourceRoot, actorSkeletonLookup, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes) != nullptr;
 			if (sourceRoot == liveCloneParent && !sourceRootIsActorBone && !sourceRootName.empty() && IsReferencedXmlBoneName(a_summary, sourceRootName) && sourceRoot->parent) {
 				liveCloneParent = sourceRoot->parent;
 			}
@@ -8330,7 +8415,6 @@ namespace Smp
 			.buildGroup = buildGroup,
 			.active = createdBuildGroup,
 		};
-		auto* skinRoot = actorRootNode ? static_cast<RE::NiAVObject*>(actorRootNode) : skeletonSearchRoot;
 		std::vector<PrototypeBody> stagedBodies;
 
 		phaseStart = Clock::now();
@@ -8495,28 +8579,29 @@ namespace Smp
 			});
 		}
 		mergedRootNodes.clear();
-		RebindMatchedSkinSlots(matchedBones, mergedSkeletonNodes, a_event.object, skinRoot);
-		for (auto& matchedBone : matchedBones) {
-			auto body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.node == matchedBone.node && a_body.bone;
-			});
-			if (body == a_state.bodies.end() && !matchedBone.name.empty()) {
-				body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, buildGroup) && PhysicsNamesEqual(a_body.boneName, matchedBone.name) && a_body.bone;
+		if (a_domain != PrototypeBuildDomain::kArmor) {
+			for (auto& matchedBone : matchedBones) {
+				auto body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
+					return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.node == matchedBone.node && a_body.bone;
 				});
-			}
-			if (body == a_state.bodies.end()) {
-				continue;
-			}
+				if (body == a_state.bodies.end() && !matchedBone.name.empty()) {
+					body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
+						return PrototypeBodyHasBuildGroup(a_body, buildGroup) && PhysicsNamesEqual(a_body.boneName, matchedBone.name) && a_body.bone;
+					});
+				}
+				if (body == a_state.bodies.end()) {
+					continue;
+				}
 
-			for (auto& skinWorld : matchedBone.skinWorldTransforms) {
-				body->bone->AddSkinWorldTransform(
-					skinWorld.skin.get(),
-					skinWorld.index,
-					buildGroup,
-					skinWorld.originalBone.get(),
-					skinWorld.originalWorldTransform,
-					skinWorld.originalRootNode.get());
+				for (auto& skinWorld : matchedBone.skinWorldTransforms) {
+					body->bone->AddSkinWorldTransform(
+						skinWorld.skin.get(),
+						skinWorld.index,
+						buildGroup,
+						skinWorld.originalBone.get(),
+						skinWorld.originalWorldTransform,
+						skinWorld.originalRootNode.get());
+				}
 			}
 		}
 		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
@@ -8884,6 +8969,7 @@ namespace Smp
 		auto pendingVertexCopies = cpuCopyPending ? extraction.stats.pendingVertexCopies : 0U;
 		auto pendingIndexCopies = cpuCopyPending ? extraction.stats.pendingIndexCopies : 0U;
 		const char* extractionSource = "attached-object";
+		const auto attachedDynamicBones = CountDynamicDecodedSkinBones(extraction, a_summary);
 		if (extraction.meshes.empty()) {
 			const std::array fallbackRoots{
 				std::pair{ "merge-source", a_event.mergeSourceObject },
@@ -8919,14 +9005,29 @@ namespace Smp
 					continue;
 				}
 
+				const auto fallbackDynamicBones = CountDynamicDecodedSkinBones(fallbackExtraction, a_summary);
+				if (!extraction.meshes.empty() && fallbackDynamicBones <= attachedDynamicBones) {
+					spdlog::debug(
+						"prototype mesh extraction kept attached-object over {} root={} for actor={} attachedDynamicBones={} fallbackDynamicBones={} decodedMeshes={}",
+						sourceName,
+						static_cast<void*>(root),
+						static_cast<void*>(a_state.actor),
+						attachedDynamicBones,
+						fallbackDynamicBones,
+						fallbackExtraction.stats.decodedMeshes);
+					continue;
+				}
+
 				extraction = std::move(fallbackExtraction);
 				extractionSource = sourceName;
 				spdlog::debug(
-					"prototype mesh extraction using {} root={} for actor={} decodedMeshes={}",
+					"prototype mesh extraction using {} root={} for actor={} decodedMeshes={} attachedDynamicBones={} fallbackDynamicBones={}",
 					sourceName,
 					static_cast<void*>(root),
 					static_cast<void*>(a_state.actor),
-					extraction.stats.decodedMeshes);
+					extraction.stats.decodedMeshes,
+					attachedDynamicBones,
+					fallbackDynamicBones);
 				break;
 			}
 		}

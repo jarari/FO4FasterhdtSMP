@@ -28,6 +28,12 @@ namespace Smp
 		bool hasLocalToParent{ false };
 	};
 
+	struct MergeRename
+	{
+		std::string sourceName;
+		std::string renamedName;
+	};
+
 	struct LifecycleEvent
 	{
 		LifecycleEventType type;
@@ -40,8 +46,8 @@ namespace Smp
 		RE::NiAVObject*    mergeSourceObject{ nullptr };
 		RE::BGSHeadPart*   headPart{ nullptr };
 		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
-		std::vector<RE::NiAVObject*> mergeSearchExclusions;
 		std::vector<MergeParentBinding> mergeParentBindings;
+		std::vector<MergeRename> mergeRenameMap;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
 		std::string        mergeRenamePrefix;

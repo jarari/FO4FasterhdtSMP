@@ -167,8 +167,8 @@ namespace Smp
 			RE::NiPointer<RE::NiAVObject> attachedObject;
 			RE::NiPointer<RE::NiAVObject> sourceObject;
 			RE::NiPointer<RE::NiAVObject> mergeSourceObject;
-			std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
 			std::vector<MergeParentBinding> mergeParentBindings;
+			std::vector<MergeRename> mergeRenameMap;
 			std::vector<std::uint64_t> buildGroups;
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
@@ -181,14 +181,6 @@ namespace Smp
 			RE::NiPointer<RE::NiAVObject> attachedObject;
 			RE::NiPointer<RE::NiAVObject> sourceObject;
 			std::vector<std::uint64_t> buildGroups;
-		};
-
-		struct PrototypeArmorCacheRecord
-		{
-			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
-			std::string physicsXmlPath;
-			DefaultBBP::NameMap meshNameMap;
-			std::vector<MergeParentBinding> mergeParentBindings;
 		};
 
 		struct PrototypeBuildResult
@@ -282,8 +274,6 @@ namespace Smp
 		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
 		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
-		void CachePrototypeArmorRecordLocked(const LifecycleEvent& a_event, std::string_view a_physicsXmlPath, const DefaultBBP::NameMap& a_meshNameMap);
-		std::vector<PrototypeArmorRecord> CollectCachedArmorRecordsForBipedLocked(RE::Actor* a_actor, RE::BipedAnim* a_biped, bool a_firstPerson);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event);
@@ -300,7 +290,7 @@ namespace Smp
 			RE::NiAVObject* a_attachedObject = nullptr,
 			RE::NiAVObject* a_sourceObject = nullptr,
 			RE::NiAVObject* a_mergeSourceObject = nullptr,
-			std::vector<RE::NiAVObject*> a_trustedActorSkeletonNodes = {},
+			std::vector<MergeRename> a_mergeRenameMap = {},
 			std::uint64_t a_buildGroup = 0);
 		PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
 		const PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
@@ -322,7 +312,7 @@ namespace Smp
 		bool ClearPrototypeGroupsForBipedObjectLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject);
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
-		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
+		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, bool a_detachMergedNodes = true);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
 		float PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);
@@ -408,7 +398,6 @@ namespace Smp
 		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };
 		std::string prototypePhysicsXml_;
 		std::vector<PrototypeActorState> prototypeActors_;
-		std::unordered_map<std::string, PrototypeArmorCacheRecord> prototypeArmorCacheByModel_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;

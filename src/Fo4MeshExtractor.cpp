@@ -140,9 +140,15 @@ namespace
 		if (!a_object || reinterpret_cast<std::uintptr_t>(a_object) > kCanonicalUserSpaceMax) {
 			return false;
 		}
+		if (!Smp::Fo4CpuBuffer::IsReadableRange(a_object, sizeof(void*))) {
+			return false;
+		}
 
 		const auto vtable = *reinterpret_cast<void* const* const*>(a_object);
 		if (!vtable || reinterpret_cast<std::uintptr_t>(vtable) > kCanonicalUserSpaceMax) {
+			return false;
+		}
+		if (!Smp::Fo4CpuBuffer::IsReadableRange(vtable, sizeof(void*) * 5)) {
 			return false;
 		}
 

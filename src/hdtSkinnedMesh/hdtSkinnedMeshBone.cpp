@@ -13,7 +13,7 @@ namespace hdt
 
 	void SkinnedMeshBone::internalUpdate()
 	{
-		const auto transform = m_rig.getInterpolationWorldTransform() * m_rigToLocal;
+		const auto transform = m_rigToLocal * m_rig.getInterpolationWorldTransform();
 		m_currentTransform.setBasis(transform.getBasis());
 		m_currentTransform.setOrigin(transform.getOrigin());
 	}
