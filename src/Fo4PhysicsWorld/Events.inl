@@ -201,6 +201,12 @@ namespace Smp
 						actors.push_back(actorState.actor);
 					}
 				}
+				for (auto& actorState : prototypeActors_) {
+					if (actorState.actor) {
+						ClearHeadPrototypeTrackingLocked(actorState, "customization-menu-closed");
+						actorState.faceNode = nullptr;
+					}
+				}
 				for (auto* actor : actors) {
 					MarkPendingHeadRebuildLocked(LifecycleEvent{
 						.type = LifecycleEventType::kActorHeadInitialized,

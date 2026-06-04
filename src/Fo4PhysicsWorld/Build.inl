@@ -94,6 +94,7 @@ namespace Smp
 				a_event.mergeParentBindings,
 				mergedSkeletonNodes,
 				mergedRootNodes);
+			RestorePreMergedRenameMapLocalPoseFromSource(mergedSkeletonNodes, sourceRoot, a_event.mergeParentBindings);
 			if (sourceRoot && mergedSkeletonNodes.size() < a_event.mergeRenameMap.size()) {
 				spdlog::debug(
 					"pre-merged armor rename map only resolved {}/{} nodes; rebuilding missing armor skeleton from preserved source={} sourceName='{}'",

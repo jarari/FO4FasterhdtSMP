@@ -82,6 +82,16 @@
 			std::vector<std::uint64_t> buildGroups;
 		};
 
+		struct PrototypeHeadPartRecord
+		{
+			PrototypeBuildDomain domain{ PrototypeBuildDomain::kHead };
+			std::string physicsXmlPath;
+			RE::NiPointer<RE::NiAVObject> object;
+			RE::NiPointer<RE::NiAVObject> sourceObject;
+			RE::NiPointer<RE::NiAVObject> sourceRoot;
+			std::uint64_t buildGroup{ 0 };
+		};
+
 		struct PrototypeBuildResult
 		{
 			std::uint64_t buildGroup{ 0 };
@@ -124,6 +134,7 @@
 			std::vector<PrototypeMergedNode> mergedNodes;
 			std::vector<PrototypeArmorRecord> armorRecords;
 			std::vector<PrototypeAttachmentRecord> attachmentRecords;
+			std::vector<PrototypeHeadPartRecord> headPartRecords;
 			std::vector<PrototypeBuildGroupRuntime> runtimes;
 			std::vector<Fo4SkinnedMeshBone::SkinSlotRestore> suspendedSkinSlots;
 

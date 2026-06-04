@@ -438,6 +438,7 @@ namespace Smp
 		a_state.runtimeSoftSuspended = false;
 		a_state.faceNode = nullptr;
 		a_state.attachmentRecords.clear();
+		a_state.headPartRecords.clear();
 		a_state.runtimes.clear();
 		a_state.suspendedSkinSlots.clear();
 	}
@@ -672,6 +673,82 @@ namespace Smp
 		return true;
 	}
 
+	void Fo4PhysicsWorld::ClearHeadPrototypeTrackingLocked(PrototypeActorState& a_state, const std::string_view a_reason)
+	{
+		const auto clearedHead = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHead);
+		const auto clearedHair = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHair);
+
+		std::uint32_t detachedNodeCount = 0;
+		auto detachHeadRenamedChildren = [&detachedNodeCount](auto&& a_self, RE::NiNode* a_node) -> void {
+			if (!a_node) {
+				return;
+			}
+
+			auto index = a_node->children.size();
+			while (index > 0) {
+				--index;
+				auto* child = a_node->children[index].get();
+				if (!child) {
+					continue;
+				}
+
+				const auto childName = child->GetName();
+				if (!childName.empty() && StartsWithInsensitive(childName, "hdtSSEPhysics_AutoRename_Head_")) {
+					RE::NiPointer<RE::NiAVObject> keepAlive{ child };
+					a_node->DetachChild(child);
+					++detachedNodeCount;
+					continue;
+				}
+
+				if (auto* childNode = child->IsNode()) {
+					a_self(a_self, childNode);
+				}
+			}
+		};
+
+		if (auto* actor = a_state.actor) {
+			if (auto* root = actor->Get3D(a_state.firstPerson)) {
+				if (auto* rootNode = root->IsNode()) {
+					detachHeadRenamedChildren(detachHeadRenamedChildren, rootNode);
+				}
+			}
+			if (auto* root = actor->Get3D(false)) {
+				if (auto* rootNode = root->IsNode()) {
+					detachHeadRenamedChildren(detachHeadRenamedChildren, rootNode);
+				}
+			}
+		}
+
+		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [](PrototypeMergedNode& a_node) {
+			auto* node = a_node.node ? a_node.node->IsNode() : nullptr;
+			if (!node) {
+				return false;
+			}
+			const auto name = node->GetName();
+			if (!name.empty() && StartsWithInsensitive(name, "hdtSSEPhysics_AutoRename_Head_")) {
+				if (a_node.parent && node->parent == a_node.parent) {
+					a_node.parent->DetachChild(a_node.node.get());
+				}
+				a_node.node = nullptr;
+				a_node.parent = nullptr;
+				return true;
+			}
+			return false;
+		});
+
+		const auto recordCount = a_state.headPartRecords.size();
+		a_state.headPartRecords.clear();
+		spdlog::debug(
+			"cleared head/hair prototype tracking actor={} reason={} clearedHead={} clearedHair={} detachedHeadNodes={} mergedNodes={} headPartRecords={}",
+			static_cast<void*>(a_state.actor),
+			a_reason,
+			clearedHead,
+			clearedHair,
+			detachedNodeCount,
+			mergedNodeCount,
+			recordCount);
+	}
+
 	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, const bool a_detachMergedNodes)
 	{
 		if (a_buildGroups.empty()) {
@@ -839,6 +916,15 @@ namespace Smp
 			}
 			a_record.attachedObject = nullptr;
 			a_record.sourceObject = nullptr;
+			return true;
+		});
+		std::erase_if(a_state.headPartRecords, [&containsGroup](PrototypeHeadPartRecord& a_record) {
+			if (a_record.buildGroup == 0 || !containsGroup(a_record.buildGroup)) {
+				return false;
+			}
+			a_record.object = nullptr;
+			a_record.sourceObject = nullptr;
+			a_record.sourceRoot = nullptr;
 			return true;
 		});
 		const auto armorRecordCount = std::erase_if(a_state.armorRecords, [&containsGroup](PrototypeArmorRecord& a_record) {

@@ -2123,6 +2123,22 @@ namespace
 		UpdateTransformUpDown(a_updateRoot, true);
 	}
 
+	void RestoreClonedNodeTreeLocalPose(RE::NiNode* a_clone, RE::NiNode* a_source)
+	{
+		if (!a_clone || !a_source) {
+			return;
+		}
+
+		a_clone->local = a_source->local;
+		for (decltype(a_clone->children.size()) index = 0; index < a_clone->children.size() && index < a_source->children.size(); ++index) {
+			auto* cloneChild = a_clone->children[index] ? a_clone->children[index]->IsNode() : nullptr;
+			auto* sourceChild = a_source->children[index] ? a_source->children[index]->IsNode() : nullptr;
+			if (cloneChild && sourceChild) {
+				RestoreClonedNodeTreeLocalPose(cloneChild, sourceChild);
+			}
+		}
+	}
+
 	RE::NiPointer<RE::NiAVObject> CloneNodeExact(RE::NiNode* a_source)
 	{
 		if (!a_source) {
@@ -2136,7 +2152,9 @@ namespace
 
 		auto* cloneObject = a_source->CreateClone(cloneProcess);
 		a_source->ProcessClone(cloneProcess);
-		return cloneObject ? static_cast<RE::NiAVObject*>(cloneObject->IsNode()) : nullptr;
+		auto* cloneNode = cloneObject ? cloneObject->IsNode() : nullptr;
+		RestoreClonedNodeTreeLocalPose(cloneNode, a_source);
+		return cloneNode ? static_cast<RE::NiAVObject*>(cloneNode) : nullptr;
 	}
 
 	void RenameMergedNodeTree(
@@ -2188,6 +2206,7 @@ namespace
 			return nullptr;
 		}
 
+		RestoreClonedNodeTreeLocalPose(cloneNode, a_source);
 		RenameMergedNodeTree(cloneNode, a_source, a_prefix, a_renamedNodes);
 		return cloneNode;
 	}
@@ -2777,6 +2796,55 @@ namespace
 				recordLocal.translate.x,
 				recordLocal.translate.y,
 				recordLocal.translate.z);
+		}
+	}
+
+	void RestorePreMergedRenameMapLocalPoseFromSource(
+		const std::vector<MergedSkeletonNode>& a_renamedNodes,
+		RE::NiAVObject* a_sourceRoot,
+		const std::vector<Smp::MergeParentBinding>& a_mergeParentBindings)
+	{
+		if (!a_sourceRoot || a_renamedNodes.empty()) {
+			return;
+		}
+
+		auto hasExplicitParentBinding = [&a_mergeParentBindings](const std::string_view a_sourceName) {
+			return std::ranges::any_of(a_mergeParentBindings, [a_sourceName](const Smp::MergeParentBinding& a_binding) {
+				return !a_binding.parentName.empty() && a_binding.hasLocalToParent && Smp::PhysicsNamesEqual(a_binding.sourceName, a_sourceName);
+			});
+		};
+
+		std::uint32_t restored = 0;
+		for (const auto& entry : a_renamedNodes) {
+			if (!entry.node || entry.originalName.empty() || hasExplicitParentBinding(entry.originalName)) {
+				continue;
+			}
+
+			auto* sourceNode = FindNodeByName(a_sourceRoot, entry.originalName);
+			if (!sourceNode) {
+				continue;
+			}
+
+			const auto previousLocal = entry.node->local;
+			entry.node->local = sourceNode->local;
+			++restored;
+			if (previousLocal.translate != entry.node->local.translate) {
+				spdlog::debug(
+					"restored pre-merged armor local pose from source source='{}' renamed='{}' node={} local=({:.3f},{:.3f},{:.3f}) previous=({:.3f},{:.3f},{:.3f})",
+					entry.originalName,
+					entry.renamedName,
+					static_cast<void*>(entry.node),
+					entry.node->local.translate.x,
+					entry.node->local.translate.y,
+					entry.node->local.translate.z,
+					previousLocal.translate.x,
+					previousLocal.translate.y,
+					previousLocal.translate.z);
+			}
+		}
+
+		if (restored > 0) {
+			spdlog::debug("restored {} pre-merged armor renamed node local poses from source root={}", restored, static_cast<void*>(a_sourceRoot));
 		}
 	}
 

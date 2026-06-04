@@ -382,8 +382,7 @@ namespace Smp
 		auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 		const auto faceNodeChanged = actorState.faceNode && actorState.faceNode.get() != faceObject;
 		if (faceNodeChanged) {
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+			ClearHeadPrototypeTrackingLocked(actorState, "face-node-replacement");
 			spdlog::debug(
 				"cleared stale head/hair prototype physics after face node replacement actor={} oldFaceNode={} newFaceNode={}",
 				static_cast<void*>(a_event.actor),
@@ -394,14 +393,8 @@ namespace Smp
 
 		const auto touchedHeadPart = a_event.type == LifecycleEventType::kHeadPrepareHeadPart;
 		const auto touchedObjectValid = !touchedHeadPart || !a_event.object || IsObjectInTree(faceObject, a_event.object);
-		if (!touchedHeadPart) {
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
-		} else if (touchedObjectValid && a_event.object) {
-			ClearPrototypeGroupsForObjectLocked(actorState, a_event.object);
-		} else {
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
-			ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+		if (touchedHeadPart && !touchedObjectValid) {
+			ClearHeadPrototypeTrackingLocked(actorState, "stale-touched-headpart");
 			spdlog::debug(
 				"discarded stale touched headpart object for actor={} object={} faceNode={}; rebuilding full current face node",
 				static_cast<void*>(a_event.actor),
@@ -414,6 +407,21 @@ namespace Smp
 		const auto headPartIsHair = a_event.headPart && a_event.headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
 		CollectHeadPhysicsXmlSelections(touchedHeadPart && touchedObjectValid && a_event.object ? a_event.object : faceObject, hairKeys, candidates, headPartIsHair);
 		if (candidates.empty()) {
+			if (!actorState.headPartRecords.empty()) {
+				if (!touchedHeadPart) {
+					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
+					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+					actorState.headPartRecords.clear();
+				} else if (touchedObjectValid && a_event.object) {
+					std::vector<std::uint64_t> removedGroups;
+					for (const auto& record : actorState.headPartRecords) {
+						if (record.object.get() == a_event.object && record.buildGroup != 0 && std::ranges::find(removedGroups, record.buildGroup) == removedGroups.end()) {
+							removedGroups.push_back(record.buildGroup);
+						}
+					}
+					ClearPrototypeGroupsLocked(actorState, removedGroups);
+				}
+			}
 			spdlog::debug(
 				"head physics candidate {} actor={} faceNode={} object={} found no XML/defaultBBP head/hair subtrees hairKeys={}",
 				ToString(a_event.type),
@@ -429,10 +437,79 @@ namespace Smp
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		std::uint32_t built = 0;
+		std::uint32_t skippedExisting = 0;
+		std::uint32_t skippedDuplicateXml = 0;
+		std::vector<std::pair<PrototypeBuildDomain, std::string>> scannedPhysicsFiles;
 		for (const auto& candidate : candidates) {
 			const auto selectedXml = candidate.path.string();
 			if (selectedXml.empty()) {
 				continue;
+			}
+			const auto selectedXmlKey = ConfigPaths::LowerString(selectedXml);
+			const auto duplicatePhysicsFile = std::ranges::any_of(scannedPhysicsFiles, [&](const auto& a_entry) {
+				return a_entry.first == candidate.domain && a_entry.second == selectedXmlKey;
+			});
+			if (duplicatePhysicsFile) {
+				++skippedDuplicateXml;
+				spdlog::debug(
+					"previous head part generated {} physics system for XML {}, skipping duplicate object={}",
+					PrototypeDomainName(candidate.domain),
+					selectedXml,
+					static_cast<void*>(candidate.object));
+				continue;
+			}
+			scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
+
+			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
+				return a_record.object.get() == candidate.object &&
+					a_record.sourceObject.get() == candidate.sourceObject &&
+					a_record.domain == candidate.domain &&
+					ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
+			});
+			if (existing != actorState.headPartRecords.end() && existing->buildGroup != 0) {
+				++skippedExisting;
+				spdlog::debug(
+					"geometry is already added as {} head part actor={} object={} XML={} buildGroup={}",
+					PrototypeDomainName(candidate.domain),
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(candidate.object),
+					selectedXml,
+					existing->buildGroup);
+				continue;
+			}
+
+			const auto duplicateTrackedXml = std::ranges::any_of(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
+				return a_record.object.get() != candidate.object &&
+					a_record.domain == candidate.domain &&
+					!a_record.physicsXmlPath.empty() &&
+					ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey &&
+					a_record.buildGroup != 0;
+			});
+			if (duplicateTrackedXml) {
+				++skippedDuplicateXml;
+				spdlog::debug(
+					"previous tracked head part generated {} physics system for XML {}, skipping duplicate object={}",
+					PrototypeDomainName(candidate.domain),
+					selectedXml,
+					static_cast<void*>(candidate.object));
+				continue;
+			}
+
+			std::vector<std::uint64_t> replacedGroups;
+			for (const auto& record : actorState.headPartRecords) {
+				if (record.object.get() == candidate.object && record.buildGroup != 0 && std::ranges::find(replacedGroups, record.buildGroup) == replacedGroups.end()) {
+					replacedGroups.push_back(record.buildGroup);
+				}
+			}
+			if (!replacedGroups.empty()) {
+				ClearPrototypeGroupsLocked(actorState, replacedGroups);
+				spdlog::debug(
+					"cleared stale tracked {} headpart groups={} for actor={} object={} before rebuilding XML {}",
+					PrototypeDomainName(candidate.domain),
+					replacedGroups.size(),
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(candidate.object),
+					selectedXml);
 			}
 
 			spdlog::info(
@@ -454,27 +531,29 @@ namespace Smp
 			scopedEvent.mergeSourceObject = candidate.sourceObject;
 			scopedEvent.preserveMergeSourceNames = candidate.preserveMergeSourceNames;
 			scopedEvent.mergeRenamePrefix = MakeReferenceHeadRenamePrefix(PrototypeHeadRenameId.fetch_add(1, std::memory_order_relaxed));
-			const auto clearedOverlappingBones = ClearPrototypeGroupsForBoneNamesLocked(actorState, selectedSummary->boneNames, candidate.domain);
-			if (clearedOverlappingBones) {
-				spdlog::debug(
-					"cleared stale {} headpart build groups for actor={} object={} before rebuilding XML {}",
-					PrototypeDomainName(candidate.domain),
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(candidate.object),
-					selectedXml);
-			}
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			if (buildResult.succeeded) {
+				actorState.headPartRecords.push_back({
+					.domain = candidate.domain,
+					.physicsXmlPath = selectedXml,
+					.object = candidate.object,
+					.sourceObject = candidate.sourceObject,
+					.sourceRoot = candidate.sourceRoot,
+					.buildGroup = buildResult.buildGroup,
+				});
 				++built;
 			}
 		}
 
 		spdlog::debug(
-			"processed head physics candidate actor={} faceNode={} candidates={} built={} hairKeys={}",
+			"processed head physics candidate actor={} faceNode={} candidates={} built={} skippedExisting={} skippedDuplicateXml={} trackedHeadParts={} hairKeys={}",
 			static_cast<void*>(a_event.actor),
 			static_cast<void*>(faceNode),
 			candidates.size(),
 			built,
+			skippedExisting,
+			skippedDuplicateXml,
+			actorState.headPartRecords.size(),
 			hairKeys.size());
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 			return !a_state.runtimeSuspended && !a_state.HasRuntime();
