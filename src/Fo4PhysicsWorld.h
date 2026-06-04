@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -182,6 +183,14 @@ namespace Smp
 			std::vector<std::uint64_t> buildGroups;
 		};
 
+		struct PrototypeArmorCacheRecord
+		{
+			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
+			std::string physicsXmlPath;
+			DefaultBBP::NameMap meshNameMap;
+			std::vector<MergeParentBinding> mergeParentBindings;
+		};
+
 		struct PrototypeBuildResult
 		{
 			std::uint64_t buildGroup{ 0 };
@@ -273,6 +282,8 @@ namespace Smp
 		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
 		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
+		void CachePrototypeArmorRecordLocked(const LifecycleEvent& a_event, std::string_view a_physicsXmlPath, const DefaultBBP::NameMap& a_meshNameMap);
+		std::vector<PrototypeArmorRecord> CollectCachedArmorRecordsForBipedLocked(RE::Actor* a_actor, RE::BipedAnim* a_biped, bool a_firstPerson);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event);
@@ -324,6 +335,7 @@ namespace Smp
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeConstraint>& a_stagedConstraints);
 		void LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, std::string_view a_reason) const;
 		void ResetPrototypeBuildGroupToCurrentPoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup, std::span<PrototypeBody> a_stagedBodies = {});
+		std::uint32_t RefreshPrototypeBuildGroupMeshesLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		std::uint32_t ResetPrototypeBuildGroupToReferencePoseLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		std::uint32_t ResetPrototypeRuntimeToReferencePoseLocked(PrototypeActorState& a_state, std::string_view a_reason);
 		void ScalePrototypeConstraintsLocked(PrototypeActorState& a_state);
@@ -396,6 +408,7 @@ namespace Smp
 		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };
 		std::string prototypePhysicsXml_;
 		std::vector<PrototypeActorState> prototypeActors_;
+		std::unordered_map<std::string, PrototypeArmorCacheRecord> prototypeArmorCacheByModel_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;

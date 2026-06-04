@@ -2740,6 +2740,29 @@ namespace
 		return Smp::ConfigPaths::LowerString(Smp::ConfigPaths::Trim(std::string(a_path)));
 	}
 
+	std::string MakeArmorModelCacheKey(const RE::BIPED_OBJECT a_bipedObject, const std::string_view a_model)
+	{
+		if (a_bipedObject == RE::BIPED_OBJECT::kTotal) {
+			return {};
+		}
+
+		auto model = Smp::ConfigPaths::LowerString(Smp::ConfigPaths::Trim(std::string(a_model)));
+		if (model.empty()) {
+			return {};
+		}
+
+		std::ranges::replace(model, '/', '\\');
+		return std::to_string(std::to_underlying(a_bipedObject)) + "|" + model;
+	}
+
+	std::string MakeArmorModelCacheKey(RE::BIPOBJECT* a_bipObject, const RE::BIPED_OBJECT a_bipedObject)
+	{
+		if (!a_bipObject || !a_bipObject->part) {
+			return {};
+		}
+		return MakeArmorModelCacheKey(a_bipedObject, a_bipObject->part->GetModel());
+	}
+
 	void ResolveExplicitXmlBonesFromMergedSkeleton(
 		std::vector<MatchedSkinBone>& a_matchedBones,
 		const Smp::PhysicsXmlSummary& a_summary,
@@ -5108,7 +5131,11 @@ namespace Smp
 				if (armorRecords.empty()) {
 					armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 				}
-				const auto hasBiped = ResolveEventBiped(a_event) != nullptr;
+				auto* biped = ResolveEventBiped(a_event);
+				if (armorRecords.empty()) {
+					armorRecords = CollectCachedArmorRecordsForBipedLocked(a_event.actor, biped, a_event.firstPerson);
+				}
+				const auto hasBiped = biped != nullptr;
 				if (!armorRecords.empty() || !hasBiped) {
 					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords));
 					spdlog::debug(
@@ -5118,7 +5145,7 @@ namespace Smp
 						a_event.firstPerson);
 				} else {
 					spdlog::debug(
-						"skipping pending retry for {} actor={} firstPerson={} because ready biped scan found no SMP armor records",
+						"skipping pending retry for {} actor={} firstPerson={} because ready biped cache found no SMP armor records",
 						ToString(a_event.type),
 						static_cast<void*>(a_event.actor),
 						a_event.firstPerson);
@@ -5169,6 +5196,7 @@ namespace Smp
 			if (!scopedEvent.biped) {
 				scopedEvent.biped = ResolveEventBiped(scopedEvent);
 			}
+			CachePrototypeArmorRecordLocked(scopedEvent, selectedXml, a_selection.meshNameMap);
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
 			if (armorAttach) {
@@ -5254,43 +5282,15 @@ namespace Smp
 			return buildResult.succeeded;
 		};
 
-		if (!armorAttach) {
-			std::vector<ArmorPhysicsXmlBuildCandidate> candidates;
-			CollectDirectArmorPhysicsXmlSelections(a_event.object, candidates);
-			CollectEquippedArmorPhysicsXmlSelections(a_event, candidates);
-			if (!candidates.empty()) {
-				if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
-					ClearPrototypeStateLocked(*actorState);
-					std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-						return !a_state.runtimeSuspended && !a_state.HasRuntime();
-					});
-				}
-
-				std::uint32_t built = 0;
-				for (const auto& candidate : candidates) {
-					if (buildSelection(candidate)) {
-						++built;
-					}
-				}
-				spdlog::debug(
-					"rebuilt prototype physics for {} armor subtrees/equipped clones actor={} root={} built={}",
-					candidates.size(),
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(a_event.object),
-					built);
-				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return !a_state.runtimeSuspended && !a_state.HasRuntime();
-				});
-				return;
-			}
+		std::optional<ArmorPhysicsXmlSelection> discoveredXml;
+		if (armorAttach && !a_event.physicsXmlPath.empty()) {
+			discoveredXml = ArmorPhysicsXmlSelection{ .path = a_event.physicsXmlPath };
 		}
-
-		const auto discoveredXml = FindArmorPhysicsXml(a_event);
-		const auto selectedXml = discoveredXml ? discoveredXml->path.string() : prototypePhysicsXml_;
+		const auto selectedXml = discoveredXml ? discoveredXml->path.string() : (armorAttach ? std::string{} : prototypePhysicsXml_);
 		if (selectedXml.empty()) {
 			if (armorAttach) {
 				spdlog::trace(
-					"armor attach candidate has no direct XML/defaultBBP match actor={} object={} sourceObject={} sourceRoot={} destinationRoot={} bipObject={} model='{}' armorAddon={} preScannedXml='{}'",
+					"armor attach candidate has no pre-scanned XML actor={} object={} sourceObject={} sourceRoot={} destinationRoot={} bipObject={} model='{}' armorAddon={} preScannedXml='{}'",
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object),
 					static_cast<void*>(a_event.sourceObject),
@@ -5993,6 +5993,82 @@ namespace Smp
 		}
 	}
 
+	void Fo4PhysicsWorld::CachePrototypeArmorRecordLocked(
+		const LifecycleEvent& a_event,
+		const std::string_view a_physicsXmlPath,
+		const DefaultBBP::NameMap& a_meshNameMap)
+	{
+		if (!IsArmorAttachCandidate(a_event.type) || a_physicsXmlPath.empty()) {
+			return;
+		}
+
+		const auto modelKey = MakeArmorModelCacheKey(a_event.bipObject, a_event.bipedObject);
+		if (modelKey.empty()) {
+			return;
+		}
+
+		prototypeArmorCacheByModel_[modelKey] = PrototypeArmorCacheRecord{
+			.bipedObject = a_event.bipedObject,
+			.physicsXmlPath = std::string(a_physicsXmlPath),
+			.meshNameMap = a_meshNameMap,
+			.mergeParentBindings = a_event.mergeParentBindings,
+		};
+		spdlog::debug(
+			"cached pre-scanned armor physics XML actor={} bipedObject={} modelKey='{}' xml='{}'",
+			static_cast<void*>(a_event.actor),
+			std::to_underlying(a_event.bipedObject),
+			modelKey,
+			a_physicsXmlPath);
+	}
+
+	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectCachedArmorRecordsForBipedLocked(
+		RE::Actor* a_actor,
+		RE::BipedAnim* a_biped,
+		const bool a_firstPerson)
+	{
+		std::vector<PrototypeArmorRecord> records;
+		if (!a_biped || prototypeArmorCacheByModel_.empty()) {
+			return records;
+		}
+
+		for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
+			const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
+			auto* bipObject = a_biped->GetBipObject(bipedObject);
+			auto* partClone = bipObject ? bipObject->partClone.get() : nullptr;
+			if (!partClone) {
+				continue;
+			}
+
+			const auto modelKey = MakeArmorModelCacheKey(bipObject, bipedObject);
+			if (modelKey.empty()) {
+				continue;
+			}
+
+			const auto cached = prototypeArmorCacheByModel_.find(modelKey);
+			if (cached == prototypeArmorCacheByModel_.end()) {
+				continue;
+			}
+
+			records.push_back({
+				.bipedObject = cached->second.bipedObject,
+				.physicsXmlPath = cached->second.physicsXmlPath,
+				.meshNameMap = cached->second.meshNameMap,
+				.attachedObject = partClone,
+				.sourceObject = partClone,
+				.mergeParentBindings = cached->second.mergeParentBindings,
+			});
+			spdlog::debug(
+				"restored cached armor physics XML actor={} firstPerson={} bipedObject={} modelKey='{}' xml='{}'",
+				static_cast<void*>(a_actor),
+				a_firstPerson,
+				std::to_underlying(bipedObject),
+				modelKey,
+				cached->second.physicsXmlPath);
+		}
+
+		return records;
+	}
+
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
 		if (!a_actor) {
@@ -6197,49 +6273,19 @@ namespace Smp
 	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event)
 	{
 		std::vector<PrototypeArmorRecord> records;
-		auto appendRecord = [&](
-								const RE::BIPED_OBJECT a_bipedObject,
-								const ArmorPhysicsXmlSelection& a_selection,
-								RE::NiAVObject* a_attachedObject,
-								RE::NiAVObject* a_sourceObject,
-								RE::NiAVObject* a_mergeSourceObject = nullptr) {
-			if (a_bipedObject == RE::BIPED_OBJECT::kTotal || a_selection.path.empty()) {
-				return;
-			}
-			const auto normalizedXml = ConfigPaths::LowerString(a_selection.path.string());
-			const auto duplicate = std::ranges::any_of(records, [a_bipedObject, a_attachedObject, a_sourceObject, &normalizedXml](const PrototypeArmorRecord& a_record) {
-				return a_record.bipedObject == a_bipedObject &&
-					a_record.attachedObject.get() == a_attachedObject &&
-					a_record.sourceObject.get() == a_sourceObject &&
-					ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml;
-			});
-			if (duplicate) {
-				return;
-			}
-			records.push_back({
-				.bipedObject = a_bipedObject,
-				.physicsXmlPath = a_selection.path.string(),
-				.meshNameMap = a_selection.meshNameMap,
-				.attachedObject = a_attachedObject,
-				.sourceObject = a_sourceObject,
-				.mergeSourceObject = a_mergeSourceObject,
-				.trustedActorSkeletonNodes = a_event.trustedActorSkeletonNodes,
-				.mergeParentBindings = a_event.mergeParentBindings,
-			});
-		};
-
-		if (IsArmorAttachCandidate(a_event.type)) {
-			if (auto selection = FindArmorPhysicsXml(a_event)) {
-				appendRecord(a_event.bipedObject, *selection, a_event.object, a_event.sourceObject, a_event.mergeSourceObject);
-			}
+		if (!IsArmorAttachCandidate(a_event.type) || a_event.physicsXmlPath.empty()) {
 			return records;
 		}
 
-		std::vector<ArmorPhysicsXmlBuildCandidate> candidates;
-		CollectEquippedArmorPhysicsXmlSelections(a_event, candidates);
-		for (const auto& candidate : candidates) {
-			appendRecord(candidate.bipedObject, candidate.selection, candidate.object, candidate.sourceObject);
-		}
+		records.push_back({
+			.bipedObject = a_event.bipedObject,
+			.physicsXmlPath = a_event.physicsXmlPath,
+			.attachedObject = a_event.object,
+			.sourceObject = a_event.sourceObject,
+			.mergeSourceObject = a_event.mergeSourceObject,
+			.trustedActorSkeletonNodes = a_event.trustedActorSkeletonNodes,
+			.mergeParentBindings = a_event.mergeParentBindings,
+		});
 		return records;
 	}
 
@@ -6676,6 +6722,14 @@ namespace Smp
 				continue;
 			}
 
+			auto* cachedBiped = actor->GetBiped(it->firstPerson).get();
+			if (!cachedBiped && !it->firstPerson) {
+				cachedBiped = actor->GetBiped().get();
+			}
+			if (it->armorRecords.empty()) {
+				it->armorRecords = CollectCachedArmorRecordsForBipedLocked(actor, cachedBiped, it->firstPerson);
+			}
+
 			bool fullActorRebuild = false;
 			if (it->forceArmorRescan) {
 				auto* root = actor->Get3D(it->firstPerson);
@@ -6722,21 +6776,13 @@ namespace Smp
 					}
 				}
 
-				const LifecycleEvent rebuildEvent{
-					.type = LifecycleEventType::kActorSet3D,
-					.actor = actor,
-					.biped = biped,
-					.object = root,
-					.firstPerson = it->firstPerson,
-				};
-				auto liveRecords = CollectSuspendedArmorRecordsLocked(rebuildEvent);
-				for (auto& record : liveRecords) {
+				for (auto& record : CollectCachedArmorRecordsForBipedLocked(actor, biped, it->firstPerson)) {
 					MergePrototypeArmorRecord(it->armorRecords, std::move(record));
 				}
 				it->forceArmorRescan = false;
 				if (it->armorRecords.empty()) {
 					spdlog::debug(
-						"dropping full actor prototype physics rebuild for actor={} firstPerson={} because current biped scan found no SMP armor records",
+						"dropping full actor prototype physics rebuild for actor={} firstPerson={} because model cache found no SMP armor records",
 						static_cast<void*>(actor),
 						it->firstPerson);
 					it = pendingActorRebuilds_.erase(it);
@@ -6791,7 +6837,6 @@ namespace Smp
 				.object = root,
 				.firstPerson = it->firstPerson,
 			};
-			auto discoveredRecords = rebuildEvent.biped ? CollectSuspendedArmorRecordsLocked(rebuildEvent) : std::vector<PrototypeArmorRecord>{};
 			if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
 				spdlog::debug(
 					"processing pending prototype physics rebuild for actor={} root={} firstPerson={}",
@@ -6806,14 +6851,9 @@ namespace Smp
 				it = pendingActorRebuilds_.erase(it);
 				continue;
 			}
-			if (!discoveredRecords.empty()) {
-				it->armorRecords = std::move(discoveredRecords);
-				++it;
-				continue;
-			}
 			if (rebuildEvent.biped) {
 				spdlog::debug(
-					"dropping pending prototype physics rebuild for actor={} firstPerson={} because ready biped scan found no SMP armor records",
+					"dropping pending prototype physics rebuild for actor={} firstPerson={} because no early SMP armor records are tracked",
 					static_cast<void*>(actor),
 					it->firstPerson);
 				it = pendingActorRebuilds_.erase(it);
@@ -8489,6 +8529,7 @@ namespace Smp
 		CommitPrototypeBuildGroupToBulletLocked(a_state, buildGroup);
 		if (a_domain == PrototypeBuildDomain::kArmor) {
 			ResetPrototypeBuildGroupToReferencePoseLocked(a_state, buildGroup);
+			RefreshPrototypeBuildGroupMeshesLocked(a_state, buildGroup);
 		}
 		timing.bindCommitConstraintMs += ElapsedMs(phaseStart, Clock::now());
 		if (actorRoot && spdlog::default_logger_raw() && spdlog::default_logger_raw()->should_log(spdlog::level::trace)) {
@@ -8652,6 +8693,38 @@ namespace Smp
 			body.bone->readTransform(0.0F);
 			body.bone->RefreshSkinWorldTransforms();
 		}
+	}
+
+	std::uint32_t Fo4PhysicsWorld::RefreshPrototypeBuildGroupMeshesLocked(
+		PrototypeActorState& a_state,
+		const std::uint64_t a_buildGroup)
+	{
+		if (a_buildGroup == 0) {
+			return 0;
+		}
+
+		std::uint32_t refreshedMeshes = 0;
+		for (auto& mesh : a_state.meshes) {
+			if (mesh.buildGroup != a_buildGroup || !mesh.body) {
+				continue;
+			}
+
+			mesh.body->internalUpdate();
+			mesh.body->updateBoundingSphereAabb();
+			if (mesh.inBulletWorld && dynamicsWorld_) {
+				dynamicsWorld_->updateSingleAabb(mesh.body.get());
+			}
+			++refreshedMeshes;
+		}
+
+		if (refreshedMeshes > 0) {
+			spdlog::debug(
+				"refreshed prototype build group meshes actor={} buildGroup={} meshes={}",
+				static_cast<void*>(a_state.actor),
+				a_buildGroup,
+				refreshedMeshes);
+		}
+		return refreshedMeshes;
 	}
 
 	std::uint32_t Fo4PhysicsWorld::ResetPrototypeBuildGroupToReferencePoseLocked(
