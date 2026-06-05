@@ -505,6 +505,13 @@ namespace Smp
 		return removed;
 	}
 
+	bool Fo4PhysicsWorld::PrototypeArmorRecordsIncludeHairSlot(const std::span<const PrototypeArmorRecord> a_records)
+	{
+		return std::ranges::any_of(a_records, [](const PrototypeArmorRecord& a_record) {
+			return IsHairBipedObject(a_record.bipedObject);
+		});
+	}
+
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
 		if (!a_actor) {
@@ -695,6 +702,19 @@ namespace Smp
 	void Fo4PhysicsWorld::MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event)
 	{
 		if (!a_event.actor) {
+			return;
+		}
+
+		if (auto* pendingActorRebuild = FindPendingActorRebuildLocked(a_event.actor, false);
+			pendingActorRebuild && PrototypeArmorRecordsIncludeHairSlot(pendingActorRebuild->armorRecords)) {
+			const auto removed = std::erase_if(pendingHeadRebuilds_, [&](const PendingHeadRebuild& a_pending) {
+				const auto resolvedActor = a_pending.actorHandle.get();
+				return resolvedActor && resolvedActor.get() == a_event.actor;
+			});
+			spdlog::debug(
+				"discarded head physics rebuild for actor={} while hair-slot armor rebuild is pending removedPendingHeads={}",
+				static_cast<void*>(a_event.actor),
+				removed);
 			return;
 		}
 
@@ -1520,6 +1540,19 @@ namespace Smp
 				return resolvedPendingActor && resolvedPendingActor.get() == actor;
 			});
 			if (actorRebuildPending) {
+				const auto hairSlotArmorRebuildPending = std::ranges::any_of(pendingActorRebuilds_, [actor](const PendingActorRebuild& a_pending) {
+					const auto resolvedPendingActor = a_pending.actorHandle.get();
+					return resolvedPendingActor &&
+						resolvedPendingActor.get() == actor &&
+						PrototypeArmorRecordsIncludeHairSlot(a_pending.armorRecords);
+				});
+				if (hairSlotArmorRebuildPending) {
+					spdlog::debug(
+						"dropping pending head physics rebuild for actor={} because a hair-slot armor rebuild owns the slot",
+						static_cast<void*>(actor));
+					it = pendingHeadRebuilds_.erase(it);
+					continue;
+				}
 				++it;
 				continue;
 			}

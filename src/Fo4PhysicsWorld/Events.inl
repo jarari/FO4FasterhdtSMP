@@ -151,6 +151,14 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 		} else if (IsHeadCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
+			if (characterCustomizationMenuDepth_ > 0) {
+				spdlog::debug(
+					"deferred head physics rebuild candidate {} actor={} object={} while customization is active",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(a_event.object));
+				return RE::BSEventNotifyControl::kContinue;
+			}
 			PruneInvalidPrototypeStatesLocked();
 			MarkPendingHeadRebuildLocked(a_event);
 			ResetStepClockLocked();

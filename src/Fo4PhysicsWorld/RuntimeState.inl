@@ -87,13 +87,20 @@ namespace Smp
 			return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
 		});
 		for (auto& actorReload : actors) {
+			const auto hairSlotArmorQueued = PrototypeArmorRecordsIncludeHairSlot(actorReload.armorRecords);
 			MarkPendingActorRebuildLocked(actorReload.actor, false, std::move(actorReload.armorRecords), true, true, true);
-			MarkPendingHeadRebuildLocked(LifecycleEvent{
-				.type = LifecycleEventType::kActorHeadInitialized,
-				.actor = actorReload.actor,
-				.object = actorReload.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(actorReload.actor->GetFaceNodeSkinned()) : nullptr,
-				.firstPerson = false,
-			});
+			if (hairSlotArmorQueued) {
+				spdlog::debug(
+					"skipping customization head reload for actor={} because queued hair-slot armor owns the slot",
+					static_cast<void*>(actorReload.actor));
+			} else {
+				MarkPendingHeadRebuildLocked(LifecycleEvent{
+					.type = LifecycleEventType::kActorHeadInitialized,
+					.actor = actorReload.actor,
+					.object = actorReload.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(actorReload.actor->GetFaceNodeSkinned()) : nullptr,
+					.firstPerson = false,
+				});
+			}
 		}
 		ResetStepClockLocked();
 		spdlog::debug(
