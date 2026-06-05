@@ -315,11 +315,6 @@ namespace Smp
 				continue;
 			}
 
-			spdlog::debug(
-				"reactivating suspended prototype physics candidate actor={} root={} firstPerson={}",
-				static_cast<void*>(actor),
-				static_cast<void*>(root),
-				it->firstPerson);
 			BuildPrototypeForEventLocked({
 				.type = LifecycleEventType::kActorSet3D,
 				.actor = actor,
@@ -327,7 +322,14 @@ namespace Smp
 				.object = root,
 				.firstPerson = it->firstPerson,
 			});
-			if (FindPrototypeStateLocked(actor, it->firstPerson)) {
+			if (const auto* reactivatedState = FindPrototypeStateLocked(actor, it->firstPerson)) {
+				if (reactivatedState->runtimeSuspended || reactivatedState->runtimeSoftSuspended) {
+					spdlog::debug(
+						"reactivating suspended prototype physics candidate actor={} root={} firstPerson={}",
+						static_cast<void*>(actor),
+						static_cast<void*>(root),
+						it->firstPerson);
+				}
 				it = suspendedActors_.erase(it);
 			} else {
 				++it;

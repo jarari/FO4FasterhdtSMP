@@ -1399,12 +1399,11 @@ namespace Smp
 		const PrototypeBuildDomain a_domain,
 		const RE::BIPED_OBJECT a_bipedObject) const
 	{
+		(void)a_domain;
+		(void)a_bipedObject;
+
 		if (!PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup)) {
 			return false;
-		}
-
-		if (a_domain == PrototypeBuildDomain::kArmor && !IsHairBipedObject(a_bipedObject)) {
-			return PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
 		}
 
 		return true;
