@@ -242,6 +242,7 @@ namespace Smp
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
 			const auto scopedArmorBuild = armorAttach || scopedEvent.bipedObject != RE::BIPED_OBJECT::kTotal;
+			const auto hairSlotArmorBuild = scopedArmorBuild && IsHairBipedObject(scopedEvent.bipedObject);
 			if (scopedArmorBuild) {
 				if (IsPrototypeAttachmentCurrentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
 					spdlog::debug(
@@ -264,7 +265,7 @@ namespace Smp
 						staleArmorBuildGroups.push_back(buildGroup);
 					}
 				}
-				if (IsHairBipedObject(scopedEvent.bipedObject)) {
+				if (hairSlotArmorBuild) {
 					std::vector<std::uint64_t> staleHeadBuildGroups;
 					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 					if (replacedHeadParts > 0) {
@@ -281,7 +282,7 @@ namespace Smp
 						ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
 					}
 				}
-				if (!staleArmorBuildGroups.empty()) {
+				if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
 					spdlog::debug(
 						"clearing stale armor prototype groups before rebuild actor={} bipedObject={} object={} count={}",
 						static_cast<void*>(a_event.actor),
@@ -292,8 +293,14 @@ namespace Smp
 					staleArmorBuildGroups.clear();
 				}
 			}
-			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor);
+			auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
+				if (hairSlotArmorBuild) {
+					ClearStaleHairSlotArmorGroupsLocked(actorState, scopedEvent.bipedObject, buildResult.buildGroup, "armor-attach-commit", a_object, selectedXml);
+					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
+					buildResult.committed = true;
+					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");
+				}
 				RecordPrototypeAttachmentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml, buildResult.buildGroup);
 				RecordPrototypeArmorLocked(
 					actorState,
@@ -305,6 +312,17 @@ namespace Smp
 					scopedEvent.mergeSourceObject,
 					scopedEvent.mergeRenameMap,
 					buildResult.buildGroup);
+				if (hairSlotArmorBuild) {
+					const auto remainingHairSlotArmorGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, scopedEvent.bipedObject).size();
+					spdlog::debug(
+						"hair-slot armor ownership after attach commit actor={} bipedObject={} buildGroup={} object={} xml='{}' remainingArmorGroups={}",
+						static_cast<void*>(a_event.actor),
+						std::to_underlying(scopedEvent.bipedObject),
+						buildResult.buildGroup,
+						static_cast<void*>(a_object),
+						selectedXml,
+						remainingHairSlotArmorGroups);
+				}
 			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
 				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
 				spdlog::debug(

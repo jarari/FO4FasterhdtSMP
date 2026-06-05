@@ -12,6 +12,7 @@
 		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
 		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
+		static std::uint32_t PruneStalePendingHairSlotArmorRecords(std::vector<PrototypeArmorRecord>& a_records);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event);
@@ -47,6 +48,9 @@
 		std::uint32_t RestoreSuspendedSkinSlotsLocked(PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups, std::span<const Fo4SkinnedMeshBone::ActiveSkinSlot> a_activeSlots = {});
 		std::uint32_t RestoreAllSuspendedSkinSlotsLocked(PrototypeActorState& a_state);
 		std::vector<std::uint64_t> CollectPrototypeGroupsForObjectLocked(const PrototypeActorState& a_state, RE::NiAVObject* a_object) const;
+		std::vector<std::uint64_t> CollectArmorPrototypeGroupsForBipedObjectLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup = 0) const;
+		std::uint32_t PrunePrototypeRecordsForBipedObjectLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup = 0);
+		std::uint32_t ClearStaleHairSlotArmorGroupsLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup, std::string_view a_reason, RE::NiAVObject* a_object = nullptr, std::string_view a_physicsXmlPath = {});
 		std::uint32_t CollectHeadPartGroupsLocked(const PrototypeActorState& a_state, std::vector<std::uint64_t>& a_buildGroups) const;
 		bool HasActiveHairSlotArmorLocked(const PrototypeActorState& a_state) const;
 		bool PrototypeBuildGroupsIncludeHairSlotArmorLocked(const PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups) const;
@@ -64,7 +68,7 @@
 		bool PrototypeBuildGroupIsRecordableLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, RE::BIPED_OBJECT a_bipedObject = RE::BIPED_OBJECT::kTotal) const;
 		void UpdatePrototypeBuildGroupMeshesLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		void CommitPrototypeBuildGroupToBulletLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
-		PrototypeBuildResult BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);
+		PrototypeBuildResult BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain, bool a_commitToBullet = true);
 		bool BuildPrototypeMeshesLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, const LifecycleEvent& a_event, const DefaultBBP::NameMap& a_meshNameMap, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeMesh>& a_stagedMeshes);
 		void BuildPrototypeConstraintsLocked(PrototypeActorState& a_state, const PhysicsXmlSummary& a_summary, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, std::span<PrototypeBody> a_stagedBodies, std::vector<PrototypeConstraint>& a_stagedConstraints);
 		void LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, std::string_view a_reason) const;

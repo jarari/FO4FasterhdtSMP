@@ -469,10 +469,40 @@ namespace Smp
 				a_record.mergeRenameMap = existing->mergeRenameMap;
 			}
 			appendBuildGroups(a_record.buildGroups, existing->buildGroups);
+			const auto moveMergedHairSlotOwnerToBack = IsHairBipedObject(a_record.bipedObject);
 			*existing = std::move(a_record);
+			if (moveMergedHairSlotOwnerToBack && std::next(existing) != a_records.end()) {
+				auto mergedRecord = std::move(*existing);
+				a_records.erase(existing);
+				a_records.push_back(std::move(mergedRecord));
+			}
 		} else {
 			a_records.push_back(std::move(a_record));
 		}
+	}
+
+	std::uint32_t Fo4PhysicsWorld::PruneStalePendingHairSlotArmorRecords(std::vector<PrototypeArmorRecord>& a_records)
+	{
+		std::uint32_t removed = 0;
+		for (auto it = a_records.begin(); it != a_records.end();) {
+			if (!IsHairBipedObject(it->bipedObject)) {
+				++it;
+				continue;
+			}
+
+			const auto bipedObject = it->bipedObject;
+			const auto hasLaterSlotOwner = std::ranges::any_of(std::next(it), a_records.end(), [bipedObject](const PrototypeArmorRecord& a_record) {
+				return a_record.bipedObject == bipedObject;
+			});
+			if (!hasLaterSlotOwner) {
+				++it;
+				continue;
+			}
+
+			it = a_records.erase(it);
+			++removed;
+		}
+		return removed;
 	}
 
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
@@ -569,6 +599,7 @@ namespace Smp
 					MergePrototypeArmorRecord(pending->armorRecords, std::move(record));
 				}
 			}
+			const auto prunedHairSlotRecords = PruneStalePendingHairSlotArmorRecords(pending->armorRecords);
 			pending->frameDelay = std::max(pending->frameDelay, rebuildDelay);
 			pending->forceArmorRescan = pending->forceArmorRescan || a_forceArmorRescan;
 			if (a_scheduleImmediately) {
@@ -584,9 +615,18 @@ namespace Smp
 				pending->forceArmorRescan,
 				a_scheduleImmediately,
 				a_replaceArmorRecords);
+			if (prunedHairSlotRecords > 0) {
+				spdlog::debug(
+					"pruned stale pending hair-slot armor records actor={} firstPerson={} records={} remaining={}",
+					static_cast<void*>(a_actor),
+					a_firstPerson,
+					prunedHairSlotRecords,
+					pending->armorRecords.size());
+			}
 			return;
 		}
 
+		const auto prunedHairSlotRecords = PruneStalePendingHairSlotArmorRecords(a_armorRecords);
 		pendingActorRebuilds_.push_back({
 			.actorHandle = handle,
 			.firstPerson = a_firstPerson,
@@ -607,6 +647,14 @@ namespace Smp
 			a_forceArmorRescan,
 			a_scheduleImmediately,
 			a_replaceArmorRecords);
+		if (prunedHairSlotRecords > 0) {
+			spdlog::debug(
+				"pruned stale pending hair-slot armor records actor={} firstPerson={} records={} remaining={}",
+				static_cast<void*>(a_actor),
+				a_firstPerson,
+				prunedHairSlotRecords,
+				pendingActorRebuilds_.back().armorRecords.size());
+		}
 	}
 
 	bool Fo4PhysicsWorld::SoftReloadPrototypeStateLocked(PrototypeActorState& a_state, const LifecycleEventType a_reason)
@@ -1069,6 +1117,15 @@ namespace Smp
 			}
 			a_pending.armorRecords = std::move(mergedRecords);
 		}
+		if (const auto prunedHairSlotRecords = PruneStalePendingHairSlotArmorRecords(a_pending.armorRecords);
+			prunedHairSlotRecords > 0) {
+			spdlog::debug(
+				"pruned stale pending hair-slot armor records before rebuild actor={} firstPerson={} records={} remaining={}",
+				static_cast<void*>(a_actor),
+				a_pending.firstPerson,
+				prunedHairSlotRecords,
+				a_pending.armorRecords.size());
+		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		for (auto it = a_pending.armorRecords.begin(); it != a_pending.armorRecords.end();) {
@@ -1116,6 +1173,7 @@ namespace Smp
 
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_actor, a_pending.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
+			const auto hairSlotArmorBuild = IsHairBipedObject(record.bipedObject);
 			if (const auto* attachment = FindPrototypeAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath)) {
 				for (const auto buildGroup : attachment->buildGroups) {
 					if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
@@ -1128,7 +1186,7 @@ namespace Smp
 					staleArmorBuildGroups.push_back(buildGroup);
 				}
 			}
-			if (IsHairBipedObject(record.bipedObject)) {
+			if (hairSlotArmorBuild) {
 				std::vector<std::uint64_t> staleHeadBuildGroups;
 				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 				if (replacedHeadParts > 0) {
@@ -1145,7 +1203,7 @@ namespace Smp
 					ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
 				}
 			}
-			if (!staleArmorBuildGroups.empty()) {
+			if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
 				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, record.mergeRenameMap.empty());
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
@@ -1186,9 +1244,14 @@ namespace Smp
 					rename.sourceName,
 					rename.renamedName);
 			}
-			const auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor);
+			auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
-				if (!staleArmorBuildGroups.empty()) {
+				if (hairSlotArmorBuild) {
+					ClearStaleHairSlotArmorGroupsLocked(actorState, record.bipedObject, buildResult.buildGroup, "pending-armor-rebuild-commit", rebuildObject, record.physicsXmlPath);
+					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
+					buildResult.committed = true;
+					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");
+				} else if (!staleArmorBuildGroups.empty()) {
 					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
 				}
 				RecordPrototypeAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath, buildResult.buildGroup);
@@ -1202,6 +1265,17 @@ namespace Smp
 					record.mergeSourceObject.get(),
 					record.mergeRenameMap,
 					buildResult.buildGroup);
+				if (hairSlotArmorBuild) {
+					const auto remainingHairSlotArmorGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, record.bipedObject).size();
+					spdlog::debug(
+						"hair-slot armor ownership after pending commit actor={} bipedObject={} buildGroup={} object={} xml='{}' remainingArmorGroups={}",
+						static_cast<void*>(a_actor),
+						std::to_underlying(record.bipedObject),
+						buildResult.buildGroup,
+						static_cast<void*>(rebuildObject),
+						record.physicsXmlPath,
+						remainingHairSlotArmorGroups);
+				}
 				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, resumeEvent);
 			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
 				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });

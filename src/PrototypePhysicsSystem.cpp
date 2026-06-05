@@ -277,7 +277,7 @@ namespace Smp
 		const auto extraction = ExtractSkinnedMeshes(a_event.object);
 		if (extraction.stats.skinnedGeometries > 0) {
 			spdlog::info(
-				"{} mesh decode actor={} object={} matched={} decodedMeshes={} vertices={} triangles={} unsupportedGeometryClasses={} badBoneIndices={}",
+				"{} mesh decode actor={} object={} matched={} decodedMeshes={} vertices={} triangles={} splitPositionData={} faceGenPositionData={} missingPositionData={} unsupportedGeometryClasses={} badBoneIndices={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object),
@@ -285,6 +285,9 @@ namespace Smp
 				extraction.stats.decodedMeshes,
 				extraction.stats.decodedVertices,
 				extraction.stats.decodedTriangles,
+				extraction.stats.splitPositionData,
+				extraction.stats.faceGenPositionData,
+				extraction.stats.missingPositionData,
 				extraction.stats.unsupportedGeometryClasses,
 				extraction.stats.badBoneIndices);
 		}

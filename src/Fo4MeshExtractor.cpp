@@ -12,6 +12,8 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <optional>
 
 #if defined(__AVX2__) || defined(__AVX512F__) || defined(FO4_FASTER_HDTSMP_AVX2) || defined(FO4_FASTER_HDTSMP_AVX512)
 #	include <immintrin.h>
@@ -148,6 +150,97 @@ namespace
 			std::addressof(boneIndex1),
 			std::addressof(boneIndex2),
 			std::addressof(boneIndex3));
+		return true;
+	}
+
+	struct SplitPositionStream
+	{
+		const std::uint8_t* data{ nullptr };
+		std::uint32_t stride{ 0 };
+		std::uint32_t dataSize{ 0 };
+		bool fullPrecision{ false };
+	};
+
+	std::uint32_t GetSplitPositionStride(const RE::BSGraphics::VertexDesc& a_vertexDesc)
+	{
+		// FO4 reuses the descriptor's VA_POSITION offset field as the split position-stream stride.
+		return a_vertexDesc.GetAttributeOffset(RE::BSGraphics::Vertex::VA_POSITION);
+	}
+
+	std::optional<SplitPositionStream> ResolveSplitPositionStream(
+		RE::BSGeometry* a_geometry,
+		const RE::BSGraphics::VertexDesc& a_rendererVertexDesc,
+		const RE::BSGraphics::VertexDesc& a_geometryVertexDesc,
+		const std::uint32_t a_vertexCount,
+		const std::string& a_meshName)
+	{
+		if (!a_geometry || a_vertexCount == 0 || a_rendererVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX)) {
+			return std::nullopt;
+		}
+
+		const auto splitStride = GetSplitPositionStride(a_geometryVertexDesc);
+		if (splitStride < sizeof(std::uint16_t) * 3 || splitStride > 64) {
+			return std::nullopt;
+		}
+
+		const auto* geometryBytes = reinterpret_cast<const std::uint8_t*>(a_geometry);
+		constexpr std::size_t kSplitPositionDataSizeOffset = 0x170;
+		constexpr std::size_t kSplitPositionDataPointerOffset = 0x180;
+		constexpr std::size_t kSplitPositionReadableBytes = kSplitPositionDataPointerOffset + sizeof(const std::uint8_t*);
+		if (!Smp::Fo4CpuBuffer::IsReadableRange(a_geometry, kSplitPositionReadableBytes)) {
+			return std::nullopt;
+		}
+
+		const auto dataSize = ReadUnaligned<std::uint32_t>(geometryBytes + kSplitPositionDataSizeOffset);
+		const auto data = ReadUnaligned<const std::uint8_t*>(geometryBytes + kSplitPositionDataPointerOffset);
+		const auto requiredBytes = static_cast<std::uint64_t>(splitStride) * a_vertexCount;
+		if (requiredBytes > std::numeric_limits<std::uint32_t>::max() || dataSize != requiredBytes || !data) {
+			return std::nullopt;
+		}
+		if (!Smp::Fo4CpuBuffer::IsReadableRange(data, static_cast<std::size_t>(requiredBytes))) {
+			spdlog::debug(
+				"mesh '{}' ignored unreadable split position stream positions={} stride={} bytes={} vertices={} rendererDesc={:#x} geometryDesc={:#x}",
+				a_meshName,
+				static_cast<const void*>(data),
+				splitStride,
+				dataSize,
+				a_vertexCount,
+				a_rendererVertexDesc.desc,
+				a_geometryVertexDesc.desc);
+			return std::nullopt;
+		}
+
+		SplitPositionStream result;
+		result.data = data;
+		result.stride = splitStride;
+		result.dataSize = dataSize;
+		result.fullPrecision = splitStride >= sizeof(float) * 4 && a_geometryVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC);
+		return result;
+	}
+
+	bool DecodeSplitPosition(
+		const SplitPositionStream& a_stream,
+		const std::uint32_t a_vertexIndex,
+		RE::NiPoint3& a_position)
+	{
+		if (!a_stream.data || a_stream.stride < sizeof(std::uint16_t) * 3) {
+			return false;
+		}
+
+		const auto* vertex = a_stream.data + static_cast<std::size_t>(a_vertexIndex) * a_stream.stride;
+		if (a_stream.fullPrecision) {
+			if (a_stream.stride < sizeof(float) * 3) {
+				return false;
+			}
+			a_position.x = ReadUnaligned<float>(vertex);
+			a_position.y = ReadUnaligned<float>(vertex + sizeof(float));
+			a_position.z = ReadUnaligned<float>(vertex + sizeof(float) * 2);
+			return true;
+		}
+
+		a_position.x = HalfToFloat(ReadUnaligned<std::uint16_t>(vertex));
+		a_position.y = HalfToFloat(ReadUnaligned<std::uint16_t>(vertex + sizeof(std::uint16_t)));
+		a_position.z = HalfToFloat(ReadUnaligned<std::uint16_t>(vertex + sizeof(std::uint16_t) * 2));
 		return true;
 	}
 
@@ -489,7 +582,27 @@ namespace
 			++a_result.stats.missingCpuVertexData;
 		}
 
-		auto vertexDesc = renderer->vertexDesc;
+		auto rendererVertexDesc = renderer->vertexDesc;
+		auto geometryVertexDesc = a_geometry->vertexDesc;
+		auto vertexDesc = rendererVertexDesc;
+		const auto rendererVertexStride = rendererVertexDesc.GetSize();
+		const auto geometryVertexStride = geometryVertexDesc.GetSize();
+		const auto usingGeometryVertexDesc =
+			!rendererVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) &&
+			geometryVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) &&
+			rendererVertexStride == geometryVertexStride;
+		if (usingGeometryVertexDesc) {
+			vertexDesc = geometryVertexDesc;
+			spdlog::debug(
+				"mesh '{}' using geometry vertex descriptor for CPU decode because renderer descriptor lacks VF_VERTEX rendererDesc={:#x} rendererFlags={:#x} geometryDesc={:#x} geometryFlags={:#x} stride={} vertices={}",
+				ResolveGeometryName(a_geometry),
+				rendererVertexDesc.desc,
+				std::to_underlying(rendererVertexDesc.GetFlags()),
+				geometryVertexDesc.desc,
+				std::to_underlying(geometryVertexDesc.GetFlags()),
+				rendererVertexStride,
+				triShape->numVertices);
+		}
 		const auto vertexStride = vertexDesc.GetSize();
 		if (vertexStride == 0) {
 			++a_result.stats.badVertexStride;
@@ -529,20 +642,44 @@ namespace
 			return false;
 		}
 		const auto* vertexData = vertexBufferData.data;
-		const auto* faceGenPositions = vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) ?
+		const auto hasDecodablePositionData = vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX);
+		const auto splitPositions = hasDecodablePositionData ?
+			std::optional<SplitPositionStream>{} :
+			ResolveSplitPositionStream(a_geometry, rendererVertexDesc, geometryVertexDesc, triShape->numVertices, mesh.name);
+		const auto* faceGenPositions = hasDecodablePositionData || splitPositions.has_value() ?
 			nullptr :
 			ResolveFaceGenObjectPositions(a_geometry, triShape->numVertices, mesh.name);
-		if (!vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) && !faceGenPositions) {
+		if (!hasDecodablePositionData && !splitPositions && !faceGenPositions) {
 			++a_result.stats.missingPositionData;
 			spdlog::debug(
-				"skipping mesh '{}' because renderer vertex descriptor has no position stream desc={:#x} flags={:#x} stride={} vertices={} fullPrecision={}",
+				"skipping mesh '{}' because vertex descriptor has no position stream rendererDesc={:#x} rendererFlags={:#x} geometryDesc={:#x} geometryFlags={:#x} vertexStride={} splitStride={} vertices={} rendererFullPrecision={} geometryFullPrecision={}",
 				a_geometry->GetName(),
-				vertexDesc.desc,
-				std::to_underlying(vertexDesc.GetFlags()),
+				rendererVertexDesc.desc,
+				std::to_underlying(rendererVertexDesc.GetFlags()),
+				geometryVertexDesc.desc,
+				std::to_underlying(geometryVertexDesc.GetFlags()),
 				vertexStride,
+				GetSplitPositionStride(geometryVertexDesc),
 				triShape->numVertices,
-				vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC));
+				rendererVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC),
+				geometryVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC));
 			return false;
+		}
+		if (splitPositions) {
+			++a_result.stats.splitPositionData;
+			spdlog::debug(
+				"mesh '{}' using split position stream positions={} stride={} bytes={} vertices={} decode={} rendererDesc={:#x} rendererFlags={:#x} geometryDesc={:#x} geometryFlags={:#x} vertexStride={}",
+				mesh.name,
+				static_cast<const void*>(splitPositions->data),
+				splitPositions->stride,
+				splitPositions->dataSize,
+				triShape->numVertices,
+				splitPositions->fullPrecision ? "float3" : "half3",
+				rendererVertexDesc.desc,
+				std::to_underlying(rendererVertexDesc.GetFlags()),
+				geometryVertexDesc.desc,
+				std::to_underlying(geometryVertexDesc.GetFlags()),
+				vertexStride);
 		}
 		if (faceGenPositions) {
 			++a_result.stats.faceGenPositionData;
@@ -563,6 +700,12 @@ namespace
 			const auto* vertexBase = vertexData + static_cast<std::size_t>(vertexIndex) * vertexStride;
 			if (faceGenPositions) {
 				position = faceGenPositions[vertexIndex];
+			} else if (splitPositions) {
+				if (!DecodeSplitPosition(*splitPositions, vertexIndex, position)) {
+					++a_result.stats.missingPositionData;
+					++skippedUnusableVertices;
+					continue;
+				}
 			} else if (!DecodePosition(vertexBase, vertexStride, vertexDesc, position)) {
 				++a_result.stats.missingPositionData;
 				++skippedUnusableVertices;

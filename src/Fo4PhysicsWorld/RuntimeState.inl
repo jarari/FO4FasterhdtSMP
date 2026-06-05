@@ -525,6 +525,164 @@ namespace Smp
 		return buildGroups;
 	}
 
+	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectArmorPrototypeGroupsForBipedObjectLocked(
+		const PrototypeActorState& a_state,
+		const RE::BIPED_OBJECT a_bipedObject,
+		const std::uint64_t a_preservedBuildGroup) const
+	{
+		std::vector<std::uint64_t> buildGroups;
+		if (a_bipedObject == RE::BIPED_OBJECT::kTotal) {
+			return buildGroups;
+		}
+
+		const auto appendGroup = [&buildGroups, a_preservedBuildGroup](const std::uint64_t a_buildGroup) {
+			if (a_buildGroup == 0 || a_buildGroup == a_preservedBuildGroup) {
+				return;
+			}
+			if (std::ranges::find(buildGroups, a_buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(a_buildGroup);
+			}
+		};
+
+		for (const auto& record : a_state.armorRecords) {
+			if (record.bipedObject != a_bipedObject) {
+				continue;
+			}
+			for (const auto buildGroup : record.buildGroups) {
+				appendGroup(buildGroup);
+			}
+		}
+
+		for (const auto& record : a_state.attachmentRecords) {
+			if (record.bipedObject != a_bipedObject) {
+				continue;
+			}
+			for (const auto buildGroup : record.buildGroups) {
+				appendGroup(buildGroup);
+			}
+		}
+
+		for (const auto& runtime : a_state.runtimes) {
+			if (runtime.domain == PrototypeBuildDomain::kArmor && runtime.bipedObject == a_bipedObject) {
+				appendGroup(runtime.buildGroup);
+			}
+		}
+
+		for (const auto& prototypeMesh : a_state.meshes) {
+			if (prototypeMesh.domain == PrototypeBuildDomain::kArmor && prototypeMesh.bipedObject == a_bipedObject) {
+				appendGroup(prototypeMesh.buildGroup);
+			}
+		}
+
+		for (const auto& prototypeBody : a_state.bodies) {
+			const auto visitBodyBuildGroup = [&](const std::uint64_t a_buildGroup) {
+				if (a_buildGroup == 0) {
+					return;
+				}
+
+				auto domain = PrototypeBuildDomain::kArmor;
+				if (const auto domainEntry = std::ranges::find_if(prototypeBody.buildGroupDomains, [a_buildGroup](const auto& a_entry) {
+						return a_entry.first == a_buildGroup;
+					});
+					domainEntry != prototypeBody.buildGroupDomains.end()) {
+					domain = domainEntry->second;
+				}
+				if (domain != PrototypeBuildDomain::kArmor) {
+					return;
+				}
+
+				auto bipedObject = prototypeBody.bipedObject;
+				if (const auto bipedEntry = std::ranges::find_if(prototypeBody.buildGroupBipedObjects, [a_buildGroup](const auto& a_entry) {
+						return a_entry.first == a_buildGroup;
+					});
+					bipedEntry != prototypeBody.buildGroupBipedObjects.end()) {
+					bipedObject = bipedEntry->second;
+				}
+				if (bipedObject == a_bipedObject) {
+					appendGroup(a_buildGroup);
+				}
+			};
+
+			if (!prototypeBody.buildGroups.empty()) {
+				for (const auto buildGroup : prototypeBody.buildGroups) {
+					visitBodyBuildGroup(buildGroup);
+				}
+			} else {
+				visitBodyBuildGroup(prototypeBody.buildGroup);
+			}
+		}
+
+		return buildGroups;
+	}
+
+	std::uint32_t Fo4PhysicsWorld::PrunePrototypeRecordsForBipedObjectLocked(
+		PrototypeActorState& a_state,
+		const RE::BIPED_OBJECT a_bipedObject,
+		const std::uint64_t a_preservedBuildGroup)
+	{
+		if (a_bipedObject == RE::BIPED_OBJECT::kTotal) {
+			return 0;
+		}
+
+		const auto hasPreservedGroup = [a_preservedBuildGroup](const std::vector<std::uint64_t>& a_buildGroups) {
+			return a_preservedBuildGroup != 0 &&
+				std::ranges::find(a_buildGroups, a_preservedBuildGroup) != a_buildGroups.end();
+		};
+		const auto removedAttachments = std::erase_if(a_state.attachmentRecords, [a_bipedObject, &hasPreservedGroup](const PrototypeAttachmentRecord& a_record) {
+			return a_record.bipedObject == a_bipedObject && !hasPreservedGroup(a_record.buildGroups);
+		});
+		const auto removedArmorRecords = std::erase_if(a_state.armorRecords, [a_bipedObject, &hasPreservedGroup](const PrototypeArmorRecord& a_record) {
+			return a_record.bipedObject == a_bipedObject && !hasPreservedGroup(a_record.buildGroups);
+		});
+
+		return static_cast<std::uint32_t>(removedAttachments + removedArmorRecords);
+	}
+
+	std::uint32_t Fo4PhysicsWorld::ClearStaleHairSlotArmorGroupsLocked(
+		PrototypeActorState& a_state,
+		const RE::BIPED_OBJECT a_bipedObject,
+		const std::uint64_t a_preservedBuildGroup,
+		const std::string_view a_reason,
+		RE::NiAVObject* a_object,
+		const std::string_view a_physicsXmlPath)
+	{
+		if (!IsHairBipedObject(a_bipedObject)) {
+			return 0;
+		}
+
+		auto buildGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
+		for (const auto buildGroup : buildGroups) {
+			spdlog::debug(
+				"clearing stale hair-slot armor prototype group actor={} bipedObject={} buildGroup={} preservedBuildGroup={} object={} xml='{}' reason={}",
+				static_cast<void*>(a_state.actor),
+				std::to_underlying(a_bipedObject),
+				buildGroup,
+				a_preservedBuildGroup,
+				static_cast<void*>(a_object),
+				a_physicsXmlPath,
+				a_reason);
+		}
+		if (!buildGroups.empty()) {
+			ClearPrototypeGroupsLocked(a_state, buildGroups, true);
+		}
+
+		const auto removedRecords = PrunePrototypeRecordsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
+		if (!buildGroups.empty() || removedRecords > 0) {
+			spdlog::debug(
+				"cleared stale hair-slot armor ownership actor={} bipedObject={} groups={} records={} preservedBuildGroup={} object={} xml='{}' reason={}",
+				static_cast<void*>(a_state.actor),
+				std::to_underlying(a_bipedObject),
+				buildGroups.size(),
+				removedRecords,
+				a_preservedBuildGroup,
+				static_cast<void*>(a_object),
+				a_physicsXmlPath,
+				a_reason);
+		}
+
+		return static_cast<std::uint32_t>(buildGroups.size());
+	}
+
 	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsLocked(
 		const PrototypeActorState& a_state,
 		std::vector<std::uint64_t>& a_buildGroups) const
