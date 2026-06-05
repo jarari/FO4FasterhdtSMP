@@ -34,11 +34,20 @@ namespace RE::BSSkin
 		BSTArray<NiTransform*>   worldTransforms;  // 28
 		NiPointer<BoneData>      boneData;         // 40
 		NiAVObject*              rootNode;         // 48
-		std::array<std::byte, 0x70> pad50;          // 50
+		std::array<std::byte, 0x50> pad50;          // 50
+		void*                     currentPalette;  // A0
+		void*                     previousPalette; // A8
+		std::uint32_t             paletteCount;    // B0
+		std::uint32_t             paletteFlags;    // B4
+		std::uint32_t             paletteByteSize; // B8
+		std::uint32_t             paletteStamp;    // BC
 	};
 	static_assert(sizeof(Instance) == 0xC0);
 	static_assert(offsetof(Instance, bones) == 0x10);
 	static_assert(offsetof(Instance, worldTransforms) == 0x28);
 	static_assert(offsetof(Instance, boneData) == 0x40);
 	static_assert(offsetof(Instance, rootNode) == 0x48);
+	static_assert(offsetof(Instance, currentPalette) == 0xA0);
+	static_assert(offsetof(Instance, previousPalette) == 0xA8);
+	static_assert(offsetof(Instance, paletteStamp) == 0xBC);
 }

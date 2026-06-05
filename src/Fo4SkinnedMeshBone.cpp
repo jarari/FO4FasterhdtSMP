@@ -7,6 +7,7 @@
 namespace
 {
 	constexpr float kResetPhysicsTimeStep = 0.0F;
+	constexpr float kSkinBindScale = 1.0F;
 	bool  g_clampRotations = true;
 	float g_rotationSpeedLimit = 10.0F;
 	bool  g_unclampedResets = true;
@@ -25,6 +26,27 @@ namespace
 		a_body.setInterpolationLinearVelocity(zero);
 		a_body.setInterpolationAngularVelocity(zero);
 		a_body.updateInertiaTensor();
+	}
+
+	void SanitizeSkinBindScale(RE::BSSkin::Instance* a_skin, const std::uint32_t a_index, const RE::BSFixedString& a_boneName)
+	{
+		if (!a_skin || !a_skin->boneData || a_index >= a_skin->boneData->transforms.size()) {
+			return;
+		}
+
+		auto& transform = a_skin->boneData->transforms[a_index].transform;
+		if (transform.scale == kSkinBindScale) {
+			return;
+		}
+
+		spdlog::debug(
+			"normalized FO4 skin bind scale for '{}' index={} skin={} oldScale={:.9f}",
+			a_boneName.c_str(),
+			a_index,
+			static_cast<void*>(a_skin),
+			transform.scale);
+		transform.scale = kSkinBindScale;
+		a_skin->paletteStamp = 0;
 	}
 
 	float RotationDeltaAngle(const btTransform& a_current, const btTransform& a_destination)
@@ -87,6 +109,8 @@ namespace Smp
 		if (!transform) {
 			return;
 		}
+
+		SanitizeSkinBindScale(a_skin, a_index, m_name);
 
 		const auto found = std::ranges::find_if(skinWorldTransforms_, [a_skin, a_index, a_buildGroup](const SkinWorldTransformSlot& a_slot) {
 			return a_slot.skin.get() == a_skin && a_slot.index == a_index && a_slot.buildGroup == a_buildGroup;

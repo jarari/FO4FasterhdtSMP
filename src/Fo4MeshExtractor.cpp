@@ -484,7 +484,9 @@ namespace
 
 			if (useBoneData && index < a_skin->boneData->transforms.size()) {
 				const auto& transform = a_skin->boneData->transforms[index];
-				decoded.skinToBone = Smp::Fo4Transform::ToBulletQsTransform(transform.transform);
+				auto skinToBone = transform.transform;
+				skinToBone.scale = 1.0F;
+				decoded.skinToBone = Smp::Fo4Transform::ToBulletQsTransform(skinToBone);
 				decoded.boundingSphere = ToBoundingSphere(transform.bound);
 				decoded.hasSkinToBone = true;
 				decoded.hasBoneData = true;
