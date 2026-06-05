@@ -71,7 +71,6 @@ namespace
 	constexpr float kGameUnitsPerMeter = 1.0F / 0.01425F;
 	constexpr float kGravityAcceleration = -9.80665F * kGameUnitsPerMeter;
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
-	constexpr std::uint32_t kAttachResetReadFrames = 8;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;

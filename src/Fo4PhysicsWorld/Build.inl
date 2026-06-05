@@ -610,12 +610,9 @@ namespace Smp
 		result.recordable = PrototypeBuildGroupIsRecordableLocked(a_state, buildGroup, a_domain, a_event.bipedObject);
 		result.succeeded = result.recordable;
 		rollbackGuard.Dismiss();
-		if (a_domain != PrototypeBuildDomain::kArmor || !hadActorRuntimeBeforeBuild) {
-			a_state.resetReadFrames = std::max(a_state.resetReadFrames, kAttachResetReadFrames);
-			ResetStepClockLocked();
-		} else {
+		if (a_domain == PrototypeBuildDomain::kArmor && hadActorRuntimeBeforeBuild) {
 			spdlog::debug(
-				"skipped actor-wide reset-read after hot armor build actor={} buildGroup={} because existing prototype runtime is active",
+				"hot armor build committed with localized reset read actor={} buildGroup={} because existing prototype runtime is active",
 				static_cast<void*>(a_state.actor),
 				buildGroup);
 		}
@@ -768,6 +765,47 @@ namespace Smp
 
 			resetBodyToCurrentPose(body);
 		}
+	}
+
+	void Fo4PhysicsWorld::ResetPrototypeBuildGroupsToStoredLocalPoseLocked(
+		PrototypeActorState& a_state,
+		const std::span<const std::uint64_t> a_buildGroups,
+		const std::string_view a_reason)
+	{
+		if (a_buildGroups.empty()) {
+			return;
+		}
+
+		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
+			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
+		};
+
+		std::uint32_t restoredMergedNodes = 0;
+		for (auto& mergedNode : a_state.mergedNodes) {
+			if (!containsGroup(mergedNode.buildGroup) || !mergedNode.hasLocalToParent) {
+				continue;
+			}
+
+			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
+			if (!node) {
+				continue;
+			}
+
+			node->local = mergedNode.localToParent;
+			UpdateTransformUpDown(node, true);
+			++restoredMergedNodes;
+		}
+
+		for (const auto buildGroup : a_buildGroups) {
+			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
+		}
+
+		spdlog::debug(
+			"reset prototype build groups to stored local pose actor={} groups={} restoredMergedNodes={} reason={}",
+			static_cast<void*>(a_state.actor),
+			a_buildGroups.size(),
+			restoredMergedNodes,
+			a_reason);
 	}
 
 	bool Fo4PhysicsWorld::BuildPrototypeMeshesLocked(

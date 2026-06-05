@@ -67,20 +67,8 @@ namespace Smp
 			SchedulePendingRebuildTaskLocked();
 		}
 
-		if (disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView()) {
-			const auto* player = RE::PlayerCharacter::GetSingleton();
-			bool suspendedPlayer = false;
-			for (auto& actorState : prototypeActors_) {
-				if (actorState.actor == player) {
-					actorState.resetReadFrames = std::max(actorState.resetReadFrames, kAttachResetReadFrames);
-					suspendedPlayer = true;
-				}
-			}
-			if (suspendedPlayer) {
-				ResetStepClockLocked();
-				return;
-			}
-		}
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
 		struct ActorReadTask
 		{
@@ -115,6 +103,10 @@ namespace Smp
 			if (actorState.runtimeSoftSuspended) {
 				continue;
 			}
+			if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
+				actorState.currentWindFactor = 0.0F;
+				continue;
+			}
 			UpdateMeshDisableStatesLocked(actorState);
 			for (auto& runtime : actorState.runtimes) {
 				if (!runtime.pendingResetPhysicsRead) {
@@ -130,22 +122,8 @@ namespace Smp
 					PrototypeDomainName(runtime.domain),
 					std::to_underlying(runtime.bipedObject));
 			}
-			const auto resettingRead = actorState.resetReadFrames > 0;
-			const auto readDelta = PreparePrototypeActorForReadLocked(actorState, actorState.resetReadFrames > 0 ? 0.0F : a_deltaSeconds);
+			const auto readDelta = PreparePrototypeActorForReadLocked(actorState, a_deltaSeconds);
 			readTasks.push_back({ std::addressof(actorState), readDelta });
-			if (actorState.resetReadFrames > 0) {
-				--actorState.resetReadFrames;
-			}
-			if (resettingRead) {
-				for (const auto& task : readTasks) {
-					processReadTask(task);
-				}
-				if (dynamicsWorld_) {
-					dynamicsWorld_->clearForces();
-				}
-				ResetStepClockLocked();
-				return;
-			}
 		}
 		tbb::parallel_for(std::size_t{ 0 }, readTasks.size(), [&](const std::size_t a_index) {
 			processReadTask(readTasks[a_index]);
@@ -582,22 +560,24 @@ namespace Smp
 			}
 
 			PruneInvalidPrototypeStatesLocked();
+			const auto* player = RE::PlayerCharacter::GetSingleton();
+			const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
 			for (auto& actorState : prototypeActors_) {
 				if (actorState.runtimeSoftSuspended) {
 					continue;
 				}
-				const auto resetReadPending =
-					actorState.resetReadFrames > 0 ||
-					std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
+				if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
+					continue;
+				}
+				const auto resetReadPending = std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
 						return a_runtime.pendingResetPhysicsRead;
 					});
 				if (resetReadPending) {
 					skippedDuplicate = true;
 					spdlog::trace(
-						"skipping prototype writeback until reset read completes actor={} resetReadFrames={}",
-						static_cast<void*>(actorState.actor),
-						actorState.resetReadFrames);
+						"skipping prototype writeback until pending reset physics read completes actor={}",
+						static_cast<void*>(actorState.actor));
 					continue;
 				}
 				if (!CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
@@ -665,6 +645,8 @@ namespace Smp
 			}
 
 			PruneInvalidPrototypeStatesLocked();
+			const auto* player = RE::PlayerCharacter::GetSingleton();
+			const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
 			for (auto& actorState : prototypeActors_) {
 				if (actorState.actor != a_actor) {
@@ -673,18 +655,18 @@ namespace Smp
 				if (actorState.runtimeSoftSuspended) {
 					continue;
 				}
+				if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
+					continue;
+				}
 
-				const auto resetReadPending =
-					actorState.resetReadFrames > 0 ||
-					std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
+				const auto resetReadPending = std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
 						return a_runtime.pendingResetPhysicsRead;
 					});
 				if (resetReadPending) {
 					skippedDuplicate = true;
 					spdlog::trace(
-						"skipping targeted prototype writeback until reset read completes actor={} resetReadFrames={}",
-						static_cast<void*>(actorState.actor),
-						actorState.resetReadFrames);
+						"skipping targeted prototype writeback until pending reset physics read completes actor={}",
+						static_cast<void*>(actorState.actor));
 					continue;
 				}
 				if (CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {

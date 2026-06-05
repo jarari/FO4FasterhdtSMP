@@ -157,7 +157,6 @@ namespace Smp
 		a_state.runtimes.clear();
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.resetReadFrames = 0;
 		a_state.runtimeSuspended = true;
 		a_state.runtimeSoftSuspended = false;
 		spdlog::debug(
@@ -176,6 +175,14 @@ namespace Smp
 		if (!a_state.HasRuntime() || a_state.runtimeSoftSuspended) {
 			return;
 		}
+
+		std::vector<std::uint64_t> buildGroups;
+		for (const auto& runtime : a_state.runtimes) {
+			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(runtime.buildGroup);
+			}
+		}
+		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "soft-suspend");
 
 		std::uint32_t removedConstraints = 0;
 		std::uint32_t removedMeshes = 0;
@@ -208,13 +215,13 @@ namespace Smp
 
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.resetReadFrames = 0;
 		a_state.currentWindFactor = 0.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = true;
 		spdlog::debug(
-			"soft-suspended prototype runtime for actor={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} runtimes={} armorRecords={}",
+			"soft-suspended prototype runtime for actor={} buildGroups={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} runtimes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
+			buildGroups.size(),
 			removedBodies,
 			removedMeshes,
 			removedConstraints,
@@ -267,7 +274,6 @@ namespace Smp
 		a_state.runtimeSuspended = false;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.resetReadFrames = 0;
 		a_state.currentWindFactor = 1.0F;
 		spdlog::debug(
 			"resumed soft-suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={}",
@@ -446,7 +452,6 @@ namespace Smp
 		a_state.nextAttachmentGeneration = 0;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.resetReadFrames = 0;
 		a_state.currentWindFactor = 1.0F;
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
@@ -1231,7 +1236,6 @@ namespace Smp
 			}
 			actorState.lastWritebackFrame = 0;
 			actorState.lastWritebackSource = WritebackSource::kUnknown;
-			actorState.resetReadFrames = std::max(actorState.resetReadFrames, kAttachResetReadFrames);
 			actorState.currentWindFactor = 1.0F;
 			if (!actorState.runtimes.empty()) {
 				for (const auto& runtime : actorState.runtimes) {

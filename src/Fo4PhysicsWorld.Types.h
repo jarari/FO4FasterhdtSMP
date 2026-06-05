@@ -123,7 +123,6 @@
 			std::uint32_t nextAttachmentGeneration{ 0 };
 			std::uint64_t lastWritebackFrame{ 0 };
 			WritebackSource lastWritebackSource{ WritebackSource::kUnknown };
-			std::uint32_t resetReadFrames{ 0 };
 			float currentWindFactor{ 1.0F };
 			bool runtimeSuspended{ false };
 			bool runtimeSoftSuspended{ false };
