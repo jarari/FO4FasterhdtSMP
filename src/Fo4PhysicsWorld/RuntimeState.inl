@@ -1161,12 +1161,17 @@ namespace Smp
 		const auto bodyCount = std::erase_if(a_state.bodies, [](const PrototypeBody& a_body) {
 			return a_body.buildGroups.empty();
 		});
-		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [&containsGroup, a_detachMergedNodes](PrototypeMergedNode& a_node) {
+		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [&a_state, &containsGroup, a_detachMergedNodes](PrototypeMergedNode& a_node) {
 			if (!containsGroup(a_node.buildGroup)) {
 				return false;
 			}
 			auto* node = a_node.node ? a_node.node->IsNode() : nullptr;
-			if (a_detachMergedNodes && a_node.parent && node && node->parent == a_node.parent) {
+			const auto nodeStillReferencedByKeptGroup = node && std::ranges::any_of(a_state.mergedNodes, [&](const PrototypeMergedNode& a_other) {
+				return std::addressof(a_other) != std::addressof(a_node) &&
+					!containsGroup(a_other.buildGroup) &&
+					a_other.node.get() == a_node.node.get();
+			});
+			if (a_detachMergedNodes && !nodeStillReferencedByKeptGroup && a_node.parent && node && node->parent == a_node.parent) {
 				a_node.parent->DetachChild(a_node.node.get());
 			}
 			return true;

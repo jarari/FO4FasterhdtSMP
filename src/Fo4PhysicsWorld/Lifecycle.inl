@@ -292,11 +292,14 @@ namespace Smp
 					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, scopedEvent.mergeRenameMap.empty());
 					staleArmorBuildGroups.clear();
 				}
+				if (hairSlotArmorBuild) {
+					ClearStaleHairSlotArmorGroupsLocked(actorState, scopedEvent.bipedObject, 0, "armor-attach-prebuild", a_object, selectedXml);
+					staleArmorBuildGroups.clear();
+				}
 			}
 			auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
 				if (hairSlotArmorBuild) {
-					ClearStaleHairSlotArmorGroupsLocked(actorState, scopedEvent.bipedObject, buildResult.buildGroup, "armor-attach-commit", a_object, selectedXml);
 					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
 					buildResult.committed = true;
 					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");

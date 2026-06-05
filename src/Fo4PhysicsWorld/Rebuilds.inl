@@ -1090,6 +1090,9 @@ namespace Smp
 				if (!a_target.sourceObject && a_source.sourceObject) {
 					a_target.sourceObject = a_source.sourceObject;
 				}
+				if (!a_target.mergeSourceObject && a_source.mergeSourceObject) {
+					a_target.mergeSourceObject = a_source.mergeSourceObject;
+				}
 				if (a_target.meshNameMap.empty() && !a_source.meshNameMap.empty()) {
 					a_target.meshNameMap = a_source.meshNameMap;
 				}
@@ -1196,6 +1199,7 @@ namespace Smp
 				.bipedObject = record.bipedObject,
 				.object = rebuildObject,
 				.sourceObject = rebuildSourceObject,
+				.mergeSourceObject = record.mergeSourceObject.get(),
 				.mergeParentBindings = record.mergeParentBindings,
 				.mergeRenameMap = record.mergeRenameMap,
 				.sourceRoot = rebuildSourceRoot,
@@ -1247,6 +1251,10 @@ namespace Smp
 					record.physicsXmlPath,
 					clearedCount);
 			}
+			if (hairSlotArmorBuild) {
+				ClearStaleHairSlotArmorGroupsLocked(actorState, record.bipedObject, 0, "pending-armor-rebuild-prebuild", rebuildObject, record.physicsXmlPath);
+				staleArmorBuildGroups.clear();
+			}
 			spdlog::debug(
 				"rebuilding pending armor prototype physics actor={} bipedObject={} object={} xml='{}' stagedStaleGroups={}",
 				static_cast<void*>(a_actor),
@@ -1279,7 +1287,6 @@ namespace Smp
 			auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
 				if (hairSlotArmorBuild) {
-					ClearStaleHairSlotArmorGroupsLocked(actorState, record.bipedObject, buildResult.buildGroup, "pending-armor-rebuild-commit", rebuildObject, record.physicsXmlPath);
 					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
 					buildResult.committed = true;
 					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");

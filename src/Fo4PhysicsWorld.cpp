@@ -1376,6 +1376,30 @@ namespace
 		return Smp::NiObject::FindNodeByName(a_root, a_name);
 	}
 
+	RE::NiNode* FindExactNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
+	{
+		if (!a_root || a_name.empty()) {
+			return nullptr;
+		}
+
+		if (const auto name = a_root->GetName(); !name.empty() && std::string_view(name) == a_name) {
+			return a_root->IsNode();
+		}
+
+		auto* node = a_root->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+
+		for (auto& child : node->children) {
+			if (auto* found = FindExactNodeByName(child.get(), a_name)) {
+				return found;
+			}
+		}
+
+		return nullptr;
+	}
+
 	bool IsExcludedMergeSearchObject(
 		RE::NiAVObject* a_object,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects)
@@ -1578,11 +1602,42 @@ namespace
 		std::unordered_set<RE::NiAVObject*> trustedNodes;
 	};
 
-	bool IsTrustedActorSkeletonCandidate(
+	enum class ActorSkeletonLookupMode
+	{
+		kAuthoritativeOnly,
+		kPermissiveNonArmor,
+	};
+
+	bool IsAuthoritativeActorSkeletonNode(
+		RE::NiAVObject* a_candidate,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+	{
+		return a_candidate && a_trustedActorSkeletonNodes.contains(a_candidate);
+	}
+
+	bool IsPermissiveActorSkeletonNodeForNonArmorFallback(
 		RE::NiAVObject* a_candidate,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
 	{
 		return a_candidate && (a_trustedActorSkeletonNodes.empty() || a_trustedActorSkeletonNodes.contains(a_candidate));
+	}
+
+	bool IsActorSkeletonCandidate(
+		RE::NiAVObject* a_candidate,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode)
+	{
+		return a_mode == ActorSkeletonLookupMode::kAuthoritativeOnly ?
+			IsAuthoritativeActorSkeletonNode(a_candidate, a_trustedActorSkeletonNodes) :
+			IsPermissiveActorSkeletonNodeForNonArmorFallback(a_candidate, a_trustedActorSkeletonNodes);
+	}
+
+	bool IsReservedMergedSourceName(
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames,
+		const std::string_view a_name)
+	{
+		const auto key = NormalizeActorLookupName(a_name);
+		return !key.empty() && a_reservedMergedSourceNames.contains(key);
 	}
 
 	void AddActorSkeletonLookupNode(ActorSkeletonLookup& a_lookup, RE::NiAVObject* a_object)
@@ -1645,7 +1700,8 @@ namespace
 		RE::NiAVObject* a_actorRoot,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode)
 	{
 		ActorSkeletonLookup lookup;
 		lookup.trustedNodes = a_trustedActorSkeletonNodes;
@@ -1656,6 +1712,9 @@ namespace
 					AddActorSkeletonLookupNode(lookup, object);
 				}
 			}
+			return lookup;
+		}
+		if (a_mode == ActorSkeletonLookupMode::kAuthoritativeOnly) {
 			return lookup;
 		}
 
@@ -1699,9 +1758,14 @@ namespace
 		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames,
 		const Smp::MergeParentBinding& a_binding)
 	{
 		if (a_binding.parentName.empty()) {
+			return nullptr;
+		}
+		if (IsReservedMergedSourceName(a_reservedMergedSourceNames, a_binding.parentName)) {
 			return nullptr;
 		}
 
@@ -1713,7 +1777,11 @@ namespace
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes);
 		}
-		if (!IsTrustedActorSkeletonCandidate(parent, a_trustedActorSkeletonNodes)) {
+		if (!IsActorSkeletonCandidate(parent, a_trustedActorSkeletonNodes, a_mode)) {
+			if (a_mode == ActorSkeletonLookupMode::kAuthoritativeOnly &&
+				a_trustedActorSkeletonNodes.empty()) {
+				return parent;
+			}
 			return nullptr;
 		}
 		return parent;
@@ -2125,6 +2193,7 @@ namespace
 		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
 		std::vector<SavedNodeLocalPose>& a_savedPoses)
 	{
 		const auto* skeleton = GetHavokReferenceSkeleton(a_actor);
@@ -2146,7 +2215,7 @@ namespace
 				boneName,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes);
-			if (!IsTrustedActorSkeletonCandidate(boneNode, a_trustedActorSkeletonNodes)) {
+			if (!IsActorSkeletonCandidate(boneNode, a_trustedActorSkeletonNodes, a_mode)) {
 				continue;
 			}
 
@@ -2430,13 +2499,21 @@ namespace
 		const ActorSkeletonLookup& a_actorSkeletonLookup,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames)
 	{
 		if (!a_actorRoot || !a_sourceNode) {
 			return nullptr;
 		}
+		if (a_mode == ActorSkeletonLookupMode::kAuthoritativeOnly && a_trustedActorSkeletonNodes.empty()) {
+			return nullptr;
+		}
 
 		const auto sourceName = a_sourceNode->GetName();
+		if (IsReservedMergedSourceName(a_reservedMergedSourceNames, sourceName)) {
+			return nullptr;
+		}
 		auto* actorNode = FindActorSkeletonLookupNode(a_actorSkeletonLookup, sourceName);
 		if (!actorNode) {
 			actorNode = FindNodeByNameExcludingKnownNodes(
@@ -2448,7 +2525,7 @@ namespace
 		if (!actorNode) {
 			return nullptr;
 		}
-		if (!IsTrustedActorSkeletonCandidate(actorNode, a_trustedActorSkeletonNodes)) {
+		if (!IsActorSkeletonCandidate(actorNode, a_trustedActorSkeletonNodes, a_mode)) {
 			spdlog::debug(
 				"trusted actor skeleton lookup for '{}' rejected actorNode={} because it was not present in the pre-attach trusted actor skeleton set",
 				sourceName,
@@ -2468,12 +2545,17 @@ namespace
 		RE::NiAVObject* a_excludedRootC,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames)
 	{
 		(void)a_sourceRoot;
 		(void)a_excludedRootA;
 		(void)a_excludedRootB;
 		(void)a_excludedRootC;
+		if (IsReservedMergedSourceName(a_reservedMergedSourceNames, a_name)) {
+			return nullptr;
+		}
 		auto* actorNode = FindActorSkeletonLookupNode(a_actorSkeletonLookup, a_name);
 		if (!actorNode) {
 			actorNode = FindNodeByNameExcludingKnownNodes(
@@ -2485,7 +2567,7 @@ namespace
 		if (!actorNode) {
 			return nullptr;
 		}
-		if (!IsTrustedActorSkeletonCandidate(actorNode, a_trustedActorSkeletonNodes)) {
+		if (!IsActorSkeletonCandidate(actorNode, a_trustedActorSkeletonNodes, a_mode)) {
 			spdlog::debug(
 				"trusted actor skeleton lookup for '{}' rejected actorNode={} because it was not present in the pre-attach trusted actor skeleton set",
 				a_name,
@@ -2502,6 +2584,8 @@ namespace
 		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames,
 		const std::vector<Smp::MergeParentBinding>& a_mergeParentBindings)
 	{
 		if (!a_sourceNode) {
@@ -2519,7 +2603,9 @@ namespace
 				a_actorSkeletonLookup,
 				a_actorSkeletonSearchExclusions,
 				a_knownArmorNodes,
-				a_trustedActorSkeletonNodes);
+				a_trustedActorSkeletonNodes,
+				a_mode,
+				a_reservedMergedSourceNames);
 		if (actorNode) {
 			const auto storedParent = std::ranges::find_if(a_mergeParentBindings, [sourceName](const Smp::MergeParentBinding& a_binding) {
 				return Smp::PhysicsNamesEqual(a_binding.sourceName, sourceName);
@@ -2534,7 +2620,7 @@ namespace
 						a_knownArmorNodes);
 				}
 				if (expectedParent &&
-					IsTrustedActorSkeletonCandidate(expectedParent, a_trustedActorSkeletonNodes) &&
+					IsActorSkeletonCandidate(expectedParent, a_trustedActorSkeletonNodes, a_mode) &&
 					actorNode != expectedParent &&
 					!IsObjectDescendantOf(actorNode, expectedParent)) {
 					spdlog::debug(
@@ -2562,6 +2648,8 @@ namespace
 		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames,
 		const std::string& a_prefix,
 		const Smp::PhysicsXmlSummary& a_summary,
 		const std::vector<Smp::MergeParentBinding>& a_mergeParentBindings,
@@ -2583,7 +2671,7 @@ namespace
 				continue;
 			}
 			if (childName.empty()) {
-				CloneSourceSkeletonIntoPartTree(a_cloneParent, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
+				CloneSourceSkeletonIntoPartTree(a_cloneParent, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_mode, a_reservedMergedSourceNames, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
 				continue;
 			}
 
@@ -2593,7 +2681,9 @@ namespace
 					a_actorSkeletonLookup,
 					a_actorSkeletonSearchExclusions,
 					a_knownArmorNodes,
-					a_trustedActorSkeletonNodes)) {
+					a_trustedActorSkeletonNodes,
+					a_mode,
+					a_reservedMergedSourceNames)) {
 				if (IsReferencedXmlSourceBone(a_summary, childName) || HasRelevantXmlDescendant(sourceChild, a_summary)) {
 					spdlog::debug(
 						"armor skeleton merge recursing into actor node '{}' sourceNode={} actorNode={} parent={} parentName='{}'",
@@ -2603,7 +2693,7 @@ namespace
 						static_cast<void*>(actorNode->parent),
 						actorNode->parent ? std::string_view(actorNode->parent->GetName()) : std::string_view{});
 				}
-				CloneSourceSkeletonIntoPartTree(actorNode, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
+				CloneSourceSkeletonIntoPartTree(actorNode, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_trustedActorSkeletonNodes, a_mode, a_reservedMergedSourceNames, a_prefix, a_summary, a_mergeParentBindings, a_renamedNodes, a_mergedRoots);
 				continue;
 			}
 
@@ -2625,6 +2715,8 @@ namespace
 						a_actorSkeletonSearchExclusions,
 						a_knownArmorNodes,
 						a_trustedActorSkeletonNodes,
+						a_mode,
+						a_reservedMergedSourceNames,
 						*parentBinding)) {
 					if (boundParent != clonedNode && !IsObjectDescendantOf(boundParent, clonedNode)) {
 						attachParent = boundParent;
@@ -2659,36 +2751,6 @@ namespace
 				parentBinding ? std::string_view(parentBinding->parentName) : std::string_view{},
 				a_prefix);
 		}
-	}
-
-	RE::NiNode* FindCurrentRenameMapSourceNode(
-		RE::NiAVObject* a_root,
-		const std::string_view a_name,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
-	{
-		if (!a_root || a_name.empty()) {
-			return nullptr;
-		}
-
-		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
-			auto* node = a_root->IsNode();
-			if (node && (a_trustedActorSkeletonNodes.empty() || !a_trustedActorSkeletonNodes.contains(node))) {
-				return node;
-			}
-		}
-
-		auto* rootNode = a_root->IsNode();
-		if (!rootNode) {
-			return nullptr;
-		}
-
-		for (auto& child : rootNode->children) {
-			if (auto* found = FindCurrentRenameMapSourceNode(child.get(), a_name, a_trustedActorSkeletonNodes)) {
-				return found;
-			}
-		}
-
-		return nullptr;
 	}
 
 	void RegisterMergedRenameMapNodes(
@@ -2742,30 +2804,14 @@ namespace
 				continue;
 			}
 
-			auto* node = FindNodeByName(a_actorRoot, entry.renamedName);
+			auto* node = FindExactNodeByName(a_actorRoot, entry.renamedName);
 			if (!node) {
-				auto* sourceNode = FindCurrentRenameMapSourceNode(
-					a_actorRoot,
-					entry.sourceName,
-					a_trustedActorSkeletonNodes);
-				if (!sourceNode) {
-					spdlog::debug(
-						"skipping merged armor rename map source='{}' renamed='{}' because renamed/source nodes were not found under actor root={}",
-						entry.sourceName,
-						entry.renamedName,
-						static_cast<void*>(a_actorRoot));
-					continue;
-				}
-
-				sourceNode->name = entry.renamedName.c_str();
-				node = sourceNode;
 				spdlog::debug(
-					"re-applied pre-merged armor rename source='{}' renamed='{}' node={} parent={} parentName='{}'",
+					"skipping merged armor rename map source='{}' renamed='{}' because renamed node was not found under actor root={}; preserved source rebuild will handle it if still needed",
 					entry.sourceName,
 					entry.renamedName,
-					static_cast<void*>(node),
-					static_cast<void*>(node->parent),
-					node->parent ? std::string_view(node->parent->GetName()) : std::string_view{});
+					static_cast<void*>(a_actorRoot));
+				continue;
 			}
 
 			a_renamedNodes.push_back({
@@ -2929,7 +2975,7 @@ namespace
 			return found->node;
 		}
 
-		if (auto* currentNode = FindNodeByName(a_skeletonRoot, found->renamedName)) {
+		if (auto* currentNode = FindExactNodeByName(a_skeletonRoot, found->renamedName)) {
 			return currentNode;
 		}
 
@@ -3001,7 +3047,9 @@ namespace
 		RE::NiAVObject* a_mergeSourceObject,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames)
 	{
 		(void)a_summary;
 		if (!a_skeletonRoot) {
@@ -3028,7 +3076,9 @@ namespace
 					a_mergeSourceObject,
 					a_excludedObjects,
 					a_knownArmorNodes,
-					a_trustedActorSkeletonNodes);
+					a_trustedActorSkeletonNodes,
+					a_mode,
+					a_reservedMergedSourceNames);
 				resolvedFromMergedNode = false;
 			}
 			if (!skeletonNode) {
@@ -3088,7 +3138,9 @@ namespace
 		RE::NiAVObject* a_mergeSourceObject,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
 		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames)
 	{
 		(void)a_summary;
 		if (!a_skeletonRoot) {
@@ -3115,7 +3167,9 @@ namespace
 					a_mergeSourceObject,
 					a_excludedObjects,
 					a_knownArmorNodes,
-					a_trustedActorSkeletonNodes);
+					a_trustedActorSkeletonNodes,
+					a_mode,
+					a_reservedMergedSourceNames);
 				resolvedFromMergedNode = false;
 			}
 			if (!skeletonNode) {
@@ -3177,10 +3231,10 @@ namespace
 		}
 
 		if (a_actorRoot && IsObjectInTree(a_actorRoot, object)) {
-			return false;
+			return true;
 		}
 
-		return false;
+		return true;
 	}
 
 	btTransform ToBulletTransform(const Smp::XmlTransform& a_transform)

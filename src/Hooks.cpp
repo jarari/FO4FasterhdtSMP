@@ -204,6 +204,32 @@ namespace Hooks
 		return actorRootNode;
 	}
 
+	RE::NiNode* FindTrustedActorSkeletonNode(
+		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const std::string_view a_name)
+	{
+		if (a_name.empty()) {
+			return nullptr;
+		}
+
+		for (auto* object : a_trustedActorSkeletonNodes) {
+			if (!object) {
+				continue;
+			}
+
+			auto* node = object->IsNode();
+			if (!node) {
+				continue;
+			}
+
+			const auto nodeName = node->GetName();
+			if (!nodeName.empty() && Smp::PhysicsNamesEqual(nodeName, a_name)) {
+				return node;
+			}
+		}
+		return nullptr;
+	}
+
 	std::string MakeArmorMergePrefix()
 	{
 		char buffer[48]{};
@@ -328,6 +354,7 @@ namespace Hooks
 		const std::string_view a_prefix,
 		std::vector<Smp::MergeRename>& a_map,
 		RE::NiNode* a_destinationRoot,
+		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
 		const bool a_renameSource)
 	{
 		if (!a_destination || !a_source || !a_destinationRoot) {
@@ -342,7 +369,7 @@ namespace Hooks
 
 			const auto childName = sourceChild->GetName();
 			if (childName.empty()) {
-				DoSkeletonMerge(a_destination, sourceChild, a_prefix, a_map, a_destinationRoot, a_renameSource);
+				DoSkeletonMerge(a_destination, sourceChild, a_prefix, a_map, a_destinationRoot, a_trustedActorSkeletonNodes, a_renameSource);
 				continue;
 			}
 
@@ -355,8 +382,8 @@ namespace Hooks
 				continue;
 			}
 
-			if (auto* destinationChild = FindNode(a_destinationRoot, childName)) {
-				DoSkeletonMerge(destinationChild, sourceChild, a_prefix, a_map, a_destinationRoot, a_renameSource);
+			if (auto* destinationChild = FindTrustedActorSkeletonNode(a_trustedActorSkeletonNodes, childName)) {
+				DoSkeletonMerge(destinationChild, sourceChild, a_prefix, a_map, a_destinationRoot, a_trustedActorSkeletonNodes, a_renameSource);
 			} else if (auto* clone = CloneNodeTree(sourceChild, a_prefix, a_map, a_renameSource)) {
 				a_destination->AttachChild(clone, false);
 			}
@@ -368,9 +395,10 @@ namespace Hooks
 		RE::NiNode* a_source,
 		const std::string_view a_prefix,
 		std::vector<Smp::MergeRename>& a_map,
+		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
 		const bool a_renameSource = true)
 	{
-		DoSkeletonMerge(a_destination, a_source, a_prefix, a_map, a_destination, a_renameSource);
+		DoSkeletonMerge(a_destination, a_source, a_prefix, a_map, a_destination, a_trustedActorSkeletonNodes, a_renameSource);
 	}
 
 	PreAttachPhysicsContext PreparePreAttachPhysicsContext(
@@ -397,7 +425,7 @@ namespace Hooks
 		context.mergeRenamePrefix = MakeArmorMergePrefix();
 		context.mergeSourceObject = CloneNodeExact(a_sourceRoot);
 		if (auto* mergeRoot = GetSkeletonMergeRoot(actor, a_firstPerson)) {
-			DoSkeletonMerge(mergeRoot, a_sourceRoot, context.mergeRenamePrefix, context.mergeRenameMap, false);
+			DoSkeletonMerge(mergeRoot, a_sourceRoot, context.mergeRenamePrefix, context.mergeRenameMap, context.trustedActorSkeletonNodes, false);
 			spdlog::debug(
 				"merged pre-attach armor skeleton source={} name='{}' into actor merge root={} name='{}' prefix='{}' renamedBones={}",
 				static_cast<void*>(a_sourceRoot),

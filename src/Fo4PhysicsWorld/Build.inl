@@ -119,7 +119,21 @@ namespace Smp
 				static_cast<void*>(a_event.actor),
 				trustedActorSkeletonNodes.size());
 		}
-		const auto actorSkeletonLookup = BuildActorSkeletonLookup(actorRoot, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes);
+		std::unordered_set<std::string> reservedMergedSourceNames;
+		if (a_domain == PrototypeBuildDomain::kArmor) {
+			reservedMergedSourceNames.reserve(a_event.mergeRenameMap.size());
+			for (const auto& rename : a_event.mergeRenameMap) {
+				const auto key = NormalizeActorLookupName(rename.sourceName);
+				if (!key.empty()) {
+					reservedMergedSourceNames.insert(key);
+				}
+			}
+		}
+		const auto actorSkeletonLookupMode =
+			a_domain == PrototypeBuildDomain::kArmor && !trustedActorSkeletonNodes.empty() ?
+				ActorSkeletonLookupMode::kAuthoritativeOnly :
+				ActorSkeletonLookupMode::kPermissiveNonArmor;
+		const auto actorSkeletonLookup = BuildActorSkeletonLookup(actorRoot, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes, actorSkeletonLookupMode);
 		const auto mergePrefix = !a_event.mergeRenamePrefix.empty() ? a_event.mergeRenamePrefix :
 			(a_domain == PrototypeBuildDomain::kHead || a_domain == PrototypeBuildDomain::kHair) ?
 				MakeReferenceHeadRenamePrefix(PrototypeHeadRenameId.fetch_add(1, std::memory_order_relaxed)) :
@@ -163,7 +177,7 @@ namespace Smp
 			}
 
 			const auto sourceRootName = sourceRoot->GetName();
-			const auto sourceRootIsActorBone = FindTrustedActorSkeletonNodeForSource(actorRoot, sourceRoot, actorSkeletonLookup, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes) != nullptr;
+			const auto sourceRootIsActorBone = FindTrustedActorSkeletonNodeForSource(actorRoot, sourceRoot, actorSkeletonLookup, actorSkeletonSearchExclusions, knownArmorNodes, trustedActorSkeletonNodes, actorSkeletonLookupMode, reservedMergedSourceNames) != nullptr;
 			if (sourceRoot == liveCloneParent && !sourceRootIsActorBone && !sourceRootName.empty() && IsReferencedXmlBoneName(a_summary, sourceRootName) && sourceRoot->parent) {
 				liveCloneParent = sourceRoot->parent;
 			}
@@ -184,6 +198,8 @@ namespace Smp
 				actorSkeletonSearchExclusions,
 				knownArmorNodes,
 				trustedActorSkeletonNodes,
+				actorSkeletonLookupMode,
+				reservedMergedSourceNames,
 				smpClonedPrefix,
 				a_summary,
 				a_event.mergeParentBindings,
@@ -205,6 +221,7 @@ namespace Smp
 					skeletonLookupExclusions,
 					skeletonLookupKnownArmorNodes,
 					trustedActorSkeletonNodes,
+					actorSkeletonLookupMode,
 					savedBuildPoses)) {
 				UpdateTransformUpDown(actorRootNode, true);
 				spdlog::debug(
@@ -229,7 +246,9 @@ namespace Smp
 			mergeSourceObject,
 			skeletonLookupExclusions,
 			skeletonLookupKnownArmorNodes,
-			trustedActorSkeletonNodes);
+			trustedActorSkeletonNodes,
+			actorSkeletonLookupMode,
+			reservedMergedSourceNames);
 		ResolveMatchedSkinBonesFromSkeleton(
 			matchedBones,
 			a_summary,
@@ -242,7 +261,9 @@ namespace Smp
 			mergeSourceObject,
 			skeletonLookupExclusions,
 			skeletonLookupKnownArmorNodes,
-			trustedActorSkeletonNodes);
+			trustedActorSkeletonNodes,
+			actorSkeletonLookupMode,
+			reservedMergedSourceNames);
 		if (a_domain == PrototypeBuildDomain::kArmor) {
 			const auto removedRawArmorBones = std::erase_if(matchedBones, [&](const MatchedSkinBone& a_matchedBone) {
 				const auto remove = IsUnresolvedArmorOwnedMatchedBone(
@@ -478,8 +499,15 @@ namespace Smp
 
 		ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
 		std::vector<PrototypeMesh> stagedMeshes;
+		std::vector<RE::NiAVObject*> mergedSkeletonNodeObjects;
+		mergedSkeletonNodeObjects.reserve(mergedSkeletonNodes.size());
+		for (const auto& mergedNode : mergedSkeletonNodes) {
+			if (mergedNode.node) {
+				mergedSkeletonNodeObjects.push_back(mergedNode.node);
+			}
+		}
 		phaseStart = Clock::now();
-		const auto cpuCopyPending = BuildPrototypeMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
+		const auto cpuCopyPending = BuildPrototypeMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, trustedActorSkeletonNodes, mergedSkeletonNodeObjects, stagedBodies, stagedMeshes);
 		timing.meshBuildMs += ElapsedMs(phaseStart, Clock::now());
 		const auto bodyOnlyArmorBuild = a_domain == PrototypeBuildDomain::kArmor;
 		if (cpuCopyPending) {
@@ -796,6 +824,8 @@ namespace Smp
 		const DefaultBBP::NameMap& a_meshNameMap,
 		const std::uint64_t a_buildGroup,
 		const PrototypeBuildDomain a_domain,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const std::vector<RE::NiAVObject*>& a_mergedSkeletonNodes,
 		std::vector<PrototypeBody>& a_stagedBodies,
 		std::vector<PrototypeMesh>& a_stagedMeshes)
 	{
@@ -933,8 +963,31 @@ namespace Smp
 			}
 			return stagedBody != a_stagedBodies.end() ? std::addressof(*stagedBody) : nullptr;
 		};
+		auto isAllowedArmorFallbackSkinBone = [&](RE::NiNode* a_node) {
+			if (a_domain != PrototypeBuildDomain::kArmor) {
+				return true;
+			}
+			if (!a_node) {
+				return false;
+			}
+			if (a_trustedActorSkeletonNodes.contains(a_node)) {
+				return true;
+			}
+			return std::ranges::find(a_mergedSkeletonNodes, static_cast<RE::NiAVObject*>(a_node)) != a_mergedSkeletonNodes.end();
+		};
 		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> PrototypeBody* {
 			if (!a_decodedBone.node || a_decodedBone.name.empty()) {
+				return nullptr;
+			}
+			if (!isAllowedArmorFallbackSkinBone(a_decodedBone.node)) {
+				spdlog::debug(
+					"skipping fallback kinematic skin bone for armor mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because node is not a trusted actor skeleton node or plugin-owned merged clone",
+					a_meshName,
+					static_cast<void*>(a_event.actor),
+					a_decodedBone.name,
+					static_cast<void*>(a_decodedBone.node),
+					a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
+					a_buildGroup);
 				return nullptr;
 			}
 
