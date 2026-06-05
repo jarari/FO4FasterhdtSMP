@@ -462,7 +462,7 @@ namespace Smp
 
 			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
 				return a_record.object.get() == candidate.object &&
-					a_record.sourceObject.get() == candidate.sourceObject &&
+					a_record.sourceObject.get() == candidate.sourceObject.get() &&
 					a_record.domain == candidate.domain &&
 					ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
 			});
@@ -526,9 +526,9 @@ namespace Smp
 
 			auto scopedEvent = a_event;
 			scopedEvent.object = candidate.object;
-			scopedEvent.sourceObject = candidate.sourceObject;
-			scopedEvent.sourceRoot = candidate.sourceRoot;
-			scopedEvent.mergeSourceObject = candidate.sourceObject;
+			scopedEvent.sourceObject = candidate.sourceObject.get();
+			scopedEvent.sourceRoot = candidate.sourceRoot ? candidate.sourceRoot->IsNode() : nullptr;
+			scopedEvent.mergeSourceObject = candidate.sourceObject.get();
 			scopedEvent.preserveMergeSourceNames = candidate.preserveMergeSourceNames;
 			scopedEvent.mergeRenamePrefix = MakeReferenceHeadRenamePrefix(PrototypeHeadRenameId.fetch_add(1, std::memory_order_relaxed));
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);

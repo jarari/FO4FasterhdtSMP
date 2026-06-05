@@ -58,7 +58,7 @@
 		float PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);
 		bool PrototypeBuildGroupHasMeshLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
 		bool PrototypeBuildGroupHasBodyLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
-		bool PrototypeBuildGroupIsRecordableLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain) const;
+		bool PrototypeBuildGroupIsRecordableLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, RE::BIPED_OBJECT a_bipedObject = RE::BIPED_OBJECT::kTotal) const;
 		void UpdatePrototypeBuildGroupMeshesLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		void CommitPrototypeBuildGroupToBulletLocked(PrototypeActorState& a_state, std::uint64_t a_buildGroup);
 		PrototypeBuildResult BuildPrototypeBodiesLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event, const PhysicsXmlSummary& a_summary, const DefaultBBP::NameMap& a_meshNameMap, PrototypeBuildDomain a_domain);

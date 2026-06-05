@@ -1068,13 +1068,14 @@ namespace Smp
 	bool Fo4PhysicsWorld::PrototypeBuildGroupIsRecordableLocked(
 		const PrototypeActorState& a_state,
 		const std::uint64_t a_buildGroup,
-		const PrototypeBuildDomain a_domain) const
+		const PrototypeBuildDomain a_domain,
+		const RE::BIPED_OBJECT a_bipedObject) const
 	{
 		if (!PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup)) {
 			return false;
 		}
 
-		if (a_domain == PrototypeBuildDomain::kArmor) {
+		if (a_domain == PrototypeBuildDomain::kArmor && !IsHairBipedObject(a_bipedObject)) {
 			return PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
 		}
 

@@ -433,6 +433,7 @@ namespace Smp
 		phaseStart = Clock::now();
 		const auto cpuCopyPending = BuildPrototypeMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
 		timing.meshBuildMs += ElapsedMs(phaseStart, Clock::now());
+		const auto allowBodyOnlyArmor = a_domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_event.bipedObject);
 		if (cpuCopyPending) {
 			spdlog::debug(
 				"prototype build group actor={} buildGroup={} is waiting for mesh CPU copy; staged Bullet rigid bodies were not committed",
@@ -443,7 +444,14 @@ namespace Smp
 			logBuildTiming("cpu-copy-pending", buildGroup);
 			return result;
 		}
-		if (a_domain == PrototypeBuildDomain::kArmor && stagedMeshes.empty() && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
+		if (allowBodyOnlyArmor && stagedMeshes.empty() && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
+			spdlog::debug(
+				"allowing body-only hair-slot armor prototype build actor={} bipedObject={} buildGroup={} because no skinned mesh body was decoded",
+				static_cast<void*>(a_state.actor),
+				std::to_underlying(a_event.bipedObject),
+				buildGroup);
+		}
+		if (a_domain == PrototypeBuildDomain::kArmor && !allowBodyOnlyArmor && stagedMeshes.empty() && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
 			spdlog::debug(
 				"prototype armor build group actor={} buildGroup={} produced no staged meshes; skin rebinding and Bullet commit skipped",
 				static_cast<void*>(a_state.actor),
@@ -464,7 +472,7 @@ namespace Smp
 		for (auto& stagedMesh : stagedMeshes) {
 			a_state.meshes.push_back(std::move(stagedMesh));
 		}
-		if (a_domain == PrototypeBuildDomain::kArmor && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
+		if (a_domain == PrototypeBuildDomain::kArmor && !allowBodyOnlyArmor && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
 			spdlog::debug(
 				"prototype armor build group actor={} buildGroup={} produced no committed meshes; skin rebinding and Bullet commit skipped",
 				static_cast<void*>(a_state.actor),
@@ -540,7 +548,7 @@ namespace Smp
 		}
 		LogPrototypeActorBulletObjectsLocked(a_state, "after-prototype-build-commit");
 		result.committed = true;
-		result.recordable = PrototypeBuildGroupIsRecordableLocked(a_state, buildGroup, a_domain);
+		result.recordable = PrototypeBuildGroupIsRecordableLocked(a_state, buildGroup, a_domain, a_event.bipedObject);
 		result.succeeded = result.recordable;
 		rollbackGuard.Dismiss();
 		if (a_domain != PrototypeBuildDomain::kArmor || !hadActorRuntimeBeforeBuild) {
@@ -747,7 +755,7 @@ namespace Smp
 				}
 				if (fallbackExtraction.meshes.empty()) {
 					spdlog::debug(
-						"prototype mesh extraction fallback {} root={} produced no meshes for actor={} geometries={} skinned={} matched={} missingCpuVertexData={} invalidCpuVertexData={} pendingVertexCopies={} pendingIndexCopies={}",
+						"prototype mesh extraction fallback {} root={} produced no meshes for actor={} geometries={} skinned={} matched={} missingCpuVertexData={} missingPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} pendingIndexCopies={}",
 						sourceName,
 						static_cast<void*>(root),
 						static_cast<void*>(a_state.actor),
@@ -755,6 +763,8 @@ namespace Smp
 						fallbackExtraction.stats.skinnedGeometries,
 						fallbackExtraction.stats.matchedGeometries,
 						fallbackExtraction.stats.missingCpuVertexData,
+						fallbackExtraction.stats.missingPositionData,
+						fallbackExtraction.stats.nonFinitePositions,
 						fallbackExtraction.stats.invalidCpuVertexData,
 						fallbackExtraction.stats.pendingVertexCopies,
 						fallbackExtraction.stats.pendingIndexCopies);
@@ -1142,7 +1152,7 @@ namespace Smp
 
 		if (a_domain != PrototypeBuildDomain::kArmor) {
 			spdlog::info(
-				"created {} {} prototype skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
+				"created {} {} prototype skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} missingPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
 				created,
 				PrototypeDomainName(a_domain),
 				static_cast<void*>(a_state.actor),
@@ -1172,6 +1182,8 @@ namespace Smp
 				extraction.stats.missingVertexBuffer,
 				extraction.stats.missingIndexBuffer,
 				extraction.stats.missingCpuVertexData,
+				extraction.stats.missingPositionData,
+				extraction.stats.nonFinitePositions,
 				extraction.stats.invalidCpuVertexData,
 				extraction.stats.pendingVertexCopies,
 				extraction.stats.missingCpuIndexData,

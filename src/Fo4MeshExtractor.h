@@ -49,7 +49,10 @@ namespace Smp
 		std::uint32_t invalidCpuVertexData{ 0 };
 		std::uint32_t pendingVertexCopies{ 0 };
 		std::uint32_t missingCpuVertexData{ 0 };
+		std::uint32_t missingPositionData{ 0 };
+		std::uint32_t faceGenPositionData{ 0 };
 		std::uint32_t badVertexStride{ 0 };
+		std::uint32_t nonFinitePositions{ 0 };
 		std::uint32_t undersizedVertexBuffers{ 0 };
 		std::uint32_t invalidCpuIndexData{ 0 };
 		std::uint32_t pendingIndexCopies{ 0 };

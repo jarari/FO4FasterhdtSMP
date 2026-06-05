@@ -10,6 +10,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstring>
 
 #if defined(__AVX2__) || defined(__AVX512F__) || defined(FO4_FASTER_HDTSMP_AVX2) || defined(FO4_FASTER_HDTSMP_AVX512)
@@ -19,6 +20,43 @@
 
 namespace
 {
+	struct Fo4BSFaceGenObjectData :
+		public RE::NiExtraData
+	{
+		RE::NiPoint3* positions{ nullptr };
+		std::uint32_t positionCount{ 0 };
+		std::uint32_t vertexCount{ 0 };
+	};
+	static_assert(offsetof(Fo4BSFaceGenObjectData, positions) == 0x18);
+	static_assert(offsetof(Fo4BSFaceGenObjectData, positionCount) == 0x20);
+	static_assert(offsetof(Fo4BSFaceGenObjectData, vertexCount) == 0x24);
+
+	struct Fo4BSFaceGenModelMeshData
+	{
+		std::byte pad00[0x08]{};
+		RE::NiPointer<RE::NiAVObject> faceNode;
+		RE::NiPointer<RE::NiAVObject> geometry;
+		std::byte pad18[0x10]{};
+	};
+	static_assert(offsetof(Fo4BSFaceGenModelMeshData, faceNode) == 0x08);
+	static_assert(offsetof(Fo4BSFaceGenModelMeshData, geometry) == 0x10);
+	static_assert(sizeof(Fo4BSFaceGenModelMeshData) == 0x28);
+
+	struct Fo4BSFaceGenModel
+	{
+		std::byte pad00[0x10]{};
+		Fo4BSFaceGenModelMeshData* modelMeshData{ nullptr };
+		std::byte pad18[0x08]{};
+	};
+	static_assert(offsetof(Fo4BSFaceGenModel, modelMeshData) == 0x10);
+	static_assert(sizeof(Fo4BSFaceGenModel) == 0x20);
+
+	struct Fo4BSFaceGenModelExtraData :
+		public RE::NiExtraData
+	{
+		Fo4BSFaceGenModel* model{ nullptr };
+	};
+	static_assert(offsetof(Fo4BSFaceGenModelExtraData, model) == 0x18);
 
 	hdt::BoundingSphere ToBoundingSphere(const RE::NiBound& a_bound)
 	{
@@ -68,6 +106,10 @@ namespace
 		const RE::BSGraphics::VertexDesc& a_vertexDesc,
 		RE::NiPoint3& a_position)
 	{
+		if (!a_vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX)) {
+			return false;
+		}
+
 		if (a_vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)) {
 			if (a_vertexStride < sizeof(float) * 3) {
 				return false;
@@ -78,13 +120,72 @@ namespace
 			return true;
 		}
 
-		if (a_vertexStride < sizeof(std::uint16_t) * 3) {
-			return false;
-		}
-		a_position.x = HalfToFloat(ReadUnaligned<std::uint16_t>(a_vertex));
-		a_position.y = HalfToFloat(ReadUnaligned<std::uint16_t>(a_vertex + sizeof(std::uint16_t)));
-		a_position.z = HalfToFloat(ReadUnaligned<std::uint16_t>(a_vertex + sizeof(std::uint16_t) * 2));
+		RE::BSGraphics::Utility::UnpackVertexData(
+			a_vertex,
+			0,
+			a_vertexDesc.desc,
+			std::addressof(a_position),
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr,
+			nullptr);
 		return true;
+	}
+
+	bool IsFinitePosition(const RE::NiPoint3& a_position)
+	{
+		return std::isfinite(a_position.x) && std::isfinite(a_position.y) && std::isfinite(a_position.z);
+	}
+
+	const RE::NiPoint3* ResolveFaceGenObjectPositions(
+		RE::BSGeometry* a_geometry,
+		const std::uint32_t a_vertexCount,
+		const std::string& a_meshName)
+	{
+		if (!a_geometry || !a_geometry->extra || a_vertexCount == 0) {
+			return nullptr;
+		}
+
+		for (auto* extra : *a_geometry->extra) {
+			if (!extra || !Smp::PhysicsNamesEqual(std::string_view(extra->name), "FOD")) {
+				continue;
+			}
+
+			const auto* fod = static_cast<const Fo4BSFaceGenObjectData*>(extra);
+			if (!fod->positions || fod->positionCount != a_vertexCount || fod->vertexCount != a_vertexCount) {
+				spdlog::debug(
+					"mesh '{}' ignored FaceGen object data positions={} positionCount={} vertexCount={} expectedVertices={}",
+					a_meshName,
+					static_cast<const void*>(fod->positions),
+					fod->positionCount,
+					fod->vertexCount,
+					a_vertexCount);
+				continue;
+			}
+
+			const auto requiredBytes = static_cast<std::uint64_t>(a_vertexCount) * sizeof(RE::NiPoint3);
+			if (requiredBytes > std::numeric_limits<std::size_t>::max() ||
+				!Smp::Fo4CpuBuffer::IsReadableRange(fod->positions, static_cast<std::size_t>(requiredBytes))) {
+				spdlog::debug(
+					"mesh '{}' ignored unreadable FaceGen object data positions={} vertices={} requiredBytes={}",
+					a_meshName,
+					static_cast<const void*>(fod->positions),
+					a_vertexCount,
+					requiredBytes);
+				continue;
+			}
+
+			return fod->positions;
+		}
+
+		return nullptr;
 	}
 
 	void DecodeSkinning(
@@ -119,19 +220,55 @@ namespace
 #endif
 	}
 
+	RE::BSGeometry* ResolveFaceGenOriginalGeometry(RE::BSGeometry* a_geometry)
+	{
+		if (!a_geometry || !a_geometry->extra) {
+			return nullptr;
+		}
+
+		for (auto* extra : *a_geometry->extra) {
+			if (!extra || !Smp::PhysicsNamesEqual(std::string_view(extra->name), "FMD")) {
+				continue;
+			}
+
+			const auto* fmd = static_cast<const Fo4BSFaceGenModelExtraData*>(extra);
+			const auto* meshData = fmd->model ? fmd->model->modelMeshData : nullptr;
+			auto* originalObject = meshData ? meshData->geometry.get() : nullptr;
+			return originalObject ? originalObject->IsGeometry() : nullptr;
+		}
+
+		return nullptr;
+	}
+
+	std::string ResolveGeometryName(RE::BSGeometry* a_geometry)
+	{
+		if (!a_geometry) {
+			return {};
+		}
+
+		if (auto* originalGeometry = ResolveFaceGenOriginalGeometry(a_geometry)) {
+			const auto originalName = originalGeometry->GetName();
+			if (!originalName.empty()) {
+				return std::string(originalName);
+			}
+		}
+
+		const auto name = a_geometry->GetName();
+		return name.empty() ? std::string{} : std::string(name);
+	}
+
 	bool MatchesMeshName(RE::BSGeometry* a_geometry, std::span<const std::string> a_meshNames)
 	{
 		if (a_meshNames.empty()) {
 			return true;
 		}
 
-		const auto name = a_geometry ? a_geometry->GetName() : "";
+		const auto name = ResolveGeometryName(a_geometry);
 		if (name.empty()) {
 			return false;
 		}
 
-		const std::string_view geometryName(name);
-		return Smp::FindMatchingPhysicsName(a_meshNames, geometryName).has_value();
+		return Smp::FindMatchingPhysicsName(a_meshNames, name).has_value();
 	}
 
 	bool IsValidNiObjectForIsNode(const RE::NiAVObject* a_object)
@@ -360,8 +497,7 @@ namespace
 		Smp::Fo4DecodedSkinnedMesh mesh;
 		mesh.geometry = a_geometry;
 		mesh.skinRootNode = skin->rootNode;
-		const auto name = a_geometry->GetName();
-		mesh.name = name.empty() ? std::string{} : std::string(name);
+		mesh.name = ResolveGeometryName(a_geometry);
 		MakeSkinBonesReal(skin, mesh.name);
 		DecodeSkinBones(skin, mesh.bones, a_result.stats);
 		mesh.vertices.reserve(triShape->numVertices);
@@ -381,12 +517,47 @@ namespace
 			return false;
 		}
 		const auto* vertexData = vertexBufferData.data;
+		const auto* faceGenPositions = vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) ?
+			nullptr :
+			ResolveFaceGenObjectPositions(a_geometry, triShape->numVertices, mesh.name);
+		if (!vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX) && !faceGenPositions) {
+			++a_result.stats.missingPositionData;
+			spdlog::debug(
+				"skipping mesh '{}' because renderer vertex descriptor has no position stream desc={:#x} flags={:#x} stride={} vertices={} fullPrecision={}",
+				a_geometry->GetName(),
+				vertexDesc.desc,
+				std::to_underlying(vertexDesc.GetFlags()),
+				vertexStride,
+				triShape->numVertices,
+				vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC));
+			return false;
+		}
+		if (faceGenPositions) {
+			++a_result.stats.faceGenPositionData;
+			spdlog::debug(
+				"mesh '{}' using FaceGen object data positions={} vertices={} because renderer descriptor has no position stream desc={:#x} flags={:#x} stride={} fullPrecision={}",
+				mesh.name,
+				static_cast<const void*>(faceGenPositions),
+				triShape->numVertices,
+				vertexDesc.desc,
+				std::to_underlying(vertexDesc.GetFlags()),
+				vertexStride,
+				vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC));
+		}
 
 		std::uint32_t skippedUnusableVertices = 0;
 		for (std::uint16_t vertexIndex = 0; vertexIndex < triShape->numVertices; ++vertexIndex) {
 			RE::NiPoint3 position{};
 			const auto* vertexBase = vertexData + static_cast<std::size_t>(vertexIndex) * vertexStride;
-			if (!DecodePosition(vertexBase, vertexStride, vertexDesc, position)) {
+			if (faceGenPositions) {
+				position = faceGenPositions[vertexIndex];
+			} else if (!DecodePosition(vertexBase, vertexStride, vertexDesc, position)) {
+				++a_result.stats.missingPositionData;
+				++skippedUnusableVertices;
+				continue;
+			}
+			if (!IsFinitePosition(position)) {
+				++a_result.stats.nonFinitePositions;
 				++skippedUnusableVertices;
 				continue;
 			}
@@ -404,7 +575,7 @@ namespace
 			mesh.vertices.push_back(vertex);
 		}
 		if (skippedUnusableVertices > 0) {
-			spdlog::debug("mesh '{}' skipped {} vertices with no usable skinning", mesh.name, skippedUnusableVertices);
+			spdlog::debug("mesh '{}' skipped {} vertices with no usable position or skinning", mesh.name, skippedUnusableVertices);
 		}
 
 		auto* indexBuffer = a_geometry->GetCustomIndexBuffer();

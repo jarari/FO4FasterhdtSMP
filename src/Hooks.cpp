@@ -731,7 +731,7 @@ namespace Hooks
 		});
 	}
 
-	void DiscardPendingPreparedHeadPartEvents(RE::BSFaceGenNiNode* a_faceNode)
+	void FlushPendingPreparedHeadPartEvents(RE::Actor* a_actor, RE::BSFaceGenNiNode* a_faceNode)
 	{
 		std::vector<PendingPreparedHeadPart> pending;
 		{
@@ -745,9 +745,13 @@ namespace Hooks
 		}
 
 		spdlog::debug(
-			"discarded {} pending prepared headpart events after head initialization faceNode={}; full current face node scan will rebuild head physics",
+			"flushing {} pending prepared headpart events after actor resolution actor={} faceNode={}",
 			pending.size(),
+			static_cast<void*>(a_actor),
 			static_cast<void*>(a_faceNode));
+		for (const auto& entry : pending) {
+			EmitPreparedHeadPartEvent(a_actor, a_faceNode, entry.object.get(), entry.headPart);
+		}
 	}
 
 	RE::NiAVObject* FindPreparedHeadPartObject(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart)
@@ -956,7 +960,7 @@ namespace Hooks
 	{
 		OriginalActorOnHeadInitialized(a_ref);
 		SeedFaceGenActor(a_ref);
-		DiscardPendingPreparedHeadPartEvents(a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
+		FlushPendingPreparedHeadPartEvents(static_cast<RE::Actor*>(a_ref), a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),
@@ -968,7 +972,7 @@ namespace Hooks
 	{
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
 		SeedFaceGenActor(a_ref);
-		DiscardPendingPreparedHeadPartEvents(a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
+		FlushPendingPreparedHeadPartEvents(static_cast<RE::Actor*>(a_ref), a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kActorHeadInitialized,
 			.actor = static_cast<RE::Actor*>(a_ref),

@@ -81,6 +81,11 @@ namespace
 	std::atomic<std::uint32_t> PrototypeHeadRenameId{ 0 };
 	using Clock = std::chrono::steady_clock;
 
+	bool IsHairBipedObject(const RE::BIPED_OBJECT a_bipedObject)
+	{
+		return a_bipedObject == RE::BIPED_OBJECT::kHairTop || a_bipedObject == RE::BIPED_OBJECT::kHairLong;
+	}
+
 	struct Fo4HkStringPtr
 	{
 		std::uintptr_t stringAndFlag{ 0 };
@@ -336,8 +341,8 @@ namespace
 		RE::NiAVObject* object{ nullptr };
 		std::filesystem::path path;
 		Smp::DefaultBBP::NameMap meshNameMap;
-		RE::NiAVObject* sourceObject{ nullptr };
-		RE::NiNode* sourceRoot{ nullptr };
+		RE::NiPointer<RE::NiAVObject> sourceObject;
+		RE::NiPointer<RE::NiAVObject> sourceRoot;
 		bool preserveMergeSourceNames{ false };
 		Smp::PrototypeBuildDomain domain{ Smp::PrototypeBuildDomain::kHead };
 	};
