@@ -65,6 +65,48 @@ namespace Smp
 			UpdateTransformUpDown(actorRootNode, true);
 		}
 		timing.actorTreePrepMs += ElapsedMs(phaseStart, Clock::now());
+		if (a_domain == PrototypeBuildDomain::kArmor && !a_summary.meshDescriptors.empty()) {
+			auto preflightExtraction = ExtractSkinnedMeshes(a_event.object, meshNames);
+			auto preflightCpuCopyPending = HasPendingCpuCopyExtraction(preflightExtraction);
+			auto preflightPendingMatchedGeometries = preflightCpuCopyPending ? preflightExtraction.stats.matchedGeometries : 0U;
+			auto preflightPendingVertexCopies = preflightCpuCopyPending ? preflightExtraction.stats.pendingVertexCopies : 0U;
+			auto preflightPendingIndexCopies = preflightCpuCopyPending ? preflightExtraction.stats.pendingIndexCopies : 0U;
+			if (preflightExtraction.meshes.empty()) {
+				const std::array fallbackRoots{
+					a_event.mergeSourceObject,
+					a_event.sourceObject,
+					static_cast<RE::NiAVObject*>(a_event.sourceRoot),
+				};
+				for (auto* root : fallbackRoots) {
+					if (!root || root == a_event.object) {
+						continue;
+					}
+
+					auto fallbackExtraction = ExtractSkinnedMeshes(root, meshNames);
+					if (!HasPendingCpuCopyExtraction(fallbackExtraction)) {
+						continue;
+					}
+
+					preflightCpuCopyPending = true;
+					preflightPendingMatchedGeometries += fallbackExtraction.stats.matchedGeometries;
+					preflightPendingVertexCopies += fallbackExtraction.stats.pendingVertexCopies;
+					preflightPendingIndexCopies += fallbackExtraction.stats.pendingIndexCopies;
+				}
+			}
+			if (preflightCpuCopyPending) {
+				spdlog::debug(
+					"prototype armor mesh extraction preflight delayed for pending CPU copy before merge/reference pose actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+					static_cast<void*>(a_state.actor),
+					static_cast<void*>(a_event.object),
+					preflightPendingMatchedGeometries,
+					preflightPendingVertexCopies,
+					preflightPendingIndexCopies);
+				PrototypeBuildResult result;
+				result.cpuCopyPending = true;
+				logBuildTiming("cpu-copy-pending-preflight");
+				return result;
+			}
+		}
 		std::vector<MergedSkeletonNode> mergedSkeletonNodes;
 		std::vector<MergedRootNode> mergedRootNodes;
 		std::vector<SavedNodeLocalPose> savedBuildPoses;

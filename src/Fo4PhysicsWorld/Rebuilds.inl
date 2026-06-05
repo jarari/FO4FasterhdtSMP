@@ -68,20 +68,14 @@ namespace Smp
 				return false;
 			}
 
-			if (player && maxActorDistance_ > 0.0F) {
-				const auto distanceSquared = DistanceSquared(a_state.actor->GetPosition(), player->GetPosition());
-				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
-				if (distanceSquared > maxDistanceSquared) {
-					if (a_state.HasRuntime() && !a_state.runtimeSoftSuspended) {
-						spdlog::debug(
-							"soft-suspending prototype physics state for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
-							static_cast<void*>(a_state.actor),
-							distanceSquared,
-							maxDistanceSquared);
-						SoftSuspendPrototypeRuntimeLocked(a_state);
-					}
-					return true;
+			if (!IsActorInReferenceCullView(a_state.actor, root, a_state.firstPerson)) {
+				if (a_state.HasRuntime() && !a_state.runtimeSoftSuspended) {
+					spdlog::debug(
+						"soft-suspending prototype physics state for actor={} because reference view culler marks it inactive",
+						static_cast<void*>(a_state.actor));
+					SoftSuspendPrototypeRuntimeLocked(a_state);
 				}
+				return true;
 			}
 		}
 
@@ -170,15 +164,10 @@ namespace Smp
 
 		bool shouldSuspend = false;
 		const char* reason = nullptr;
-		if (player && maxActorDistance_ > 0.0F) {
-			const auto distanceSquared = DistanceSquared(a_event.actor->GetPosition(), player->GetPosition());
-			const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
-			if (distanceSquared > maxDistanceSquared) {
-				shouldSuspend = true;
-				reason = "distance";
-			}
+		if (!IsActorInReferenceCullView(a_state.actor, a_event.object, a_event.firstPerson)) {
+			shouldSuspend = true;
+			reason = "view";
 		}
-
 		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_candidate) {
 			return a_candidate.HasActiveRuntime();
 		}));
@@ -241,7 +230,7 @@ namespace Smp
 			.armorRecords = std::move(a_armorRecords),
 		});
 		spdlog::debug(
-			"suspended prototype physics candidate actor={} firstPerson={} armorRecords={} until distance/budget allows rebuild",
+			"suspended prototype physics candidate actor={} firstPerson={} armorRecords={} until view/budget allows rebuild",
 			static_cast<void*>(a_actor),
 			a_firstPerson,
 			suspendedActors_.back().armorRecords.size());
@@ -258,7 +247,6 @@ namespace Smp
 			return;
 		}
 
-		const auto* player = RE::PlayerCharacter::GetSingleton();
 		for (auto it = suspendedActors_.begin(); it != suspendedActors_.end();) {
 			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 				return a_state.HasActiveRuntime();
@@ -302,14 +290,9 @@ namespace Smp
 				++it;
 				continue;
 			}
-
-			if (player && maxActorDistance_ > 0.0F) {
-				const auto distanceSquared = DistanceSquared(actor->GetPosition(), player->GetPosition());
-				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
-				if (distanceSquared > maxDistanceSquared) {
-					++it;
-					continue;
-				}
+			if (!IsActorInReferenceCullView(actor, root, it->firstPerson)) {
+				++it;
+				continue;
 			}
 
 			if (!it->armorRecords.empty()) {
@@ -386,13 +369,8 @@ namespace Smp
 			if (!root) {
 				continue;
 			}
-
-			if (player && maxActorDistance_ > 0.0F) {
-				const auto distanceSquared = DistanceSquared(actor->GetPosition(), player->GetPosition());
-				const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
-				if (distanceSquared > maxDistanceSquared) {
-					continue;
-				}
+			if (!IsActorInReferenceCullView(actor, root, actorState.firstPerson)) {
+				continue;
 			}
 
 			if (needsSoftResume && ResumeSoftSuspendedPrototypeRuntimeLocked(actorState)) {
@@ -453,6 +431,12 @@ namespace Smp
 			});
 		}
 		if (existing != a_records.end()) {
+			const auto recordHasRuntimeObject = a_record.attachedObject || a_record.sourceObject || a_record.mergeSourceObject;
+			const auto sameRuntimeObjects =
+				a_record.attachedObject.get() == existing->attachedObject.get() &&
+				a_record.sourceObject.get() == existing->sourceObject.get() &&
+				a_record.mergeSourceObject.get() == existing->mergeSourceObject.get();
+			const auto mayInheritRecordedMergeState = !recordHasRuntimeObject || sameRuntimeObjects;
 			if (!a_record.attachedObject && existing->attachedObject) {
 				a_record.attachedObject = existing->attachedObject;
 			}
@@ -462,11 +446,21 @@ namespace Smp
 			if (!a_record.mergeSourceObject && existing->mergeSourceObject) {
 				a_record.mergeSourceObject = existing->mergeSourceObject;
 			}
-			if (a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
+			if (mayInheritRecordedMergeState && a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
 				a_record.mergeParentBindings = existing->mergeParentBindings;
 			}
-			if (a_record.mergeRenameMap.empty() && !existing->mergeRenameMap.empty()) {
+			if (mayInheritRecordedMergeState && a_record.mergeRenameMap.empty() && !existing->mergeRenameMap.empty()) {
 				a_record.mergeRenameMap = existing->mergeRenameMap;
+			}
+			if (!mayInheritRecordedMergeState && (a_record.mergeParentBindings.empty() || a_record.mergeRenameMap.empty()) && (!existing->mergeParentBindings.empty() || !existing->mergeRenameMap.empty())) {
+				spdlog::debug(
+					"not inheriting recorded armor merge state for fresh runtime object actorRecord bipedObject={} xml='{}' object={} source={} existingObject={} existingSource={}",
+					std::to_underlying(a_record.bipedObject),
+					a_record.physicsXmlPath,
+					static_cast<void*>(a_record.attachedObject.get()),
+					static_cast<void*>(a_record.sourceObject.get()),
+					static_cast<void*>(existing->attachedObject.get()),
+					static_cast<void*>(existing->sourceObject.get()));
 			}
 			appendBuildGroups(a_record.buildGroups, existing->buildGroups);
 			const auto moveMergedHairSlotOwnerToBack = IsHairBipedObject(a_record.bipedObject);
@@ -1082,6 +1076,12 @@ namespace Smp
 				return score;
 			};
 			auto fillMissingRecordState = [](PrototypeArmorRecord& a_target, const PrototypeArmorRecord& a_source) {
+				const auto targetHasRuntimeObject = a_target.attachedObject || a_target.sourceObject || a_target.mergeSourceObject;
+				const auto sameRuntimeObjects =
+					a_target.attachedObject.get() == a_source.attachedObject.get() &&
+					a_target.sourceObject.get() == a_source.sourceObject.get() &&
+					a_target.mergeSourceObject.get() == a_source.mergeSourceObject.get();
+				const auto mayInheritRecordedMergeState = !targetHasRuntimeObject || sameRuntimeObjects;
 				if (!a_target.attachedObject && a_source.attachedObject) {
 					a_target.attachedObject = a_source.attachedObject;
 				}
@@ -1091,11 +1091,21 @@ namespace Smp
 				if (a_target.meshNameMap.empty() && !a_source.meshNameMap.empty()) {
 					a_target.meshNameMap = a_source.meshNameMap;
 				}
-				if (a_target.mergeParentBindings.empty() && !a_source.mergeParentBindings.empty()) {
+				if (mayInheritRecordedMergeState && a_target.mergeParentBindings.empty() && !a_source.mergeParentBindings.empty()) {
 					a_target.mergeParentBindings = a_source.mergeParentBindings;
 				}
-				if (a_target.mergeRenameMap.empty() && !a_source.mergeRenameMap.empty()) {
+				if (mayInheritRecordedMergeState && a_target.mergeRenameMap.empty() && !a_source.mergeRenameMap.empty()) {
 					a_target.mergeRenameMap = a_source.mergeRenameMap;
+				}
+				if (!mayInheritRecordedMergeState && (a_target.mergeParentBindings.empty() || a_target.mergeRenameMap.empty()) && (!a_source.mergeParentBindings.empty() || !a_source.mergeRenameMap.empty())) {
+					spdlog::debug(
+						"not merging stale pending armor merge state for fresh runtime object bipedObject={} xml='{}' object={} source={} staleObject={} staleSource={}",
+						std::to_underlying(a_target.bipedObject),
+						a_target.physicsXmlPath,
+						static_cast<void*>(a_target.attachedObject.get()),
+						static_cast<void*>(a_target.sourceObject.get()),
+						static_cast<void*>(a_source.attachedObject.get()),
+						static_cast<void*>(a_source.sourceObject.get()));
 				}
 				for (const auto buildGroup : a_source.buildGroups) {
 					if (buildGroup != 0 && std::ranges::find(a_target.buildGroups, buildGroup) == a_target.buildGroups.end()) {

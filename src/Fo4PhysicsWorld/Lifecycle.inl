@@ -692,28 +692,20 @@ namespace Smp
 			}
 		}
 
-		if (player && maxActorDistance_ > 0.0F) {
-			const auto distanceSquared = DistanceSquared(a_event.actor->GetPosition(), player->GetPosition());
-			const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
-			if (distanceSquared > maxDistanceSquared) {
-				if (buildSuspendedArmorCandidate) {
-					spdlog::debug(
-						"allowing out-of-range SMP armor candidate {} for actor={} to build directly into soft suspension distanceSq={} maxDistanceSq={}",
-						ToString(a_event.type),
-						static_cast<void*>(a_event.actor),
-						distanceSquared,
-						maxDistanceSquared);
-					return true;
-				}
-				spdlog::trace(
-					"skipping prototype physics candidate {} for actor={} beyond distance budget distanceSq={} maxDistanceSq={}",
+		if (!IsActorInReferenceCullView(a_event.actor, a_event.object, a_event.firstPerson)) {
+			if (buildSuspendedArmorCandidate) {
+				spdlog::debug(
+					"allowing inactive-view SMP armor candidate {} for actor={} to build directly into soft suspension",
 					ToString(a_event.type),
-					static_cast<void*>(a_event.actor),
-					distanceSquared,
-					maxDistanceSquared);
-				SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
-				return false;
+					static_cast<void*>(a_event.actor));
+				return true;
 			}
+			spdlog::trace(
+				"skipping prototype physics candidate {} for actor={} because reference view culler marks it inactive",
+				ToString(a_event.type),
+				static_cast<void*>(a_event.actor));
+			SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
+			return false;
 		}
 
 		return true;

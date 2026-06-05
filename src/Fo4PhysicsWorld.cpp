@@ -349,6 +349,7 @@ namespace
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
 	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
+	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor);
 	bool IsReadableMemory(const void* a_address, std::size_t a_minSize);
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object);
 	void CollectParentInheritedExclusions(
@@ -362,6 +363,66 @@ namespace
 		const auto dy = a_lhs.y - a_rhs.y;
 		const auto dz = a_lhs.z - a_rhs.z;
 		return dx * dx + dy * dy + dz * dz;
+	}
+
+	RE::NiAVObject* CalculateActorLOS(RE::Actor* a_actor, const RE::NiPoint3& a_targetPosition, RE::NiPoint3& a_hitPosition)
+	{
+		using ActorCalculateLOSFn = RE::NiAVObject* (*)(RE::Actor*, const RE::NiPoint3&, RE::NiPoint3&, float);
+		static REL::Relocation<ActorCalculateLOSFn> actorCalculateLOS{ REL::ID{ 1324305, 0 } };
+		return actorCalculateLOS(a_actor, a_targetPosition, a_hitPosition, 6.28F);
+	}
+
+	RE::NiPoint3 ResolveActorCullPosition(RE::Actor* a_actor, RE::NiAVObject* a_root)
+	{
+		if (a_root) {
+			if (auto* npcRoot = FindNodeByName(a_root, "NPC Root [Root]")) {
+				return npcRoot->world.translate;
+			}
+			return a_root->world.translate;
+		}
+		return a_actor ? a_actor->GetPosition() : RE::NiPoint3::ZERO;
+	}
+
+	bool IsActorInReferenceCullView(RE::Actor* a_actor, RE::NiAVObject* a_root, const bool a_firstPerson)
+	{
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!a_actor || a_actor == player) {
+			return true;
+		}
+
+		if (a_actor) {
+			if (auto* primaryRoot = a_actor->Get3D(a_firstPerson)) {
+				a_root = primaryRoot;
+			} else if (!a_firstPerson) {
+				if (auto* fallbackRoot = a_actor->Get3D()) {
+					a_root = fallbackRoot;
+				}
+			}
+		}
+		if (!a_root) {
+			return false;
+		}
+
+		const auto* playerCamera = RE::PlayerCamera::GetSingleton();
+		if (!playerCamera || !playerCamera->cameraRoot) {
+			return true;
+		}
+
+		constexpr float kReferenceMinCullingDistance = 500.0F;
+		const auto cameraPosition = playerCamera->cameraRoot->world.translate;
+		const auto actorPosition = ResolveActorCullPosition(a_actor, a_root);
+		if (DistanceSquared(actorPosition, cameraPosition) < kReferenceMinCullingDistance * kReferenceMinCullingDistance) {
+			return true;
+		}
+
+		auto* worldCamera = RE::Main::WorldRootCamera();
+		if (worldCamera && !worldCamera->NodeInFrustum(a_root)) {
+			return false;
+		}
+
+		RE::NiPoint3 hitPosition;
+		const auto* obstacle = CalculateActorLOS(a_actor, cameraPosition, hitPosition);
+		return !obstacle;
 	}
 
 	const char* PrototypeDomainName(const Smp::PrototypeBuildDomain a_domain)

@@ -177,10 +177,6 @@ namespace Smp
 			return;
 		}
 
-		if (dispatcher_) {
-			dispatcher_->clearAllManifold();
-		}
-
 		std::uint32_t removedConstraints = 0;
 		std::uint32_t removedMeshes = 0;
 		std::uint32_t removedBodies = 0;
@@ -243,10 +239,6 @@ namespace Smp
 		}
 		if (buildGroups.empty()) {
 			return false;
-		}
-
-		if (dispatcher_) {
-			dispatcher_->clearAllManifold();
 		}
 
 		for (const auto buildGroup : buildGroups) {
