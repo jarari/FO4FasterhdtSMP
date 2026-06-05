@@ -389,7 +389,7 @@ namespace
 			return true;
 		}
 
-		if (a_actor) {
+		if (!a_root) {
 			if (auto* primaryRoot = a_actor->Get3D(a_firstPerson)) {
 				a_root = primaryRoot;
 			} else if (!a_firstPerson) {

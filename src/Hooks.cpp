@@ -21,6 +21,7 @@
 #include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiPointer.h"
+#include "RE/P/PlayerCharacter.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
 #include "RE/T/TESNPC.h"
@@ -116,6 +117,17 @@ namespace Hooks
 	using BackupBoneMap = std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>>;
 
 	RE::Actor* ResolveActor(RE::BipedAnim* a_biped);
+
+	RE::Actor* AsActor(RE::TESObjectREFR* a_ref)
+	{
+		if (!a_ref) {
+			return nullptr;
+		}
+		if (a_ref == RE::PlayerCharacter::GetSingleton()) {
+			return static_cast<RE::Actor*>(a_ref);
+		}
+		return a_ref->IsActor() ? static_cast<RE::Actor*>(a_ref) : nullptr;
+	}
 
 	struct ScopedApplySkinnedObjectsDepth
 	{
@@ -674,7 +686,7 @@ namespace Hooks
 
 	void SeedFaceGenActor(RE::TESObjectREFR* a_ref)
 	{
-		auto* actor = a_ref ? static_cast<RE::Actor*>(a_ref) : nullptr;
+		auto* actor = AsActor(a_ref);
 		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
 		if (!actor || !faceNode) {
 			return;
@@ -915,69 +927,85 @@ namespace Hooks
 	RE::NiAVObject* HookedActorLoad3D(RE::TESObjectREFR* a_ref, bool a_backgroundLoading)
 	{
 		auto* loaded3D = OriginalActorLoad3D(a_ref, a_backgroundLoading);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorLoad3D,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = loaded3D,
-		});
+		if (auto* actor = AsActor(a_ref)) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorLoad3D,
+				.actor = actor,
+				.object = loaded3D,
+			});
+		}
 		return loaded3D;
 	}
 
 	RE::NiAVObject* HookedPlayerCharacterLoad3D(RE::TESObjectREFR* a_ref, bool a_backgroundLoading)
 	{
 		auto* loaded3D = OriginalPlayerCharacterLoad3D(a_ref, a_backgroundLoading);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorLoad3D,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = loaded3D,
-		});
+		if (auto* actor = AsActor(a_ref)) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorLoad3D,
+				.actor = actor,
+				.object = loaded3D,
+			});
+		}
 		return loaded3D;
 	}
 
 	void HookedActorSet3D(RE::TESObjectREFR* a_ref, RE::NiAVObject* a_object, bool a_queue3DTasks)
 	{
 		OriginalActorSet3D(a_ref, a_object, a_queue3DTasks);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorSet3D,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = a_object,
-			.queue3DTasks = a_queue3DTasks,
-		});
+		if (auto* actor = AsActor(a_ref)) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorSet3D,
+				.actor = actor,
+				.object = a_object,
+				.queue3DTasks = a_queue3DTasks,
+			});
+		}
 	}
 
 	void HookedPlayerCharacterSet3D(RE::TESObjectREFR* a_ref, RE::NiAVObject* a_object, bool a_queue3DTasks)
 	{
 		OriginalPlayerCharacterSet3D(a_ref, a_object, a_queue3DTasks);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorSet3D,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = a_object,
-			.queue3DTasks = a_queue3DTasks,
-		});
+		if (auto* actor = AsActor(a_ref)) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorSet3D,
+				.actor = actor,
+				.object = a_object,
+				.queue3DTasks = a_queue3DTasks,
+			});
+		}
 	}
 
 	void HookedActorOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
 		OriginalActorOnHeadInitialized(a_ref);
+		auto* actor = AsActor(a_ref);
+		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
 		SeedFaceGenActor(a_ref);
-		FlushPendingPreparedHeadPartEvents(static_cast<RE::Actor*>(a_ref), a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorHeadInitialized,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = a_ref ? reinterpret_cast<RE::NiAVObject*>(a_ref->GetFaceNodeSkinned()) : nullptr,
-		});
+		FlushPendingPreparedHeadPartEvents(actor, faceNode);
+		if (actor) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorHeadInitialized,
+				.actor = actor,
+				.object = reinterpret_cast<RE::NiAVObject*>(faceNode),
+			});
+		}
 	}
 
 	void HookedPlayerCharacterOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
+		auto* actor = AsActor(a_ref);
+		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
 		SeedFaceGenActor(a_ref);
-		FlushPendingPreparedHeadPartEvents(static_cast<RE::Actor*>(a_ref), a_ref ? a_ref->GetFaceNodeSkinned() : nullptr);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorHeadInitialized,
-			.actor = static_cast<RE::Actor*>(a_ref),
-			.object = a_ref ? reinterpret_cast<RE::NiAVObject*>(a_ref->GetFaceNodeSkinned()) : nullptr,
-		});
+		FlushPendingPreparedHeadPartEvents(actor, faceNode);
+		if (actor) {
+			EmitEvent({
+				.type = Smp::LifecycleEventType::kActorHeadInitialized,
+				.actor = actor,
+				.object = reinterpret_cast<RE::NiAVObject*>(faceNode),
+			});
+		}
 	}
 
 	void HookedPrepareHeadPart(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart, const RE::TESNPC* a_npc, bool a_arg4)

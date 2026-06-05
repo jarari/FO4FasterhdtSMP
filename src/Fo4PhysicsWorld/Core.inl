@@ -58,11 +58,15 @@ namespace Smp
 		budgetMs_ = std::max(a_settings.smp.budgetMs, 0.1F);
 		sampleSize_ = std::max(a_settings.smp.sampleSize, 1);
 		metricFrameInterval_ = static_cast<std::uint32_t>(std::max(a_settings.solver.minFps, 1));
+		clampRotations_ = a_settings.smp.clampRotations;
+		rotationSpeedLimit_ = std::max(a_settings.smp.rotationSpeedLimit, 0.0F);
+		unclampedResets_ = a_settings.smp.unclampedResets;
+		unclampedResetAngle_ = std::max(a_settings.smp.unclampedResetAngle, 0.0F);
 		Fo4SkinnedMeshBone::ApplyStabilityConfig(
-			a_settings.smp.clampRotations,
-			a_settings.smp.rotationSpeedLimit,
-			a_settings.smp.unclampedResets,
-			a_settings.smp.unclampedResetAngle);
+			clampRotations_,
+			rotationSpeedLimit_,
+			unclampedResets_,
+			unclampedResetAngle_);
 		disableFirstPersonViewPhysics_ = a_settings.smp.disableFirstPersonViewPhysics;
 		disableSMPHairWhenWigEquipped_ = a_settings.smp.disableSMPHairWhenWigEquipped;
 		enableNpcPhysics_ = a_settings.smp.enableNpcPhysics;

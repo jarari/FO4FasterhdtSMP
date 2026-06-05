@@ -5,6 +5,9 @@ namespace Smp
 {
 	void Fo4PhysicsWorld::StepFrame()
 	{
+		WaitForAsyncStep();
+		DrainQueuedLifecycleEvents();
+
 		auto delta = fixedStepSeconds_;
 		if (const auto timer = RE::BSTimer::GetSingleton()) {
 			delta = useRealTime_ ? timer->realTimeDelta : timer->delta;
@@ -13,7 +16,6 @@ namespace Smp
 			return;
 		}
 
-		WaitForAsyncStep();
 		if (IsGamePaused()) {
 			std::scoped_lock lock(lock_);
 			ResetStepClockLocked();

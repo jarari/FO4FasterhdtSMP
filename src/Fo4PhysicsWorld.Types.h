@@ -114,11 +114,19 @@
 
 		struct PrototypeActorState
 		{
+			PrototypeActorState() = default;
+			PrototypeActorState(const PrototypeActorState&) = delete;
+			PrototypeActorState& operator=(const PrototypeActorState&) = delete;
+			PrototypeActorState(PrototypeActorState&&) noexcept = default;
+			PrototypeActorState& operator=(PrototypeActorState&&) noexcept = default;
+
 			RE::Actor* actor{ nullptr };
 			RE::ActorHandle actorHandle;
 			bool firstPerson{ false };
 			RE::NiPointer<RE::NiAVObject> lastReadRoot;
 			bool readInitialized{ false };
+			btQuaternion lastRootRotation{ btQuaternion::getIdentity() };
+			bool lastRootRotationInitialized{ false };
 			std::uint64_t nextBuildGroup{ 0 };
 			std::uint32_t nextAttachmentGeneration{ 0 };
 			std::uint64_t lastWritebackFrame{ 0 };

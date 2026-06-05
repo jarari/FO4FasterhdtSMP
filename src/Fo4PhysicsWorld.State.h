@@ -41,6 +41,10 @@
 		std::uint32_t duplicatePostAnimationWritebacks_{ 0 };
 		int solverIterations_{ 10 };
 		float solverErp_{ 0.2F };
+		bool clampRotations_{ true };
+		float rotationSpeedLimit_{ 10.0F };
+		bool unclampedResets_{ true };
+		float unclampedResetAngle_{ 130.0F };
 		bool disableFirstPersonViewPhysics_{ false };
 		bool enableNpcPhysics_{ true };
 		bool autoAdjustMaxActors_{ false };
