@@ -263,6 +263,19 @@ namespace Smp
 						staleArmorBuildGroups.push_back(buildGroup);
 					}
 				}
+				if (IsHairBipedObject(scopedEvent.bipedObject)) {
+					const auto replacedHeadParts = CollectHeadPartGroupsForPhysicsXmlLocked(actorState, selectedXml, staleArmorBuildGroups);
+					if (replacedHeadParts > 0) {
+						spdlog::debug(
+							"hair-slot armor attach is replacing tracked headpart prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+							static_cast<void*>(a_event.actor),
+							std::to_underlying(scopedEvent.bipedObject),
+							static_cast<void*>(a_object),
+							selectedXml,
+							replacedHeadParts,
+							staleArmorBuildGroups.size());
+					}
+				}
 				if (!staleArmorBuildGroups.empty()) {
 					spdlog::debug(
 						"clearing stale armor prototype groups before rebuild actor={} bipedObject={} object={} count={}",
@@ -459,6 +472,17 @@ namespace Smp
 				continue;
 			}
 			scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
+
+			if (HasHairSlotArmorForPhysicsXmlLocked(actorState, selectedXml)) {
+				++skippedDuplicateXml;
+				spdlog::debug(
+					"skipping {} headpart prototype for XML owned by active hair-slot armor actor={} object={} xml='{}'",
+					PrototypeDomainName(candidate.domain),
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(candidate.object),
+					selectedXml);
+				continue;
+			}
 
 			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
 				return a_record.object.get() == candidate.object &&

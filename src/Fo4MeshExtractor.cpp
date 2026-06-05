@@ -120,22 +120,34 @@ namespace
 			return true;
 		}
 
+		RE::NiPoint2 texCoord0{};
+		RE::NiPoint2 texCoord1{};
+		RE::NiPoint3 normal{};
+		RE::NiPoint3 binormal{};
+		RE::NiPoint3 tangent{};
+		RE::NiColorA color{};
+		RE::NiColorA skinWeights{};
+		std::uint8_t boneIndex0{ 0 };
+		std::uint8_t boneIndex1{ 0 };
+		std::uint8_t boneIndex2{ 0 };
+		std::uint8_t boneIndex3{ 0 };
+
 		RE::BSGraphics::Utility::UnpackVertexData(
 			a_vertex,
 			0,
 			a_vertexDesc.desc,
 			std::addressof(a_position),
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr,
-			nullptr);
+			std::addressof(texCoord0),
+			std::addressof(texCoord1),
+			std::addressof(normal),
+			std::addressof(binormal),
+			std::addressof(tangent),
+			std::addressof(color),
+			std::addressof(skinWeights),
+			std::addressof(boneIndex0),
+			std::addressof(boneIndex1),
+			std::addressof(boneIndex2),
+			std::addressof(boneIndex3));
 		return true;
 	}
 

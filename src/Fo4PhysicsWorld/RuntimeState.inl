@@ -510,6 +510,49 @@ namespace Smp
 		return buildGroups;
 	}
 
+	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsForPhysicsXmlLocked(
+		const PrototypeActorState& a_state,
+		const std::string_view a_physicsXmlPath,
+		std::vector<std::uint64_t>& a_buildGroups) const
+	{
+		if (a_physicsXmlPath.empty()) {
+			return 0;
+		}
+
+		const auto normalizedXml = ConfigPaths::LowerString(std::string(a_physicsXmlPath));
+		std::uint32_t matchedRecords = 0;
+		for (const auto& record : a_state.headPartRecords) {
+			if (record.buildGroup == 0 || record.physicsXmlPath.empty() || ConfigPaths::LowerString(record.physicsXmlPath) != normalizedXml) {
+				continue;
+			}
+
+			++matchedRecords;
+			if (std::ranges::find(a_buildGroups, record.buildGroup) == a_buildGroups.end()) {
+				a_buildGroups.push_back(record.buildGroup);
+			}
+		}
+
+		return matchedRecords;
+	}
+
+	bool Fo4PhysicsWorld::HasHairSlotArmorForPhysicsXmlLocked(const PrototypeActorState& a_state, const std::string_view a_physicsXmlPath) const
+	{
+		if (a_physicsXmlPath.empty()) {
+			return false;
+		}
+
+		const auto normalizedXml = ConfigPaths::LowerString(std::string(a_physicsXmlPath));
+		return std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+			if (!IsHairBipedObject(a_record.bipedObject) || a_record.physicsXmlPath.empty() || ConfigPaths::LowerString(a_record.physicsXmlPath) != normalizedXml) {
+				return false;
+			}
+
+			return std::ranges::any_of(a_record.buildGroups, [&](const std::uint64_t a_buildGroup) {
+				return PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup) || PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
+			});
+		});
+	}
+
 	bool Fo4PhysicsWorld::ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object)
 	{
 		auto buildGroups = CollectPrototypeGroupsForObjectLocked(a_state, a_object);

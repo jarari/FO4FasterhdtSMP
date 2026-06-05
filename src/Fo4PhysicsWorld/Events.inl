@@ -70,6 +70,18 @@ namespace Smp
 			if (!cleared && bipedObject != RE::BIPED_OBJECT::kTotal) {
 				cleared = ClearPrototypeGroupsForBipedObjectLocked(*actorState, bipedObject);
 			}
+			if (cleared && IsHairBipedObject(bipedObject)) {
+				MarkPendingHeadRebuildLocked(LifecycleEvent{
+					.type = LifecycleEventType::kActorHeadInitialized,
+					.actor = a_event.actor,
+					.object = a_event.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(a_event.actor->GetFaceNodeSkinned()) : nullptr,
+					.firstPerson = a_event.firstPerson,
+				});
+				spdlog::debug(
+					"queued headpart prototype rebuild after hair-slot armor detach actor={} bipedObject={}",
+					static_cast<void*>(a_event.actor),
+					std::to_underlying(bipedObject));
+			}
 			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 				return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
 			});

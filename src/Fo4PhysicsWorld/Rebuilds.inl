@@ -1128,6 +1128,19 @@ namespace Smp
 					staleArmorBuildGroups.push_back(buildGroup);
 				}
 			}
+			if (IsHairBipedObject(record.bipedObject)) {
+				const auto replacedHeadParts = CollectHeadPartGroupsForPhysicsXmlLocked(actorState, record.physicsXmlPath, staleArmorBuildGroups);
+				if (replacedHeadParts > 0) {
+					spdlog::debug(
+						"pending hair-slot armor rebuild is replacing tracked headpart prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+						static_cast<void*>(a_actor),
+						std::to_underlying(record.bipedObject),
+						static_cast<void*>(rebuildObject),
+						record.physicsXmlPath,
+						replacedHeadParts,
+						staleArmorBuildGroups.size());
+				}
+			}
 			if (!staleArmorBuildGroups.empty()) {
 				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, record.mergeRenameMap.empty());
 				const auto clearedCount = staleArmorBuildGroups.size();
