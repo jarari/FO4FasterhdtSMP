@@ -1129,16 +1129,20 @@ namespace Smp
 				}
 			}
 			if (IsHairBipedObject(record.bipedObject)) {
-				const auto replacedHeadParts = CollectHeadPartGroupsForPhysicsXmlLocked(actorState, record.physicsXmlPath, staleArmorBuildGroups);
+				std::vector<std::uint64_t> staleHeadBuildGroups;
+				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 				if (replacedHeadParts > 0) {
 					spdlog::debug(
-						"pending hair-slot armor rebuild is replacing tracked headpart prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+						"pending hair-slot armor rebuild is replacing tracked head/hair prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
 						static_cast<void*>(a_actor),
 						std::to_underlying(record.bipedObject),
 						static_cast<void*>(rebuildObject),
 						record.physicsXmlPath,
 						replacedHeadParts,
-						staleArmorBuildGroups.size());
+						staleHeadBuildGroups.size());
+				}
+				if (!staleHeadBuildGroups.empty()) {
+					ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
 				}
 			}
 			if (!staleArmorBuildGroups.empty()) {
@@ -1435,6 +1439,14 @@ namespace Smp
 			auto* actor = resolvedActor.get();
 			if (!actor) {
 				it = pendingHeadRebuilds_.erase(it);
+				continue;
+			}
+			const auto actorRebuildPending = std::ranges::any_of(pendingActorRebuilds_, [actor](const PendingActorRebuild& a_pending) {
+				const auto resolvedPendingActor = a_pending.actorHandle.get();
+				return resolvedPendingActor && resolvedPendingActor.get() == actor;
+			});
+			if (actorRebuildPending) {
+				++it;
 				continue;
 			}
 

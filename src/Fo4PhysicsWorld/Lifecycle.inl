@@ -241,7 +241,8 @@ namespace Smp
 			}
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
-			if (armorAttach) {
+			const auto scopedArmorBuild = armorAttach || scopedEvent.bipedObject != RE::BIPED_OBJECT::kTotal;
+			if (scopedArmorBuild) {
 				if (IsPrototypeAttachmentCurrentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
 					spdlog::debug(
 						"skipping duplicate armor prototype attach actor={} bipedObject={} object={} xml='{}'",
@@ -264,16 +265,20 @@ namespace Smp
 					}
 				}
 				if (IsHairBipedObject(scopedEvent.bipedObject)) {
-					const auto replacedHeadParts = CollectHeadPartGroupsForPhysicsXmlLocked(actorState, selectedXml, staleArmorBuildGroups);
+					std::vector<std::uint64_t> staleHeadBuildGroups;
+					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 					if (replacedHeadParts > 0) {
 						spdlog::debug(
-							"hair-slot armor attach is replacing tracked headpart prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+							"hair-slot armor attach is replacing tracked head/hair prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
 							static_cast<void*>(a_event.actor),
 							std::to_underlying(scopedEvent.bipedObject),
 							static_cast<void*>(a_object),
 							selectedXml,
 							replacedHeadParts,
-							staleArmorBuildGroups.size());
+							staleHeadBuildGroups.size());
+					}
+					if (!staleHeadBuildGroups.empty()) {
+						ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
 					}
 				}
 				if (!staleArmorBuildGroups.empty()) {
@@ -311,7 +316,7 @@ namespace Smp
 					selectedXml,
 					buildResult.cpuCopyPending);
 			}
-			if (armorAttach && buildResult.cpuCopyPending && a_event.actor) {
+			if (scopedArmorBuild && buildResult.cpuCopyPending && a_event.actor) {
 				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::vector<PrototypeArmorRecord>{
 					PrototypeArmorRecord{
 						.bipedObject = scopedEvent.bipedObject,
@@ -326,7 +331,7 @@ namespace Smp
 					},
 				});
 			}
-			if (armorAttach) {
+			if (scopedArmorBuild) {
 				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, scopedEvent);
 			}
 			return buildResult.succeeded;
@@ -337,7 +342,11 @@ namespace Smp
 			discoveredXml = ArmorPhysicsXmlSelection{ .path = a_event.physicsXmlPath };
 		}
 		const auto selectedXml = discoveredXml ? discoveredXml->path.string() : (armorAttach ? std::string{} : prototypePhysicsXml_);
-		if (selectedXml.empty()) {
+		std::vector<ArmorPhysicsXmlBuildCandidate> equippedArmorCandidates;
+		if (!armorAttach) {
+			CollectEquippedArmorPhysicsXmlSelections(a_event, equippedArmorCandidates);
+		}
+		if (selectedXml.empty() && equippedArmorCandidates.empty()) {
 			if (armorAttach) {
 				spdlog::trace(
 					"armor attach candidate has no pre-scanned XML actor={} object={} sourceObject={} sourceRoot={} destinationRoot={} bipObject={} model='{}' armorAddon={} preScannedXml='{}'",
@@ -363,6 +372,26 @@ namespace Smp
 				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 					return !a_state.runtimeSuspended && !a_state.HasRuntime();
 				});
+			}
+		}
+
+		if (!armorAttach && !equippedArmorCandidates.empty()) {
+			std::uint32_t builtEquipped = 0;
+			for (const auto& candidate : equippedArmorCandidates) {
+				if (buildSelection(candidate)) {
+					++builtEquipped;
+				}
+			}
+			spdlog::debug(
+				"processed equipped armor prototype physics rescan actor={} candidates={} built={}",
+				static_cast<void*>(a_event.actor),
+				equippedArmorCandidates.size(),
+				builtEquipped);
+			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+				return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			});
+			if (selectedXml.empty()) {
+				return;
 			}
 		}
 
@@ -403,6 +432,27 @@ namespace Smp
 				static_cast<void*>(faceObject));
 		}
 		actorState.faceNode = faceObject;
+
+		const auto suppressHeadForHairArmor =
+			HasActiveHairSlotArmorLocked(actorState) ||
+			(disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_event.actor));
+		if (suppressHeadForHairArmor) {
+			std::vector<std::uint64_t> removedGroups;
+			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, removedGroups);
+			if (!removedGroups.empty()) {
+				ClearPrototypeGroupsLocked(actorState, removedGroups);
+			}
+			spdlog::debug(
+				"skipping head/hair prototype rebuild while hair-slot armor is active actor={} faceNode={} removedHeadPartRecords={} removedGroups={}",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(faceNode),
+				removedHeadParts,
+				removedGroups.size());
+			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
+				return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			});
+			return;
+		}
 
 		const auto touchedHeadPart = a_event.type == LifecycleEventType::kHeadPrepareHeadPart;
 		const auto touchedObjectValid = !touchedHeadPart || !a_event.object || IsObjectInTree(faceObject, a_event.object);
@@ -472,17 +522,6 @@ namespace Smp
 				continue;
 			}
 			scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
-
-			if (HasHairSlotArmorForPhysicsXmlLocked(actorState, selectedXml)) {
-				++skippedDuplicateXml;
-				spdlog::debug(
-					"skipping {} headpart prototype for XML owned by active hair-slot armor actor={} object={} xml='{}'",
-					PrototypeDomainName(candidate.domain),
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(candidate.object),
-					selectedXml);
-				continue;
-			}
 
 			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
 				return a_record.object.get() == candidate.object &&

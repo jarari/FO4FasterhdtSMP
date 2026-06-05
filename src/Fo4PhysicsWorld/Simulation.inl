@@ -587,6 +587,19 @@ namespace Smp
 				if (actorState.runtimeSoftSuspended) {
 					continue;
 				}
+				const auto resetReadPending =
+					actorState.resetReadFrames > 0 ||
+					std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
+						return a_runtime.pendingResetPhysicsRead;
+					});
+				if (resetReadPending) {
+					skippedDuplicate = true;
+					spdlog::trace(
+						"skipping prototype writeback until reset read completes actor={} resetReadFrames={}",
+						static_cast<void*>(actorState.actor),
+						actorState.resetReadFrames);
+					continue;
+				}
 				if (!CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					skippedDuplicate = true;
 					continue;
@@ -661,6 +674,19 @@ namespace Smp
 					continue;
 				}
 
+				const auto resetReadPending =
+					actorState.resetReadFrames > 0 ||
+					std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
+						return a_runtime.pendingResetPhysicsRead;
+					});
+				if (resetReadPending) {
+					skippedDuplicate = true;
+					spdlog::trace(
+						"skipping targeted prototype writeback until reset read completes actor={} resetReadFrames={}",
+						static_cast<void*>(actorState.actor),
+						actorState.resetReadFrames);
+					continue;
+				}
 				if (CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					actorState.lastWritebackFrame = simulationFrame_;
 					actorState.lastWritebackSource = a_source;

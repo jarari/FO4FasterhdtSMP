@@ -38,17 +38,18 @@ namespace Smp
 			return;
 		}
 
-		std::uint32_t reloadedStates = 0;
+		struct CustomizationReloadActor
+		{
+			RE::Actor* actor{ nullptr };
+			std::vector<PrototypeArmorRecord> armorRecords;
+		};
+
+		std::vector<CustomizationReloadActor> actors;
+		std::uint32_t clearedStates = 0;
 		std::uint32_t skippedFirstPerson = 0;
-		std::uint32_t skippedEmpty = 0;
-		std::uint32_t queuedPending = 0;
 		for (auto& actorState : prototypeActors_) {
 			if (actorState.firstPerson) {
 				++skippedFirstPerson;
-				continue;
-			}
-			if (actorState.armorRecords.empty()) {
-				++skippedEmpty;
 				continue;
 			}
 
@@ -62,30 +63,44 @@ namespace Smp
 				continue;
 			}
 
-			auto records = actorState.armorRecords;
-			PendingActorRebuild pending{
-				.actorHandle = actorState.actorHandle,
-				.firstPerson = actorState.firstPerson,
-				.armorRecords = std::move(records),
-			};
-			if (RebuildPendingArmorRecordsLocked(actor, pending)) {
-				++reloadedStates;
-			} else if (!pending.armorRecords.empty()) {
-				MarkPendingActorRebuildLocked(actor, actorState.firstPerson, std::move(pending.armorRecords));
-				++queuedPending;
+			auto actorReload = std::ranges::find_if(actors, [actor](const CustomizationReloadActor& a_entry) {
+				return a_entry.actor == actor;
+			});
+			if (actorReload == actors.end()) {
+				actors.push_back({ .actor = actor });
+				actorReload = std::prev(actors.end());
 			}
+			std::vector<PrototypeArmorRecord> stateArmorRecords;
+			for (auto record : actorState.armorRecords) {
+				record.buildGroups.clear();
+				record.cpuCopyRetryCount = 0;
+				MergePrototypeArmorRecord(actorReload->armorRecords, record);
+				MergePrototypeArmorRecord(stateArmorRecords, std::move(record));
+			}
+			ClearPrototypeStateLocked(actorState);
+			actorState.armorRecords = std::move(stateArmorRecords);
+			actorState.faceNode = nullptr;
+			++clearedStates;
 		}
 
 		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.actor && !a_state.HasRuntime() && a_state.armorRecords.empty();
+			return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
 		});
+		for (auto& actorReload : actors) {
+			MarkPendingActorRebuildLocked(actorReload.actor, false, std::move(actorReload.armorRecords), true, true, true);
+			MarkPendingHeadRebuildLocked(LifecycleEvent{
+				.type = LifecycleEventType::kActorHeadInitialized,
+				.actor = actorReload.actor,
+				.object = actorReload.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(actorReload.actor->GetFaceNodeSkinned()) : nullptr,
+				.firstPerson = false,
+			});
+		}
 		ResetStepClockLocked();
 		spdlog::debug(
-			"reloaded prototype physics after character customization; reloadedStates={} queuedPending={} skippedFirstPerson={} skippedEmpty={}",
-			reloadedStates,
-			queuedPending,
-			skippedFirstPerson,
-			skippedEmpty);
+			"queued full prototype physics reload after character customization; actors={} clearedStates={} skippedFirstPerson={}",
+			actors.size(),
+			clearedStates,
+			skippedFirstPerson);
 	}
 
 	void Fo4PhysicsWorld::SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state)
@@ -510,19 +525,13 @@ namespace Smp
 		return buildGroups;
 	}
 
-	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsForPhysicsXmlLocked(
+	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsLocked(
 		const PrototypeActorState& a_state,
-		const std::string_view a_physicsXmlPath,
 		std::vector<std::uint64_t>& a_buildGroups) const
 	{
-		if (a_physicsXmlPath.empty()) {
-			return 0;
-		}
-
-		const auto normalizedXml = ConfigPaths::LowerString(std::string(a_physicsXmlPath));
 		std::uint32_t matchedRecords = 0;
 		for (const auto& record : a_state.headPartRecords) {
-			if (record.buildGroup == 0 || record.physicsXmlPath.empty() || ConfigPaths::LowerString(record.physicsXmlPath) != normalizedXml) {
+			if (record.buildGroup == 0) {
 				continue;
 			}
 
@@ -531,25 +540,71 @@ namespace Smp
 				a_buildGroups.push_back(record.buildGroup);
 			}
 		}
-
 		return matchedRecords;
 	}
 
-	bool Fo4PhysicsWorld::HasHairSlotArmorForPhysicsXmlLocked(const PrototypeActorState& a_state, const std::string_view a_physicsXmlPath) const
+	bool Fo4PhysicsWorld::HasActiveHairSlotArmorLocked(const PrototypeActorState& a_state) const
 	{
-		if (a_physicsXmlPath.empty()) {
+		if (std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				return IsHairBipedObject(a_record.bipedObject) &&
+					std::ranges::any_of(a_record.buildGroups, [&](const std::uint64_t a_buildGroup) {
+						return PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup) || PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
+					});
+			})) {
+			return true;
+		}
+		return std::ranges::any_of(a_state.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
+			return a_runtime.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
+		});
+	}
+
+	bool Fo4PhysicsWorld::PrototypeBuildGroupsIncludeHairSlotArmorLocked(
+		const PrototypeActorState& a_state,
+		const std::span<const std::uint64_t> a_buildGroups) const
+	{
+		if (a_buildGroups.empty()) {
 			return false;
 		}
 
-		const auto normalizedXml = ConfigPaths::LowerString(std::string(a_physicsXmlPath));
-		return std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
-			if (!IsHairBipedObject(a_record.bipedObject) || a_record.physicsXmlPath.empty() || ConfigPaths::LowerString(a_record.physicsXmlPath) != normalizedXml) {
+		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
+			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
+		};
+
+		if (std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
+			})) {
+			return true;
+		}
+		if (std::ranges::any_of(a_state.attachmentRecords, [&](const PrototypeAttachmentRecord& a_record) {
+				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
+			})) {
+			return true;
+		}
+		if (std::ranges::any_of(a_state.runtimes, [&](const PrototypeBuildGroupRuntime& a_runtime) {
+				return containsGroup(a_runtime.buildGroup) && a_runtime.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
+			})) {
+			return true;
+		}
+		if (std::ranges::any_of(a_state.meshes, [&](const PrototypeMesh& a_mesh) {
+				return containsGroup(a_mesh.buildGroup) && a_mesh.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_mesh.bipedObject);
+			})) {
+			return true;
+		}
+		return std::ranges::any_of(a_state.bodies, [&](const PrototypeBody& a_body) {
+			if (!a_body.buildGroupDomains.empty() || !a_body.buildGroupBipedObjects.empty()) {
+				for (const auto& [buildGroup, domain] : a_body.buildGroupDomains) {
+					if (containsGroup(buildGroup) && domain == PrototypeBuildDomain::kArmor) {
+						const auto biped = std::ranges::find_if(a_body.buildGroupBipedObjects, [buildGroup](const auto& a_entry) {
+							return a_entry.first == buildGroup;
+						});
+						if (biped != a_body.buildGroupBipedObjects.end() && IsHairBipedObject(biped->second)) {
+							return true;
+						}
+					}
+				}
 				return false;
 			}
-
-			return std::ranges::any_of(a_record.buildGroups, [&](const std::uint64_t a_buildGroup) {
-				return PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup) || PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
-			});
+			return containsGroup(a_body.buildGroup) && IsHairBipedObject(a_body.bipedObject);
 		});
 	}
 

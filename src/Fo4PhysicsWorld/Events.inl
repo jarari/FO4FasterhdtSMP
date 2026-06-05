@@ -64,13 +64,19 @@ namespace Smp
 
 			bool cleared = false;
 			const auto bipedObject = ResolveEventBipedObject(a_event);
+			bool clearedHairSlotArmor = IsHairBipedObject(bipedObject);
 			if (a_event.object) {
-				cleared = ClearPrototypeGroupsForObjectLocked(*actorState, a_event.object);
+				auto buildGroups = CollectPrototypeGroupsForObjectLocked(*actorState, a_event.object);
+				clearedHairSlotArmor = clearedHairSlotArmor || PrototypeBuildGroupsIncludeHairSlotArmorLocked(*actorState, buildGroups);
+				if (!buildGroups.empty()) {
+					ClearPrototypeGroupsLocked(*actorState, buildGroups);
+					cleared = true;
+				}
 			}
 			if (!cleared && bipedObject != RE::BIPED_OBJECT::kTotal) {
 				cleared = ClearPrototypeGroupsForBipedObjectLocked(*actorState, bipedObject);
 			}
-			if (cleared && IsHairBipedObject(bipedObject)) {
+			if (cleared && clearedHairSlotArmor) {
 				MarkPendingHeadRebuildLocked(LifecycleEvent{
 					.type = LifecycleEventType::kActorHeadInitialized,
 					.actor = a_event.actor,
@@ -207,26 +213,6 @@ namespace Smp
 			}
 			if (characterCustomizationMenuDepth_ == 0) {
 				ReloadPrototypeStatesForCustomizationMenuLocked();
-				std::vector<RE::Actor*> actors;
-				for (const auto& actorState : prototypeActors_) {
-					if (actorState.actor && std::ranges::find(actors, actorState.actor) == actors.end()) {
-						actors.push_back(actorState.actor);
-					}
-				}
-				for (auto& actorState : prototypeActors_) {
-					if (actorState.actor) {
-						ClearHeadPrototypeTrackingLocked(actorState, "customization-menu-closed");
-						actorState.faceNode = nullptr;
-					}
-				}
-				for (auto* actor : actors) {
-					MarkPendingHeadRebuildLocked(LifecycleEvent{
-						.type = LifecycleEventType::kActorHeadInitialized,
-						.actor = actor,
-						.object = actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()) : nullptr,
-						.firstPerson = false,
-					});
-				}
 			}
 			ResetStepClockLocked();
 			spdlog::debug(

@@ -47,8 +47,9 @@
 		std::uint32_t RestoreSuspendedSkinSlotsLocked(PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups, std::span<const Fo4SkinnedMeshBone::ActiveSkinSlot> a_activeSlots = {});
 		std::uint32_t RestoreAllSuspendedSkinSlotsLocked(PrototypeActorState& a_state);
 		std::vector<std::uint64_t> CollectPrototypeGroupsForObjectLocked(const PrototypeActorState& a_state, RE::NiAVObject* a_object) const;
-		std::uint32_t CollectHeadPartGroupsForPhysicsXmlLocked(const PrototypeActorState& a_state, std::string_view a_physicsXmlPath, std::vector<std::uint64_t>& a_buildGroups) const;
-		bool HasHairSlotArmorForPhysicsXmlLocked(const PrototypeActorState& a_state, std::string_view a_physicsXmlPath) const;
+		std::uint32_t CollectHeadPartGroupsLocked(const PrototypeActorState& a_state, std::vector<std::uint64_t>& a_buildGroups) const;
+		bool HasActiveHairSlotArmorLocked(const PrototypeActorState& a_state) const;
+		bool PrototypeBuildGroupsIncludeHairSlotArmorLocked(const PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups) const;
 		bool ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object);
 		bool ClearPrototypeGroupsForBipedObjectLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject);
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
