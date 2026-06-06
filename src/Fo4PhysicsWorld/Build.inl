@@ -444,7 +444,7 @@ namespace Smp
 			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, constructionInfo);
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();
-			bone->m_marginMultipler = std::max(boneDescriptor.marginMultiplier, 0.0F);
+			bone->m_marginMultipler = boneDescriptor.marginMultiplier;
 			bone->m_gravityFactor = std::clamp(boneDescriptor.gravityFactor, 0.0F, 1.0F);
 			bone->m_windFactor = std::max(boneDescriptor.windFactor, 0.0F);
 			for (const auto& boneName : boneDescriptor.canCollideWithBones) {
@@ -1002,7 +1002,7 @@ namespace Smp
 			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(a_decodedBone.name), a_decodedBone.node, constructionInfo);
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();
-			bone->m_marginMultipler = std::max(fallbackDescriptor.marginMultiplier, 0.0F);
+			bone->m_marginMultipler = fallbackDescriptor.marginMultiplier;
 			bone->m_gravityFactor = std::clamp(fallbackDescriptor.gravityFactor, 0.0F, 1.0F);
 			bone->m_windFactor = std::max(fallbackDescriptor.windFactor, 0.0F);
 			bone->m_rig.setDamping(std::max(fallbackDescriptor.linearDamping, 0.0F), std::max(fallbackDescriptor.angularDamping, 0.0F));
@@ -1230,10 +1230,10 @@ namespace Smp
 			if (meshDescriptor && meshDescriptor->kind == PhysicsMeshShapeKind::kPerTriangle && decodedMesh.indices.size() >= 3) {
 				auto* shape = new hdt::PerTriangleShape(meshBody.get());
 				if (meshDescriptor->hasMargin) {
-					shape->shapeProp_.margin = std::max(meshDescriptor->margin, 0.0F);
+					shape->shapeProp_.margin = meshDescriptor->margin;
 				}
 				if (meshDescriptor->hasPenetration) {
-					shape->shapeProp_.penetration = std::max(meshDescriptor->penetration, 0.0F);
+					shape->shapeProp_.penetration = meshDescriptor->penetration;
 				}
 				for (std::size_t index = 0; index + 2 < decodedMesh.indices.size(); index += 3) {
 					if (decodedMesh.indices[index] >= decodedMesh.vertices.size() ||
@@ -1250,7 +1250,7 @@ namespace Smp
 			} else {
 				auto* shape = new hdt::PerVertexShape(meshBody.get());
 				if (meshDescriptor && meshDescriptor->hasMargin) {
-					shape->shapeProp_.margin = std::max(meshDescriptor->margin, 0.0F);
+					shape->shapeProp_.margin = meshDescriptor->margin;
 				}
 				shape->autoGen();
 			}
