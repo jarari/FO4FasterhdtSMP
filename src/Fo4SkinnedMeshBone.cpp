@@ -2,16 +2,10 @@
 
 #include "Fo4TransformConversion.h"
 
-#include <cmath>
-
 namespace
 {
 	constexpr float kResetPhysicsTimeStep = 0.0F;
 	constexpr float kSkinBindScale = 1.0F;
-	bool  g_clampRotations = true;
-	float g_rotationSpeedLimit = 10.0F;
-	bool  g_unclampedResets = true;
-	float g_unclampedResetAngle = 130.0F;
 
 	void ResetRigidBody(btRigidBody& a_body, const btTransform& a_transform)
 	{
@@ -48,20 +42,6 @@ namespace
 		transform.scale = kSkinBindScale;
 		a_skin->paletteStamp = 0;
 	}
-
-	float RotationDeltaAngle(const btTransform& a_current, const btTransform& a_destination)
-	{
-		auto currentRotation = a_current.getRotation();
-		auto destinationRotation = a_destination.getRotation();
-		if (currentRotation.length2() <= FLT_EPSILON || destinationRotation.length2() <= FLT_EPSILON) {
-			return 0.0F;
-		}
-
-		currentRotation.normalize();
-		destinationRotation.normalize();
-		return currentRotation.angleShortestPath(destinationRotation);
-	}
-
 }
 
 namespace Smp
@@ -79,18 +59,6 @@ namespace Smp
 		for (auto* node = a_node; node; node = node->parent) {
 			++depth_;
 		}
-	}
-
-	void Fo4SkinnedMeshBone::ApplyStabilityConfig(
-		const bool a_clampRotations,
-		const float a_rotationSpeedLimit,
-		const bool a_unclampedResets,
-		const float a_unclampedResetAngle)
-	{
-		g_clampRotations = a_clampRotations;
-		g_rotationSpeedLimit = std::max(a_rotationSpeedLimit, 0.0F);
-		g_unclampedResets = a_unclampedResets;
-		g_unclampedResetAngle = std::max(a_unclampedResetAngle, 0.0F);
 	}
 
 	void Fo4SkinnedMeshBone::AddSkinWorldTransform(
@@ -346,13 +314,6 @@ namespace Smp
 			btVector3 linearVelocity;
 			btVector3 angularVelocity;
 			btTransformUtil::calculateVelocity(current, destination, a_timeStep, linearVelocity, angularVelocity);
-			const auto angularSpeed = angularVelocity.length();
-			if (g_clampRotations && g_rotationSpeedLimit > 0.0F && angularSpeed > g_rotationSpeedLimit) {
-				angularVelocity *= g_rotationSpeedLimit / angularSpeed;
-			} else if (!g_clampRotations && g_unclampedResets && g_unclampedResetAngle > 0.0F && RotationDeltaAngle(current, destination) > btRadians(g_unclampedResetAngle)) {
-				ResetRigidBody(m_rig, destination);
-				return;
-			}
 			m_rig.setLinearVelocity(linearVelocity);
 			m_rig.setAngularVelocity(angularVelocity);
 			m_rig.setInterpolationLinearVelocity(linearVelocity);

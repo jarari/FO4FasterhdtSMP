@@ -1277,15 +1277,18 @@ namespace Smp
 		spdlog::debug("loading menu resume reset {} prototype physics bodies to current node poses", resetBodies);
 	}
 
-	float Fo4PhysicsWorld::PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep)
+	Fo4PhysicsWorld::PrototypeReadPreparation Fo4PhysicsWorld::PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep)
 	{
+		PrototypeReadPreparation preparation{
+			.timeStep = a_timeStep,
+		};
 		auto* actorRoot = a_state.actor ? a_state.actor->Get3D(a_state.firstPerson) : nullptr;
 		if (!actorRoot && a_state.actor && !a_state.firstPerson) {
 			actorRoot = a_state.actor->Get3D();
 		}
 		auto* skeletonRoot = actorRoot ? actorRoot->IsNode() : nullptr;
 		if (!skeletonRoot) {
-			return a_timeStep;
+			return preparation;
 		}
 
 		auto* topRoot = static_cast<RE::NiAVObject*>(skeletonRoot);
@@ -1295,10 +1298,12 @@ namespace Smp
 
 		if (a_state.lastReadRoot && a_state.lastReadRoot.get() != topRoot) {
 			a_timeStep = 0.0F;
+			preparation.timeStep = a_timeStep;
 			a_state.lastRootRotationInitialized = false;
 		}
 		if (!a_state.readInitialized) {
 			a_timeStep = 0.0F;
+			preparation.timeStep = a_timeStep;
 			a_state.readInitialized = true;
 			a_state.lastRootRotationInitialized = false;
 		}
@@ -1313,7 +1318,8 @@ namespace Smp
 			}
 			a_state.lastRootRotationInitialized = true;
 			a_state.lastReadRoot = topRoot;
-			return 0.0F;
+			preparation.timeStep = 0.0F;
+			return preparation;
 		}
 
 		auto newRootRotation = Fo4Transform::ToBulletTransform(skeletonRoot->world).getRotation();
@@ -1325,35 +1331,28 @@ namespace Smp
 		if (!a_state.lastRootRotationInitialized || a_state.lastRootRotation.length2() <= FLT_EPSILON) {
 			a_state.lastRootRotation = newRootRotation;
 			a_state.lastRootRotationInitialized = true;
+		} else if (a_state.firstPerson) {
+			a_state.lastRootRotation = newRootRotation;
 		} else {
 			btVector3 rotationAxis;
 			btScalar rotationAngle = 0.0F;
 			btTransformUtil::calculateDiffAxisAngleQuaternion(a_state.lastRootRotation, newRootRotation, rotationAxis, rotationAngle);
-			if (clampRotations_ && rotationSpeedLimit_ > 0.0F) {
+			if (clampRotations_) {
 				const auto limit = rotationSpeedLimit_ * a_timeStep;
 				if (rotationAngle < -limit || rotationAngle > limit) {
 					rotationAngle = btClamped(rotationAngle, -limit, limit);
-					auto clampedRotation = btQuaternion(rotationAxis, rotationAngle) * a_state.lastRootRotation;
-					clampedRotation.normalize();
-					auto clampedWorld = skeletonRoot->world;
-					clampedWorld.rotate = Fo4Transform::ToNiTransform(btTransform(clampedRotation), skeletonRoot->world.scale).rotate;
-					clampedWorld.translate = skeletonRoot->world.translate;
-					skeletonRoot->world = clampedWorld;
-					if (skeletonRoot->parent) {
-						skeletonRoot->local = skeletonRoot->parent->world.Invert() * skeletonRoot->world;
-					} else {
-						skeletonRoot->local = skeletonRoot->world;
-					}
+					a_state.lastRootRotation = btQuaternion(rotationAxis, rotationAngle) * a_state.lastRootRotation;
+					a_state.lastRootRotation.normalize();
+					preparation.restoreRoot = skeletonRoot;
+					preparation.restoreWorld = skeletonRoot->world;
+					skeletonRoot->world.rotate = Fo4Transform::ToNiTransform(btTransform(a_state.lastRootRotation), skeletonRoot->world.scale).rotate;
 					for (auto& child : skeletonRoot->children) {
 						if (child) {
 							UpdateTransformUpDown(child.get(), true);
 						}
 					}
-					a_state.lastRootRotation = clampedRotation;
-				} else {
-					a_state.lastRootRotation = newRootRotation;
 				}
-			} else if (unclampedResets_ && unclampedResetAngle_ > 0.0F) {
+			} else if (unclampedResets_) {
 				const auto limit = unclampedResetAngle_ * a_timeStep;
 				if (rotationAngle < -limit || rotationAngle > limit) {
 					UpdateTransformUpDown(skeletonRoot, true);
@@ -1364,16 +1363,15 @@ namespace Smp
 						a_state.lastRootRotation.normalize();
 					}
 					a_state.lastReadRoot = topRoot;
-					return 0.0F;
+					preparation.timeStep = 0.0F;
+					return preparation;
 				}
-				a_state.lastRootRotation = newRootRotation;
-			} else {
-				a_state.lastRootRotation = newRootRotation;
 			}
 		}
 
 		a_state.lastReadRoot = topRoot;
-		return a_timeStep;
+		preparation.timeStep = a_timeStep;
+		return preparation;
 	}
 
 	bool Fo4PhysicsWorld::PrototypeBuildGroupHasMeshLocked(const PrototypeActorState& a_state, const std::uint64_t a_buildGroup) const

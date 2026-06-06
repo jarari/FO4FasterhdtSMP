@@ -112,6 +112,13 @@
 			bool pendingResetPhysicsRead{ false };
 		};
 
+		struct PrototypeReadPreparation
+		{
+			float timeStep{ 0.0F };
+			RE::NiNode* restoreRoot{ nullptr };
+			RE::NiTransform restoreWorld{ RE::NiTransform::IDENTITY };
+		};
+
 		struct PrototypeActorState
 		{
 			PrototypeActorState() = default;

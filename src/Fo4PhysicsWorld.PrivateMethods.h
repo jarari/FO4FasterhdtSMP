@@ -63,7 +63,7 @@
 		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, bool a_detachMergedNodes = true);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
-		float PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);
+		PrototypeReadPreparation PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);
 		bool PrototypeBuildGroupHasMeshLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
 		bool PrototypeBuildGroupHasBodyLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup) const;
 		bool PrototypeBuildGroupIsRecordableLocked(const PrototypeActorState& a_state, std::uint64_t a_buildGroup, PrototypeBuildDomain a_domain, RE::BIPED_OBJECT a_bipedObject = RE::BIPED_OBJECT::kTotal) const;

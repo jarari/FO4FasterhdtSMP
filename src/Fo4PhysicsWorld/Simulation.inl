@@ -76,6 +76,8 @@ namespace Smp
 		{
 			PrototypeActorState* actorState{ nullptr };
 			float readDelta{ 0.0F };
+			RE::NiNode* restoreRoot{ nullptr };
+			RE::NiTransform restoreWorld{ RE::NiTransform::IDENTITY };
 		};
 		const auto processReadTask = [this](const ActorReadTask& a_task) {
 			auto& actorState = *a_task.actorState;
@@ -124,12 +126,27 @@ namespace Smp
 					PrototypeDomainName(runtime.domain),
 					std::to_underlying(runtime.bipedObject));
 			}
-			const auto readDelta = PreparePrototypeActorForReadLocked(actorState, a_deltaSeconds);
-			readTasks.push_back({ std::addressof(actorState), readDelta });
+			const auto preparation = PreparePrototypeActorForReadLocked(actorState, a_deltaSeconds);
+			readTasks.push_back({
+				.actorState = std::addressof(actorState),
+				.readDelta = preparation.timeStep,
+				.restoreRoot = preparation.restoreRoot,
+				.restoreWorld = preparation.restoreWorld,
+			});
 		}
 		tbb::parallel_for(std::size_t{ 0 }, readTasks.size(), [&](const std::size_t a_index) {
 			processReadTask(readTasks[a_index]);
 		});
+		for (const auto& readTask : readTasks) {
+			if (readTask.restoreRoot) {
+				readTask.restoreRoot->world = readTask.restoreWorld;
+				for (auto& child : readTask.restoreRoot->children) {
+					if (child) {
+						UpdateTransformUpDown(child.get(), true);
+					}
+				}
+			}
+		}
 		const auto readMs = ElapsedMs(phaseStart, Clock::now());
 
 		phaseStart = Clock::now();

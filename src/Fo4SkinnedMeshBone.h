@@ -14,8 +14,6 @@ namespace Smp
 	public:
 		Fo4SkinnedMeshBone(const RE::BSFixedString& a_name, RE::NiNode* a_node, btRigidBody::btRigidBodyConstructionInfo& a_constructionInfo);
 
-		static void ApplyStabilityConfig(bool a_clampRotations, float a_rotationSpeedLimit, bool a_unclampedResets, float a_unclampedResetAngle);
-
 		struct ActiveSkinSlot
 		{
 			RE::BSSkin::Instance* skin{ nullptr };

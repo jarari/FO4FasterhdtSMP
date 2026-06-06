@@ -213,6 +213,10 @@ namespace Smp
 		spdlog::debug("config: solver.min-fps = {}", settings_.solver.minFps);
 		spdlog::debug("config: solver.maxSubSteps = {}", settings_.solver.maxSubSteps);
 		spdlog::debug("config: smp.logLevel = {}", settings_.smp.logLevel);
+		spdlog::debug("config: smp.clampRotations = {}", settings_.smp.clampRotations);
+		spdlog::debug("config: smp.rotationSpeedLimit = {}", settings_.smp.rotationSpeedLimit);
+		spdlog::debug("config: smp.unclampedResets = {}", settings_.smp.unclampedResets);
+		spdlog::debug("config: smp.unclampedResetAngle = {}", settings_.smp.unclampedResetAngle);
 		spdlog::debug("config: smp.budgetMs = {}", settings_.smp.budgetMs);
 		spdlog::debug("config: smp.useRealTime = {}", settings_.smp.useRealTime);
 		spdlog::debug("config: smp.sampleSize = {}", settings_.smp.sampleSize);
