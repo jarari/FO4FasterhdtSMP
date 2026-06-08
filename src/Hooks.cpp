@@ -230,6 +230,35 @@ namespace Hooks
 		return nullptr;
 	}
 
+	RE::NiNode* FindActorSkeletonDescendantNode(RE::NiNode* a_expectedParent, const std::string_view a_name)
+	{
+		if (!a_expectedParent || a_name.empty()) {
+			return nullptr;
+		}
+
+		for (auto& child : a_expectedParent->children) {
+			auto* object = child.get();
+			if (!object) {
+				continue;
+			}
+
+			const auto name = object->GetName();
+			if (!name.empty() && !Smp::IsAutoRenamedPhysicsName(name) && Smp::PhysicsNamesEqual(name, a_name)) {
+				return object->IsNode();
+			}
+
+			auto* node = object->IsNode();
+			if (!node || (!name.empty() && Smp::IsAutoRenamedPhysicsName(name))) {
+				continue;
+			}
+
+			if (auto* found = FindActorSkeletonDescendantNode(node, a_name)) {
+				return found;
+			}
+		}
+		return nullptr;
+	}
+
 	std::string MakeArmorMergePrefix()
 	{
 		char buffer[48]{};
@@ -382,7 +411,19 @@ namespace Hooks
 				continue;
 			}
 
-			if (auto* destinationChild = FindTrustedActorSkeletonNode(a_trustedActorSkeletonNodes, childName)) {
+			auto* destinationChild = FindTrustedActorSkeletonNode(a_trustedActorSkeletonNodes, childName);
+			if (!destinationChild) {
+				destinationChild = FindActorSkeletonDescendantNode(a_destination, childName);
+				if (destinationChild) {
+					spdlog::debug(
+						"using actor skeleton descendant '{}' node={} under expected parent={} parentName='{}' during armor skeleton merge",
+						childName,
+						static_cast<void*>(destinationChild),
+						static_cast<void*>(a_destination),
+						std::string_view(a_destination->GetName()));
+				}
+			}
+			if (destinationChild) {
 				DoSkeletonMerge(destinationChild, sourceChild, a_prefix, a_map, a_destinationRoot, a_trustedActorSkeletonNodes, a_renameSource);
 			} else if (auto* clone = CloneNodeTree(sourceChild, a_prefix, a_map, a_renameSource)) {
 				a_destination->AttachChild(clone, false);
