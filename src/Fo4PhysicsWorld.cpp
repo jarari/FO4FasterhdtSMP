@@ -1256,6 +1256,7 @@ namespace
 		std::string name;
 		bool resolvedFromSkeleton{ false };
 		bool useActorKinematicBody{ false };
+		bool meshOnlySkinBoneCandidate{ false };
 		std::vector<SkinWorldTransformSlot> skinWorldTransforms;
 	};
 
@@ -2023,6 +2024,10 @@ namespace
 				const auto matchedName = Smp::FindMatchingPhysicsName(a_boneNames, name);
 				if (!name.empty() && (includeAllSkinBones || includeAllWhenUnfiltered || matchedName)) {
 					if (auto* existing = FindMatchedSkinBone(a_result, bone)) {
+						if (matchedName) {
+							existing->name = std::string(*matchedName);
+							existing->meshOnlySkinBoneCandidate = false;
+						}
 						AddSkinWorldTransformSlot(*existing, skin, index);
 						continue;
 					}
@@ -2031,6 +2036,7 @@ namespace
 						.node = bone,
 						.sourceNode = bone,
 						.name = matchedName ? std::string(*matchedName) : std::string(name),
+						.meshOnlySkinBoneCandidate = !matchedName && includeAllSkinBones,
 					});
 					AddSkinWorldTransformSlot(matchedBone, skin, index);
 				}
@@ -3089,6 +3095,7 @@ namespace
 				existingByNode->name = boneName;
 				existingByNode->resolvedFromSkeleton = true;
 				existingByNode->useActorKinematicBody = !resolvedFromMergedNode;
+				existingByNode->meshOnlySkinBoneCandidate = false;
 				continue;
 			}
 
@@ -3108,6 +3115,7 @@ namespace
 				existingByName->name = boneName;
 				existingByName->resolvedFromSkeleton = true;
 				existingByName->useActorKinematicBody = !resolvedFromMergedNode;
+				existingByName->meshOnlySkinBoneCandidate = false;
 				continue;
 			}
 

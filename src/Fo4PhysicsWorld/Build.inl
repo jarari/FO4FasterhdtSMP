@@ -411,6 +411,17 @@ namespace Smp
 				continue;
 			}
 
+			if (a_domain == PrototypeBuildDomain::kArmor && matchedBone.meshOnlySkinBoneCandidate) {
+				spdlog::debug(
+					"deferring armor mesh-only skin bone '{}' actor={} node={} nodeName='{}' buildGroup={} to mesh deformer fallback",
+					matchedBone.name,
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(matchedBone.node),
+					matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{},
+					buildGroup);
+				continue;
+			}
+
 			if (a_domain != PrototypeBuildDomain::kArmor) {
 				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const PrototypeBody& a_body) {
 					return a_body.node == matchedBone.node && a_body.bone;
@@ -975,13 +986,73 @@ namespace Smp
 			}
 			return std::ranges::find(a_mergedSkeletonNodes, static_cast<RE::NiAVObject*>(a_node)) != a_mergedSkeletonNodes.end();
 		};
-		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> PrototypeBody* {
-			if (!a_decodedBone.node || a_decodedBone.name.empty()) {
+		auto* fallbackActorRoot = ResolveSkeletonSearchRoot(a_event);
+		const auto fallbackActorSearchExclusions = BuildBipedPartCloneExclusions(a_event);
+		const auto fallbackKnownArmorNodes = BuildKnownArmorNodeSet(a_event);
+		const auto fallbackLookupMode =
+			a_domain == PrototypeBuildDomain::kArmor && !a_trustedActorSkeletonNodes.empty() ?
+				ActorSkeletonLookupMode::kAuthoritativeOnly :
+				ActorSkeletonLookupMode::kPermissiveNonArmor;
+		auto findMergedFallbackSkinNode = [&](const std::string& a_sourceName) -> RE::NiNode* {
+			if (a_sourceName.empty()) {
 				return nullptr;
 			}
-			if (!isAllowedArmorFallbackSkinBone(a_decodedBone.node)) {
+
+			auto renamedName = std::string_view{};
+			const auto rename = std::ranges::find_if(a_event.mergeRenameMap, [&a_sourceName](const MergeRename& a_entry) {
+				return PhysicsNamesEqual(a_entry.sourceName, a_sourceName);
+			});
+			if (rename != a_event.mergeRenameMap.end()) {
+				renamedName = rename->renamedName;
+			}
+
+			for (auto* object : a_mergedSkeletonNodes) {
+				auto* node = object ? object->IsNode() : nullptr;
+				if (!node) {
+					continue;
+				}
+				const auto nodeName = node->GetName();
+				if ((!renamedName.empty() && PhysicsNamesEqual(nodeName, renamedName)) || PhysicsNamesEqual(nodeName, a_sourceName)) {
+					return node;
+				}
+			}
+			return nullptr;
+		};
+		auto findActorFallbackSkinNode = [&](const std::string& a_name) -> RE::NiNode* {
+			if (a_name.empty()) {
+				return nullptr;
+			}
+
+			for (auto* object : a_trustedActorSkeletonNodes) {
+				auto* node = object ? object->IsNode() : nullptr;
+				if (node && PhysicsNamesEqual(node->GetName(), a_name)) {
+					return node;
+				}
+			}
+			auto* node = FindNodeByNameExcludingKnownNodes(
+				fallbackActorRoot,
+				a_name,
+				fallbackActorSearchExclusions,
+				fallbackKnownArmorNodes);
+			return IsActorSkeletonCandidate(node, a_trustedActorSkeletonNodes, fallbackLookupMode) ? node : nullptr;
+		};
+		auto resolveFallbackSkinNode = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone) -> RE::NiNode* {
+			if (isAllowedArmorFallbackSkinBone(a_decodedBone.node)) {
+				return a_decodedBone.node;
+			}
+			if (auto* mergedNode = findMergedFallbackSkinNode(a_decodedBone.name)) {
+				return mergedNode;
+			}
+			return findActorFallbackSkinNode(a_decodedBone.name);
+		};
+		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> PrototypeBody* {
+			if (a_decodedBone.name.empty()) {
+				return nullptr;
+			}
+			auto* fallbackNode = resolveFallbackSkinNode(a_decodedBone);
+			if (!fallbackNode) {
 				spdlog::debug(
-					"skipping fallback kinematic skin bone for armor mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because node is not a trusted actor skeleton node or plugin-owned merged clone",
+					"skipping fallback kinematic skin bone for armor mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because no trusted actor skeleton node or plugin-owned merged clone was resolved",
 					a_meshName,
 					static_cast<void*>(a_event.actor),
 					a_decodedBone.name,
@@ -991,31 +1062,25 @@ namespace Smp
 				return nullptr;
 			}
 
-			auto fallbackDescriptor = a_summary.defaultBoneDescriptor.value_or(PhysicsBoneDescriptor{});
-			fallbackDescriptor.name = a_decodedBone.name;
-			auto shape = CreateCollisionShape(fallbackDescriptor);
+			auto shape = std::make_unique<btEmptyShape>();
 			btVector3 localInertia(0.0F, 0.0F, 0.0F);
-			const auto localToRig = ToBulletTransform(fallbackDescriptor.centerOfMassTransform);
-			const auto& initialWorld = a_decodedBone.node->world;
+			const auto localToRig = btTransform::getIdentity();
+			const auto& initialWorld = fallbackNode->world;
 			auto motionState = std::make_unique<btDefaultMotionState>(Smp::Fo4Transform::ToBulletTransform(initialWorld) * localToRig);
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(0.0F, motionState.get(), shape.get(), localInertia);
-			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(a_decodedBone.name), a_decodedBone.node, constructionInfo);
+			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(a_decodedBone.name), fallbackNode, constructionInfo);
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();
-			bone->m_marginMultipler = fallbackDescriptor.marginMultiplier;
-			bone->m_gravityFactor = std::clamp(fallbackDescriptor.gravityFactor, 0.0F, 1.0F);
-			bone->m_windFactor = std::max(fallbackDescriptor.windFactor, 0.0F);
-			bone->m_rig.setDamping(std::max(fallbackDescriptor.linearDamping, 0.0F), std::max(fallbackDescriptor.angularDamping, 0.0F));
-			bone->m_rig.setFriction(std::max(fallbackDescriptor.friction, 0.0F));
-			bone->m_rig.setRollingFriction(std::max(fallbackDescriptor.rollingFriction, 0.0F));
-			bone->m_rig.setRestitution(std::max(fallbackDescriptor.restitution, 0.0F));
+			bone->m_marginMultipler = 1.0F;
+			bone->m_gravityFactor = 0.0F;
+			bone->m_windFactor = 0.0F;
 			bone->m_rig.setGravity(btVector3(0.0F, 0.0F, kGravityAcceleration * bone->m_gravityFactor));
 			bone->readTransform(0.0F);
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 
 			PrototypeBody prototypeBody;
 			prototypeBody.actor = a_event.actor;
-			prototypeBody.node = a_decodedBone.node;
+			prototypeBody.node = fallbackNode;
 			prototypeBody.buildGroup = a_buildGroup;
 			prototypeBody.bipedObject = a_event.bipedObject;
 			AddPrototypeBodyBuildGroup(prototypeBody, a_buildGroup, a_domain, a_event.bipedObject);
@@ -1023,13 +1088,16 @@ namespace Smp
 			prototypeBody.shape = std::move(shape);
 			prototypeBody.motionState = std::move(motionState);
 			prototypeBody.bone = std::move(bone);
+			prototypeBody.meshOnlySkinBone = true;
 			a_stagedBodies.push_back(std::move(prototypeBody));
 			++createdFallbackSkinBones;
 			spdlog::debug(
-				"created fallback kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because weighted skin bone was not resolved through XML bodies",
+				"created mesh-only kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' rawNode={} rawNodeName='{}' buildGroup={} because weighted skin bone was not resolved through XML bodies",
 				a_meshName,
 				static_cast<void*>(a_event.actor),
 				a_decodedBone.name,
+				static_cast<void*>(fallbackNode),
+				std::string_view(fallbackNode->GetName()),
 				static_cast<void*>(a_decodedBone.node),
 				a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
 				a_buildGroup);
@@ -1123,7 +1191,7 @@ namespace Smp
 						if (!matchedBody || !matchedBody->bone) {
 							++skippedMissingBones;
 							spdlog::warn(
-								"mesh '{}' could not create fallback Bullet body for weighted skin bone '{}' node={} because no usable NiNode was decoded",
+								"mesh '{}' could not create mesh-only fallback body for weighted skin bone '{}' node={} because no trusted actor skeleton node or plugin-owned merged clone was resolved",
 								decodedMesh.name,
 								decodedBone.name,
 								static_cast<void*>(decodedBone.node));
@@ -1184,7 +1252,7 @@ namespace Smp
 							resolvedBody = std::addressof(*stagedBody);
 						}
 					}
-					if (resolvedBody && resolvedBody->bone) {
+					if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
 						meshBody->canCollideWithBones_.push_back(resolvedBody->bone.get());
 					} else {
 						++unresolvedCanCollideBones;
@@ -1204,7 +1272,7 @@ namespace Smp
 							resolvedBody = std::addressof(*stagedBody);
 						}
 					}
-					if (resolvedBody && resolvedBody->bone) {
+					if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
 						meshBody->noCollideWithBones_.push_back(resolvedBody->bone.get());
 					} else {
 						++unresolvedNoCollideBones;
@@ -1413,7 +1481,7 @@ namespace Smp
 		for (const auto& descriptor : a_summary.constraintDescriptors) {
 			const auto bodyA = findBodyForConstraint(descriptor.bodyA);
 			const auto bodyB = findBodyForConstraint(descriptor.bodyB);
-			if (!bodyA || !bodyB || !bodyA->bone || !bodyB->bone) {
+			if (!bodyA || !bodyB || !bodyA->bone || !bodyB->bone || bodyA->meshOnlySkinBone || bodyB->meshOnlySkinBone) {
 				++skippedMissingBodies;
 				spdlog::debug("skipping constraint '{}' because bodies '{}'/'{}' were not both resolved", descriptor.name, descriptor.bodyA, descriptor.bodyB);
 				continue;
