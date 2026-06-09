@@ -50,8 +50,6 @@ namespace Smp
 		suspendedActors_.clear();
 		pendingActorRebuilds_.clear();
 		pendingHeadRebuilds_.clear();
-		pendingRebuildTaskQueued_ = false;
-		nextPendingRebuildFrame_ = 1;
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
 		candidateEvents_ = 0;
@@ -177,9 +175,7 @@ namespace Smp
 				if (armorRecords.empty()) {
 					armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 				}
-				auto* biped = ResolveEventBiped(a_event);
-				const auto hasBiped = biped != nullptr;
-				if (!armorRecords.empty() || !hasBiped) {
+				if (!armorRecords.empty()) {
 					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords));
 					spdlog::debug(
 						"queued retry for {} actor={} firstPerson={} because initial generic actor build found no active runtime",
@@ -188,7 +184,7 @@ namespace Smp
 						a_event.firstPerson);
 				} else {
 					spdlog::debug(
-						"skipping pending retry for {} actor={} firstPerson={} because ready biped cache found no SMP armor records",
+						"skipping pending retry for {} actor={} firstPerson={} because no SMP armor records are tracked",
 						ToString(a_event.type),
 						static_cast<void*>(a_event.actor),
 						a_event.firstPerson);
@@ -475,9 +471,9 @@ namespace Smp
 			return;
 		}
 
-		const auto touchedHeadPart = a_event.type == LifecycleEventType::kHeadPrepareHeadPart;
-		const auto touchedObjectValid = !touchedHeadPart || !a_event.object || IsObjectInTree(faceObject, a_event.object);
-		if (touchedHeadPart && !touchedObjectValid) {
+		const auto touchedHeadGeometry = a_event.type == LifecycleEventType::kHeadSkinSingleGeometry;
+		const auto touchedObjectValid = !touchedHeadGeometry || !a_event.object || IsObjectInTree(faceObject, a_event.object);
+		if (touchedHeadGeometry && !touchedObjectValid) {
 			ClearHeadPrototypeTrackingLocked(actorState, "stale-touched-headpart");
 			spdlog::debug(
 				"discarded stale touched headpart object for actor={} object={} faceNode={}; rebuilding full current face node",
@@ -489,10 +485,10 @@ namespace Smp
 		const auto hairKeys = BuildHairHeadpartKeys(a_event.actor);
 		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
 		const auto headPartIsHair = a_event.headPart && a_event.headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
-		CollectHeadPhysicsXmlSelections(touchedHeadPart && touchedObjectValid && a_event.object ? a_event.object : faceObject, hairKeys, candidates, headPartIsHair);
+		CollectHeadPhysicsXmlSelections(touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject, hairKeys, candidates, headPartIsHair);
 		if (candidates.empty()) {
 			if (!actorState.headPartRecords.empty()) {
-				if (!touchedHeadPart) {
+				if (!touchedHeadGeometry) {
 					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
 					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
 					actorState.headPartRecords.clear();

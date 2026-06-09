@@ -7,6 +7,7 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		DrainQueuedLifecycleEvents();
+		ProcessPendingRebuilds();
 
 		auto delta = fixedStepSeconds_;
 		if (const auto timer = RE::BSTimer::GetSingleton()) {
@@ -64,10 +65,6 @@ namespace Smp
 		PruneInvalidPrototypeStatesLocked();
 		TryReactivateSuspendedActorsLocked();
 		TryReactivateSuspendedPrototypeStatesLocked();
-		if ((!pendingActorRebuilds_.empty() || !pendingHeadRebuilds_.empty()) && simulationFrame_ >= nextPendingRebuildFrame_) {
-			nextPendingRebuildFrame_ = simulationFrame_ + kPendingRebuildRetryIntervalFrames;
-			SchedulePendingRebuildTaskLocked();
-		}
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
@@ -743,8 +740,7 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		pendingRebuildTaskQueued_ = false;
-		if (characterCustomizationMenuDepth_ > 0) {
+		if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
 			return;
 		}
 

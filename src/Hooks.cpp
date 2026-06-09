@@ -2,7 +2,6 @@
 
 #include "ActorSkeletonBinding.h"
 #include "BSSkin.h"
-#include "ConfigPaths.h"
 #include "Fo4NiObjectUtils.h"
 #include "Fo4PhysicsWorld.h"
 #include "ImguiLayer.h"
@@ -11,9 +10,7 @@
 #include "PhysicsXmlSelection.h"
 #include "SmpConfig.h"
 #include "RE/B/BSAnimationGraphManager.h"
-#include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSGeometry.h"
-#include "RE/B/BSUtilities.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
@@ -24,7 +21,6 @@
 #include "RE/P/PlayerCharacter.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
-#include "RE/T/TESNPC.h"
 
 #if defined(_M_X64) && !defined(_AMD64_)
 #	define _AMD64_ 1
@@ -33,6 +29,7 @@
 #include <detours.h>
 
 #include <atomic>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 
@@ -47,7 +44,7 @@ namespace Hooks
 		REL::Relocation<std::uintptr_t> BipedAnimRemovePart{ REL::ID{ 575576, 2194342 } };
 		REL::Relocation<std::uintptr_t> Update3DModel{ REL::ID{ 986782, 2231882 } };
 		REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
-		REL::Relocation<std::uintptr_t> BSFaceGenPrepareHeadPart{ REL::ID{ 840416, 2209534 } };
+		REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ REL::ID{ 913780, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataGetBoneName{ REL::ID{ 190712, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenNiNodeFixSkinInstances{ REL::ID{ 399655, 0 } };
@@ -64,7 +61,8 @@ namespace Hooks
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
 	using Update3DModel_t = void (*)(void*, RE::Actor*, bool);
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
-	using PrepareHeadPart_t = void (*)(RE::BSFaceGenNiNode*, RE::BGSHeadPart*, const RE::TESNPC*, bool);
+	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
+	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
 	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
 
 	MainOnIdleUpdateHighActorsArraySorted_t OriginalMainOnIdleUpdateHighActorsArraySorted{ nullptr };
@@ -81,7 +79,8 @@ namespace Hooks
 	OnHeadInitialized_t            OriginalPlayerCharacterOnHeadInitialized{ nullptr };
 	Update3DModel_t                OriginalUpdate3DModel{ nullptr };
 	Reset3D_t                      OriginalReset3D{ nullptr };
-	PrepareHeadPart_t              OriginalPrepareHeadPart{ nullptr };
+	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
+	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
 
 	inline constexpr std::size_t kApplySkinnedObjectsPrologueSize = 14;
@@ -97,7 +96,8 @@ namespace Hooks
 	inline constexpr std::uintptr_t kGetBoneNameLimitImmediateOffsetOG = 0x6;
 	inline constexpr std::uintptr_t kFixSkinInstancesLimitImmediateOffsetOG = 0x91A;
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
-	inline constexpr bool kEnablePrepareHeadPartHook = true;
+	inline constexpr std::uintptr_t kAddHeadPartSkinSingleCallOffsetOG = 0xFD;
+	inline constexpr std::size_t kFaceGenSkinAllGeometryVFuncSlot = 0x43;
 
 	std::mutex               BackupNodeLock;
 	std::vector<std::string> BackupNodeNames;
@@ -105,14 +105,6 @@ namespace Hooks
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
 	std::atomic<std::uint32_t> ArmorMergeId{ 1 };
-
-	struct PendingPreparedHeadPart
-	{
-		RE::NiPointer<RE::NiAVObject> object;
-		RE::BGSHeadPart* headPart{ nullptr };
-	};
-
-	std::unordered_map<RE::BSFaceGenNiNode*, std::vector<PendingPreparedHeadPart>> PendingPreparedHeadParts;
 
 	using BackupBoneMap = std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>>;
 
@@ -720,7 +712,11 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::RemovePart", Addresses::BipedAnimRemovePart.address());
 		LogRelocationTarget("AIProcess::Update3DModel", Addresses::Update3DModel.address());
 		LogRelocationTarget("Actor::Reset3D", Addresses::Reset3D.address());
-		LogRelocationTarget("BSFaceGenUtils::PrepareHeadPart", Addresses::BSFaceGenPrepareHeadPart.address());
+		if (REX::FModule::IsRuntimeOG()) {
+			LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Addresses::BSFaceGenAddHeadPartOnActor.address());
+		} else {
+			spdlog::warn("BSFaceGenUtils::AddHeadPartOnActor hook skipped: AE relocation ID is not verified");
+		}
 		if (REX::FModule::IsRuntimeOG()) {
 			LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
 		} else {
@@ -798,72 +794,35 @@ namespace Hooks
 		return resolved.get();
 	}
 
-	void EmitPreparedHeadPartEvent(RE::Actor* a_actor, RE::BSFaceGenNiNode* a_faceNode, RE::NiAVObject* a_object, RE::BGSHeadPart* a_headPart)
+	RE::Actor* ResolveFaceGenActor(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton)
 	{
-		if (!a_actor) {
+		if (auto* actor = ResolveFaceGenActor(a_faceNode)) {
+			return actor;
+		}
+
+		const auto userData = a_skeleton ? a_skeleton->userData : 0;
+		if (userData != 0 && userData <= (std::numeric_limits<RE::TESFormID>::max)()) {
+			return AsActor(RE::TESForm::GetFormByID<RE::TESObjectREFR>(static_cast<RE::TESFormID>(userData)));
+		}
+
+		return nullptr;
+	}
+
+	void EmitSkinnedHeadGeometryEvent(
+		RE::Actor* a_actor,
+		RE::BSFaceGenNiNode* a_faceNode,
+		RE::NiAVObject* a_object,
+		const Smp::LifecycleEventType a_type)
+	{
+		if (!a_actor || !a_faceNode) {
 			return;
 		}
 
 		EmitEvent({
-			.type = Smp::LifecycleEventType::kHeadPrepareHeadPart,
+			.type = a_type,
 			.actor = a_actor,
 			.object = a_object ? a_object : reinterpret_cast<RE::NiAVObject*>(a_faceNode),
-			.headPart = a_headPart,
 		});
-	}
-
-	void FlushPendingPreparedHeadPartEvents(RE::Actor* a_actor, RE::BSFaceGenNiNode* a_faceNode)
-	{
-		std::vector<PendingPreparedHeadPart> pending;
-		{
-			std::scoped_lock lock(FaceGenActorLock);
-			auto found = PendingPreparedHeadParts.find(a_faceNode);
-			if (found == PendingPreparedHeadParts.end()) {
-				return;
-			}
-			pending = std::move(found->second);
-			PendingPreparedHeadParts.erase(found);
-		}
-
-		spdlog::debug(
-			"flushing {} pending prepared headpart events after actor resolution actor={} faceNode={}",
-			pending.size(),
-			static_cast<void*>(a_actor),
-			static_cast<void*>(a_faceNode));
-		for (const auto& entry : pending) {
-			EmitPreparedHeadPartEvent(a_actor, a_faceNode, entry.object.get(), entry.headPart);
-		}
-	}
-
-	RE::NiAVObject* FindPreparedHeadPartObject(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart)
-	{
-		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(a_faceNode);
-		if (!faceObject || !a_headPart) {
-			return faceObject;
-		}
-
-		if (!a_headPart->formEditorID.empty()) {
-			if (auto* object = RE::BSUtilities::GetObjectByName(faceObject, a_headPart->formEditorID, true, true)) {
-				return object;
-			}
-		}
-
-		const auto modelKey = Smp::ConfigPaths::LowerString(Smp::ConfigPaths::Trim(std::string(a_headPart->ChargenModel.GetModel())));
-		if (!modelKey.empty()) {
-			if (auto slash = modelKey.find_last_of("\\/"); slash != std::string::npos) {
-				auto name = modelKey.substr(slash + 1);
-				if (auto dot = name.find_last_of('.'); dot != std::string::npos) {
-					name.erase(dot);
-				}
-				if (!name.empty()) {
-					if (auto* object = RE::BSUtilities::GetObjectByName(faceObject, RE::BSFixedString(name), true, true)) {
-						return object;
-					}
-				}
-			}
-		}
-
-		return faceObject;
 	}
 
 	RE::NiAVObject* HookedBipedAnimApplySkinnedObjects(RE::BipedAnim* a_biped, RE::NiNode* a_originalModelRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
@@ -1047,11 +1006,11 @@ namespace Hooks
 
 	void HookedActorOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
+		SeedFaceGenActor(a_ref);
 		OriginalActorOnHeadInitialized(a_ref);
 		auto* actor = AsActor(a_ref);
 		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
 		SeedFaceGenActor(a_ref);
-		FlushPendingPreparedHeadPartEvents(actor, faceNode);
 		if (actor) {
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorHeadInitialized,
@@ -1063,11 +1022,11 @@ namespace Hooks
 
 	void HookedPlayerCharacterOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
+		SeedFaceGenActor(a_ref);
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
 		auto* actor = AsActor(a_ref);
 		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
 		SeedFaceGenActor(a_ref);
-		FlushPendingPreparedHeadPartEvents(actor, faceNode);
 		if (actor) {
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorHeadInitialized,
@@ -1077,28 +1036,45 @@ namespace Hooks
 		}
 	}
 
-	void HookedPrepareHeadPart(RE::BSFaceGenNiNode* a_faceNode, RE::BGSHeadPart* a_headPart, const RE::TESNPC* a_npc, bool a_arg4)
+	void HookedFaceGenSkinAllGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, bool a_arg3)
 	{
-		OriginalPrepareHeadPart(a_faceNode, a_headPart, a_npc, a_arg4);
+		OriginalFaceGenSkinAllGeometry(a_faceNode, a_skeleton, a_arg3);
 
-		auto* actor = ResolveFaceGenActor(a_faceNode);
-		auto* preparedObject = FindPreparedHeadPartObject(a_faceNode, a_headPart);
+		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
 		if (!actor) {
-			std::scoped_lock lock(FaceGenActorLock);
-			PendingPreparedHeadParts[a_faceNode].push_back({
-				.object = preparedObject,
-				.headPart = a_headPart,
-			});
-			spdlog::debug(
-				"queued prepared headpart pending actor resolution faceNode={} object={} headPart={} model='{}'",
+			spdlog::trace(
+				"skipped skinned head full-geometry event because actor is unresolved faceNode={} skeleton={}",
 				static_cast<void*>(a_faceNode),
-				static_cast<void*>(preparedObject),
-				static_cast<void*>(a_headPart),
-				a_headPart ? a_headPart->GetModel() : "");
+				static_cast<void*>(a_skeleton));
 			return;
 		}
 
-		EmitPreparedHeadPartEvent(actor, a_faceNode, preparedObject, a_headPart);
+		EmitSkinnedHeadGeometryEvent(
+			actor,
+			a_faceNode,
+			reinterpret_cast<RE::NiAVObject*>(a_faceNode),
+			Smp::LifecycleEventType::kHeadSkinAllGeometry);
+	}
+
+	void HookedFaceGenSkinSingleGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, RE::BSGeometry* a_geometry, bool a_arg4)
+	{
+		OriginalFaceGenSkinSingleGeometry(a_faceNode, a_skeleton, a_geometry, a_arg4);
+
+		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		if (!actor) {
+			spdlog::trace(
+				"skipped skinned head single-geometry event because actor is unresolved faceNode={} skeleton={} geometry={}",
+				static_cast<void*>(a_faceNode),
+				static_cast<void*>(a_skeleton),
+				static_cast<void*>(a_geometry));
+			return;
+		}
+
+		EmitSkinnedHeadGeometryEvent(
+			actor,
+			a_faceNode,
+			a_geometry,
+			Smp::LifecycleEventType::kHeadSkinSingleGeometry);
 	}
 
 	void HookedSetFaceGenBoneName(void* a_fmd, std::uint32_t a_boneIdx, RE::BSFixedString* a_boneName)
@@ -1184,6 +1160,7 @@ namespace Hooks
 
 		REL::Relocation<std::uintptr_t> actorVTable{ RE::VTABLE::Actor[0] };
 		REL::Relocation<std::uintptr_t> playerVTable{ RE::VTABLE::PlayerCharacter[0] };
+		REL::Relocation<std::uintptr_t> faceGenVTable{ RE::VTABLE::BSFaceGenNiNode[0] };
 
 		if (!OriginalActorLoad3D) {
 			OriginalActorLoad3D = InstallVFuncHook<ActorLoad3D_t>("Actor::Load3D", actorVTable, 0x86, reinterpret_cast<void*>(&HookedActorLoad3D));
@@ -1202,6 +1179,13 @@ namespace Hooks
 		}
 		if (!OriginalPlayerCharacterOnHeadInitialized) {
 			OriginalPlayerCharacterOnHeadInitialized = InstallVFuncHook<OnHeadInitialized_t>("PlayerCharacter::OnHeadInitialized", playerVTable, 0x98, reinterpret_cast<void*>(&HookedPlayerCharacterOnHeadInitialized));
+		}
+		if (!OriginalFaceGenSkinAllGeometry) {
+			OriginalFaceGenSkinAllGeometry = InstallVFuncHook<FaceGenSkinAllGeometry_t>(
+				"BSFaceGenNiNode::SkinAllGeometry",
+				faceGenVTable,
+				kFaceGenSkinAllGeometryVFuncSlot,
+				reinterpret_cast<void*>(&HookedFaceGenSkinAllGeometry));
 		}
 
 		if (!OriginalUpdate3DModel) {
@@ -1229,28 +1213,11 @@ namespace Hooks
 				spdlog::info("BSFaceGenModelExtraData::SetBoneName detour installed at {:x}", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
 			}
 		}
-		if constexpr (kEnablePrepareHeadPartHook) {
-			if (!OriginalPrepareHeadPart) {
-				OriginalPrepareHeadPart = reinterpret_cast<PrepareHeadPart_t>(Addresses::BSFaceGenPrepareHeadPart.address());
-				DetourTransactionBegin();
-				DetourUpdateThread(GetCurrentThread());
-				const auto detourError = DetourAttach(
-					reinterpret_cast<PVOID*>(std::addressof(OriginalPrepareHeadPart)),
-					reinterpret_cast<PVOID>(&HookedPrepareHeadPart));
-				const auto commitError = DetourTransactionCommit();
-				if (detourError != NO_ERROR || commitError != NO_ERROR) {
-					spdlog::error(
-						"BSFaceGenUtils::PrepareHeadPart detour failed attachError={} commitError={} target={}",
-						detourError,
-						commitError,
-						reinterpret_cast<void*>(Addresses::BSFaceGenPrepareHeadPart.address()));
-					OriginalPrepareHeadPart = nullptr;
-				} else {
-					spdlog::info("BSFaceGenUtils::PrepareHeadPart detour installed at {:x}", Addresses::BSFaceGenPrepareHeadPart.address());
-				}
-			}
-		} else {
-			spdlog::warn("BSFaceGenUtils::PrepareHeadPart detour disabled pending FaceGen crash verification");
+		if (isOG && !OriginalFaceGenSkinSingleGeometry) {
+			const auto skinSingleCallsite = Addresses::BSFaceGenAddHeadPartOnActor.address() + (isOG ? kAddHeadPartSkinSingleCallOffsetOG : kAddHeadPartSkinSingleCallOffsetOG);
+			OriginalFaceGenSkinSingleGeometry = reinterpret_cast<FaceGenSkinSingleGeometry_t>(
+				REL::GetTrampoline().write_call<5>(skinSingleCallsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenSkinSingleGeometry)));
+			spdlog::info("BSFaceGenUtils::AddHeadPartOnActor skin-single call hook installed at {:x}", skinSingleCallsite);
 		}
 
 		const bool installed =
@@ -1265,11 +1232,12 @@ namespace Hooks
 			OriginalPlayerCharacterSet3D &&
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
+			OriginalFaceGenSkinAllGeometry &&
 			OriginalUpdate3DModel &&
 			OriginalReset3D &&
 			faceGenBoneNameLimitsValid &&
 			(!isOG || OriginalSetFaceGenBoneName) &&
-			(!kEnablePrepareHeadPartHook || OriginalPrepareHeadPart);
+			(!isOG || OriginalFaceGenSkinSingleGeometry);
 
 		spdlog::info("FO4 Faster HDT-SMP lifecycle hooks {}", installed ? "installed" : "failed");
 		return installed;

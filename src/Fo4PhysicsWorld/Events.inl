@@ -140,12 +140,8 @@ namespace Smp
 				static_cast<void*>(a_event.object),
 				queuedSoftReload);
 		} else if (a_event.type == LifecycleEventType::kActorUpdate3DModel) {
-			std::scoped_lock lock(lock_);
-			if (characterCustomizationMenuDepth_ == 0 && (HasActiveOrPendingActorRebuildLocked(a_event.actor) || !pendingHeadRebuilds_.empty())) {
-				SchedulePendingRebuildTaskLocked();
-			}
 			spdlog::trace(
-				"physics world observed per-frame update candidate {} actor={} object={}; pending rebuilds run through the F4SE task queue",
+				"physics world observed per-frame update candidate {} actor={} object={}; pending rebuilds run from Main::OnIdle",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
@@ -209,7 +205,6 @@ namespace Smp
 			if (wasClosed) {
 				pendingActorRebuilds_.clear();
 				pendingHeadRebuilds_.clear();
-				pendingRebuildTaskQueued_ = false;
 				SuspendPrototypeStatesForCustomizationMenuLocked();
 			}
 			spdlog::debug(

@@ -70,9 +70,7 @@
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
-		std::uint64_t nextPendingRebuildFrame_{ 1 };
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		std::uint32_t loadingMenuDepth_{ 0 };
 		bool loadingPhysicsSuspended_{ false };
-		bool pendingRebuildTaskQueued_{ false };
 		bool registered_{ false };

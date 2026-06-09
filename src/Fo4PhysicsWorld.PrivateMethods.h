@@ -19,7 +19,6 @@
 		std::vector<PrototypeArmorRecord> CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event);
 		void MarkPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson, std::vector<PrototypeArmorRecord> a_armorRecords = {}, bool a_forceArmorRescan = false, bool a_scheduleImmediately = true, bool a_replaceArmorRecords = false);
 		void MarkPendingHeadRebuildLocked(const LifecycleEvent& a_event);
-		void SchedulePendingRebuildTaskLocked();
 		bool HasActiveOrPendingActorRebuildLocked(RE::Actor* a_actor);
 		bool SoftReloadPrototypeStateLocked(PrototypeActorState& a_state, LifecycleEventType a_reason);
 		std::vector<PrototypeArmorRecord> CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event);

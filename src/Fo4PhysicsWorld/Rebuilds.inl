@@ -207,14 +207,19 @@ namespace Smp
 		if (!a_actor || a_actor == player || !enableNpcPhysics_) {
 			return;
 		}
+		if (a_armorRecords.empty()) {
+			spdlog::trace(
+				"skipping empty suspended prototype physics candidate actor={} firstPerson={}",
+				static_cast<void*>(a_actor),
+				a_firstPerson);
+			return;
+		}
 
 		for (auto& candidate : suspendedActors_) {
 			const auto resolvedActor = candidate.actorHandle.get();
 			if (resolvedActor && resolvedActor.get() == a_actor) {
-				if (!a_armorRecords.empty()) {
-					candidate.firstPerson = a_firstPerson;
-					candidate.armorRecords = std::move(a_armorRecords);
-				}
+				candidate.firstPerson = a_firstPerson;
+				candidate.armorRecords = std::move(a_armorRecords);
 				return;
 			}
 		}
@@ -295,45 +300,27 @@ namespace Smp
 				continue;
 			}
 
-			if (!it->armorRecords.empty()) {
-				PendingActorRebuild pending{
-					.actorHandle = it->actorHandle,
-					.firstPerson = it->firstPerson,
-					.armorRecords = std::move(it->armorRecords),
-				};
-				if (!RebuildPendingArmorRecordsLocked(actor, pending)) {
-					it->armorRecords = std::move(pending.armorRecords);
-					++it;
-					continue;
-				}
-
-				spdlog::debug(
-					"reactivated suspended prototype physics candidate actor={} firstPerson={} from preserved armor records",
-					static_cast<void*>(actor),
-					it->firstPerson);
+			if (it->armorRecords.empty()) {
 				it = suspendedActors_.erase(it);
 				continue;
 			}
 
-			BuildPrototypeForEventLocked({
-				.type = LifecycleEventType::kActorSet3D,
-				.actor = actor,
-				.biped = actor->GetBiped(it->firstPerson).get(),
-				.object = root,
+			PendingActorRebuild pending{
+				.actorHandle = it->actorHandle,
 				.firstPerson = it->firstPerson,
-			});
-			if (const auto* reactivatedState = FindPrototypeStateLocked(actor, it->firstPerson)) {
-				if (reactivatedState->runtimeSuspended || reactivatedState->runtimeSoftSuspended) {
-					spdlog::debug(
-						"reactivating suspended prototype physics candidate actor={} root={} firstPerson={}",
-						static_cast<void*>(actor),
-						static_cast<void*>(root),
-						it->firstPerson);
-				}
-				it = suspendedActors_.erase(it);
-			} else {
+				.armorRecords = std::move(it->armorRecords),
+			};
+			if (!RebuildPendingArmorRecordsLocked(actor, pending)) {
+				it->armorRecords = std::move(pending.armorRecords);
 				++it;
+				continue;
 			}
+
+			spdlog::debug(
+				"reactivated suspended prototype physics candidate actor={} firstPerson={} from preserved armor records",
+				static_cast<void*>(actor),
+				it->firstPerson);
+			it = suspendedActors_.erase(it);
 		}
 	}
 
@@ -594,6 +581,7 @@ namespace Smp
 			return a_record.cpuCopyRetryCount > 0;
 		}) ? kCpuCopyPendingRetryDelayTasks : 0U;
 		const auto rebuildDelay = a_forceArmorRescan ? std::max(requestedDelay, kArmorChangeRebuildDelayTasks) : requestedDelay;
+		const auto frameDelay = std::max(rebuildDelay, a_scheduleImmediately ? 0U : 1U);
 		if (auto* pending = FindPendingActorRebuildLocked(a_actor, a_firstPerson)) {
 			if (a_replaceArmorRecords) {
 				pending->armorRecords = std::move(a_armorRecords);
@@ -603,13 +591,8 @@ namespace Smp
 				}
 			}
 			const auto prunedHairSlotRecords = PruneStalePendingHairSlotArmorRecords(pending->armorRecords);
-			pending->frameDelay = std::max(pending->frameDelay, rebuildDelay);
+			pending->frameDelay = std::max(pending->frameDelay, frameDelay);
 			pending->forceArmorRescan = pending->forceArmorRescan || a_forceArmorRescan;
-			if (a_scheduleImmediately) {
-				SchedulePendingRebuildTaskLocked();
-			} else {
-				nextPendingRebuildFrame_ = std::min(nextPendingRebuildFrame_, simulationFrame_ + 1);
-			}
 			spdlog::debug(
 				"updated pending prototype physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
 				static_cast<void*>(a_actor),
@@ -634,14 +617,9 @@ namespace Smp
 			.actorHandle = handle,
 			.firstPerson = a_firstPerson,
 			.armorRecords = std::move(a_armorRecords),
-			.frameDelay = rebuildDelay,
+			.frameDelay = frameDelay,
 			.forceArmorRescan = a_forceArmorRescan,
 		});
-		if (a_scheduleImmediately) {
-			SchedulePendingRebuildTaskLocked();
-		} else {
-			nextPendingRebuildFrame_ = std::min(nextPendingRebuildFrame_, simulationFrame_ + 1);
-		}
 		spdlog::debug(
 			"queued pending prototype physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
 			static_cast<void*>(a_actor),
@@ -724,7 +702,6 @@ namespace Smp
 			if (resolvedActor && resolvedActor.get() == a_event.actor && pending.type == a_event.type && pending.object.get() == a_event.object) {
 				pending.frameDelay = std::max(pending.frameDelay, kHeadInitializedRebuildDelayFrames);
 				pending.headPart = a_event.headPart;
-				SchedulePendingRebuildTaskLocked();
 				return;
 			}
 		}
@@ -735,25 +712,6 @@ namespace Smp
 			.object = a_event.object,
 			.headPart = a_event.headPart,
 			.frameDelay = kHeadInitializedRebuildDelayFrames,
-		});
-		SchedulePendingRebuildTaskLocked();
-	}
-
-	void Fo4PhysicsWorld::SchedulePendingRebuildTaskLocked()
-	{
-		if (pendingRebuildTaskQueued_ || (pendingActorRebuilds_.empty() && pendingHeadRebuilds_.empty())) {
-			return;
-		}
-
-		const auto taskInterface = F4SE::GetTaskInterface();
-		if (!taskInterface) {
-			spdlog::warn("unable to queue pending prototype physics rebuild task because F4SE task interface is unavailable");
-			return;
-		}
-
-		pendingRebuildTaskQueued_ = true;
-		taskInterface->AddTask([] {
-			Fo4PhysicsWorld::GetSingleton()->ProcessPendingRebuilds();
 		});
 	}
 

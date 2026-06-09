@@ -75,7 +75,6 @@ namespace
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
-	constexpr std::uint64_t kPendingRebuildRetryIntervalFrames = 15;
 	std::atomic<std::uint32_t> PrototypeArmorRenameId{ 0 };
 	std::atomic<std::uint32_t> PrototypeHeadRenameId{ 0 };
 	using Clock = std::chrono::steady_clock;
@@ -709,8 +708,8 @@ namespace
 
 	bool IsHeadCandidate(const Smp::LifecycleEventType a_type)
 	{
-		return a_type == Smp::LifecycleEventType::kActorHeadInitialized ||
-			a_type == Smp::LifecycleEventType::kHeadPrepareHeadPart;
+		return a_type == Smp::LifecycleEventType::kHeadSkinAllGeometry ||
+			a_type == Smp::LifecycleEventType::kHeadSkinSingleGeometry;
 	}
 
 	bool IsPlayerFirstPersonView()
