@@ -35,6 +35,24 @@ namespace Smp
 			return RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
 		}
 
+		bool ShouldDropQueuedFirstPersonBipedEvent(const LifecycleEvent& a_event)
+		{
+			if (!a_event.firstPerson) {
+				return false;
+			}
+
+			switch (a_event.type) {
+			case LifecycleEventType::kArmorApplySkinnedObjects:
+			case LifecycleEventType::kArmorAttachSkinnedObject:
+			case LifecycleEventType::kArmorAttachToParent:
+			case LifecycleEventType::kArmorDetachBegin:
+			case LifecycleEventType::kArmorDetachEnd:
+				return true;
+			default:
+				return false;
+			}
+		}
+
 		LifecycleEvent RetainLifecyclePointers(const LifecycleEvent& a_event)
 		{
 			auto retained = a_event;
@@ -56,6 +74,15 @@ namespace Smp
 
 	void NotifyLifecycleEvent(const LifecycleEvent& a_event)
 	{
+		if (ShouldDropQueuedFirstPersonBipedEvent(a_event)) {
+			spdlog::trace(
+				"dropped queued first-person lifecycle {} before retaining transient biped objects actor={} object={}",
+				ToString(a_event.type),
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_event.object));
+			return;
+		}
+
 		auto retained = RetainLifecyclePointers(a_event);
 		std::scoped_lock lock(GetLifecycleEventQueueLock());
 		GetLifecycleEventQueue().push_back(std::move(retained));
