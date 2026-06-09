@@ -1938,12 +1938,16 @@ namespace
 		return a_body.buildGroup == a_buildGroup || std::ranges::find(a_body.buildGroups, a_buildGroup) != a_body.buildGroups.end();
 	}
 
-	const Smp::PhysicsMeshShapeDescriptor* FindMeshDescriptor(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name, const Smp::DefaultBBP::NameMap& a_meshNameMap)
+	std::vector<std::pair<std::size_t, const Smp::PhysicsMeshShapeDescriptor*>> FindMeshDescriptors(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name, const Smp::DefaultBBP::NameMap& a_meshNameMap)
 	{
-		const auto found = std::ranges::find_if(a_summary.meshDescriptors, [a_name, &a_meshNameMap](const Smp::PhysicsMeshShapeDescriptor& a_descriptor) {
-			return MeshNameMatches(a_descriptor.name, a_name, a_meshNameMap);
-		});
-		return found == a_summary.meshDescriptors.end() ? nullptr : std::addressof(*found);
+		std::vector<std::pair<std::size_t, const Smp::PhysicsMeshShapeDescriptor*>> result;
+		for (std::size_t index = 0; index < a_summary.meshDescriptors.size(); ++index) {
+			const auto& descriptor = a_summary.meshDescriptors[index];
+			if (MeshNameMatches(descriptor.name, a_name, a_meshNameMap)) {
+				result.emplace_back(index, std::addressof(descriptor));
+			}
+		}
+		return result;
 	}
 
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object)

@@ -38,6 +38,7 @@
 			std::string name;
 			RE::BSGeometry* geometry{ nullptr };
 			std::uint64_t buildGroup{ 0 };
+			std::size_t descriptorIndex{ 0 };
 			RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 			PrototypeBuildDomain domain{ PrototypeBuildDomain::kArmor };
 			RE::BSTSmartPointer<hdt::SkinnedMeshBody> body;

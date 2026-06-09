@@ -699,7 +699,7 @@ namespace Smp
 			const auto transform = mesh.body->getWorldTransform();
 			const auto origin = transform.getOrigin();
 			const auto rotation = transform.getRotation();
-			const auto* geometry = mesh.geometry;
+			const auto* geometry = IsProbablyValidNiObject(mesh.geometry) ? mesh.geometry : nullptr;
 			spdlog::debug(
 				"actor bullet mesh body actor={} meshBody={} buildGroup={} bipedObject={} meshName='{}' geometry={} geometryName='{}' pos=({:.3f},{:.3f},{:.3f}) rot=({:.6f},{:.6f},{:.6f},{:.6f})",
 				static_cast<void*>(a_state.actor),
@@ -1103,117 +1103,166 @@ namespace Smp
 				a_buildGroup);
 			return std::addressof(a_stagedBodies.back());
 		};
-		for (const auto& decodedMesh : extraction.meshes) {
-			if (decodedMesh.vertices.empty()) {
-				++skippedEmpty;
-				continue;
-			}
+		struct MatchedDescriptorMesh
+		{
+			const Smp::Fo4DecodedSkinnedMesh* mesh{ nullptr };
+			std::uint32_t vertexOffset{ 0 };
+			std::size_t boneOffset{ 0 };
+		};
 
-			const auto existingMesh = std::ranges::find_if(a_state.meshes, [&decodedMesh, a_buildGroup](const PrototypeMesh& a_mesh) {
-				return a_mesh.geometry == decodedMesh.geometry && a_mesh.buildGroup == a_buildGroup;
+		auto hasWeightedBoneWithoutBindData = [](const Smp::Fo4DecodedSkinnedMesh& a_decodedMesh) {
+			std::size_t vertexIndex = 0;
+			for (const auto& vertex : a_decodedMesh.vertices) {
+				for (int influence = 0; influence < 4; ++influence) {
+					const auto boneIndex = static_cast<std::size_t>(vertex.getBoneIdx(influence));
+					if (vertex.weight_[influence] > FLT_EPSILON &&
+						boneIndex < a_decodedMesh.bones.size() &&
+						!a_decodedMesh.bones[boneIndex].hasSkinToBone) {
+						const auto& decodedBone = a_decodedMesh.bones[boneIndex];
+						spdlog::warn(
+							"mesh '{}' bind-pose miss vertex={} influence={} weight={} boneIndex={} boneCount={} boneNode={} boneName='{}' hasBoneData={}",
+							a_decodedMesh.name,
+							vertexIndex,
+							influence,
+							vertex.weight_[influence],
+							boneIndex,
+							a_decodedMesh.bones.size(),
+							static_cast<void*>(decodedBone.node),
+							decodedBone.name,
+							decodedBone.hasBoneData);
+						return true;
+					}
+				}
+				++vertexIndex;
+			}
+			return false;
+		};
+
+		for (std::size_t meshDescriptorIndex = 0; meshDescriptorIndex < a_summary.meshDescriptors.size(); ++meshDescriptorIndex) {
+			const auto* meshDescriptor = std::addressof(a_summary.meshDescriptors[meshDescriptorIndex]);
+			const auto existingMesh = std::ranges::find_if(a_state.meshes, [a_buildGroup, meshDescriptorIndex](const PrototypeMesh& a_mesh) {
+				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingMesh != a_state.meshes.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [&decodedMesh, a_buildGroup](const PrototypeMesh& a_mesh) {
-				return a_mesh.geometry == decodedMesh.geometry && a_mesh.buildGroup == a_buildGroup;
+			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [a_buildGroup, meshDescriptorIndex](const PrototypeMesh& a_mesh) {
+				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingStagedMesh != a_stagedMeshes.end()) {
 				++skippedExisting;
 				continue;
 			}
 
-			const auto* meshDescriptor = FindMeshDescriptor(a_summary, decodedMesh.name, a_meshNameMap);
-			if (decodedMesh.badBoneIndices > 0) {
-				++sanitizedBadBoneMeshes;
-				spdlog::debug("mesh '{}' discarded {} unusable vertex bone influences during decode", decodedMesh.name, decodedMesh.badBoneIndices);
-			}
-			const auto weightedBoneWithoutBindData = [&decodedMesh]() {
-				std::size_t vertexIndex = 0;
-				for (const auto& vertex : decodedMesh.vertices) {
-					for (int influence = 0; influence < 4; ++influence) {
-						const auto boneIndex = static_cast<std::size_t>(vertex.getBoneIdx(influence));
-						if (vertex.weight_[influence] > FLT_EPSILON &&
-							boneIndex < decodedMesh.bones.size() &&
-							!decodedMesh.bones[boneIndex].hasSkinToBone) {
-							const auto& decodedBone = decodedMesh.bones[boneIndex];
-							spdlog::warn(
-								"mesh '{}' bind-pose miss vertex={} influence={} weight={} boneIndex={} boneCount={} boneNode={} boneName='{}' hasBoneData={}",
-								decodedMesh.name,
-								vertexIndex,
-								influence,
-								vertex.weight_[influence],
-								boneIndex,
-								decodedMesh.bones.size(),
-								static_cast<void*>(decodedBone.node),
-								decodedBone.name,
-								decodedBone.hasBoneData);
-							return true;
-						}
-					}
-					++vertexIndex;
+			std::vector<MatchedDescriptorMesh> matchedMeshes;
+			std::uint32_t vertexOffset = 0;
+			std::size_t boneOffset = 0;
+			bool missingTriangleIndices = false;
+			bool missingBoneData = false;
+			for (const auto& decodedMesh : extraction.meshes) {
+				if (!MeshNameMatches(meshDescriptor->name, decodedMesh.name, a_meshNameMap)) {
+					continue;
 				}
-				return false;
-			}();
-			if (weightedBoneWithoutBindData) {
-				++skippedMissingBoneData;
-				spdlog::warn("skipping mesh '{}' because a weighted skin bone is missing bind-pose data", decodedMesh.name);
+				if (decodedMesh.vertices.empty()) {
+					++skippedEmpty;
+					continue;
+				}
+				if (decodedMesh.badBoneIndices > 0) {
+					++sanitizedBadBoneMeshes;
+					spdlog::debug("mesh '{}' discarded {} unusable vertex bone influences during decode", decodedMesh.name, decodedMesh.badBoneIndices);
+				}
+				if (hasWeightedBoneWithoutBindData(decodedMesh)) {
+					missingBoneData = true;
+					break;
+				}
+				if (meshDescriptor->kind == PhysicsMeshShapeKind::kPerTriangle && decodedMesh.indices.size() < 3) {
+					missingTriangleIndices = true;
+					spdlog::warn("skipping per-triangle mesh '{}' descriptorIndex={} because no usable CPU index buffer was decoded", decodedMesh.name, meshDescriptorIndex);
+					break;
+				}
+
+				matchedMeshes.push_back({ std::addressof(decodedMesh), vertexOffset, boneOffset });
+				vertexOffset += static_cast<std::uint32_t>(decodedMesh.vertices.size());
+				boneOffset += decodedMesh.bones.size();
+			}
+
+			if (matchedMeshes.empty()) {
+				++skippedNoColliders;
+				spdlog::debug("skipping mesh descriptor '{}' because no decoded mesh matched", meshDescriptor->name);
 				continue;
 			}
-			if (meshDescriptor && meshDescriptor->kind == PhysicsMeshShapeKind::kPerTriangle && decodedMesh.indices.size() < 3) {
+			if (missingBoneData) {
+				++skippedMissingBoneData;
+				spdlog::warn("skipping mesh descriptor '{}' because a weighted skin bone is missing bind-pose data", meshDescriptor->name);
+				continue;
+			}
+			if (missingTriangleIndices) {
 				++skippedMissingTriangleIndices;
-				spdlog::warn("skipping per-triangle mesh '{}' because no usable CPU index buffer was decoded", decodedMesh.name);
 				continue;
 			}
 
 			auto meshBody = RE::make_smart<hdt::SkinnedMeshBody>();
-			meshBody->name_ = RE::BSFixedString(decodedMesh.name);
+			meshBody->name_ = RE::BSFixedString(meshDescriptor->name);
 			meshBody->actor_ = a_state.actor;
 			meshBody->buildGroup_ = a_buildGroup;
-			meshBody->vertices_ = decodedMesh.vertices;
+			meshBody->vertices_.reserve(vertexOffset);
 
-			for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size(); ++boneIndex) {
-				const auto& decodedBone = decodedMesh.bones[boneIndex];
-				PrototypeBody* matchedBody = findPrototypeBody(decodedBone);
-				const auto weightedBone = std::ranges::any_of(decodedMesh.vertices, [boneIndex](const hdt::Vertex& a_vertex) {
+			for (const auto& matchedMesh : matchedMeshes) {
+				const auto& decodedMesh = *matchedMesh.mesh;
+				for (auto vertex : decodedMesh.vertices) {
 					for (int influence = 0; influence < 4; ++influence) {
-						if (a_vertex.weight_[influence] > FLT_EPSILON && a_vertex.getBoneIdx(influence) == boneIndex) {
-							return true;
+						if (vertex.weight_[influence] > FLT_EPSILON) {
+							vertex.setBoneIdx(influence, vertex.getBoneIdx(influence) + static_cast<std::uint32_t>(matchedMesh.boneOffset));
 						}
 					}
-					return false;
-				});
-
-				if (!matchedBody || !matchedBody->bone) {
-					if (weightedBone) {
-						matchedBody = createFallbackSkinBody(decodedBone, decodedMesh.name);
-						if (!matchedBody || !matchedBody->bone) {
-							++skippedMissingBones;
-							spdlog::warn(
-								"mesh '{}' could not create mesh-only fallback body for weighted skin bone '{}' node={} because no trusted actor skeleton node or plugin-owned merged clone was resolved",
-								decodedMesh.name,
-								decodedBone.name,
-								static_cast<void*>(decodedBone.node));
-						}
-					}
-					if (!matchedBody || !matchedBody->bone) {
-						meshBody->addBone(
-							nullptr,
-							decodedBone.hasSkinToBone ? decodedBone.skinToBone : hdt::btQsTransform::getIdentity(),
-							decodedBone.hasBoneData ? decodedBone.boundingSphere : hdt::BoundingSphere(btVector3(0.0F, 0.0F, 0.0F), 0.0F));
-						continue;
-					}
+					meshBody->vertices_.push_back(vertex);
 				}
-
-				const auto sphere = decodedBone.hasBoneData ?
-					decodedBone.boundingSphere :
-					CalculateBoneSphere(decodedMesh, boneIndex).value_or(hdt::BoundingSphere(btVector3(0.0F, 0.0F, 0.0F), 0.0F));
-				meshBody->addBone(matchedBody->bone.get(), decodedBone.hasSkinToBone ? decodedBone.skinToBone : hdt::btQsTransform::getIdentity(), sphere);
 			}
 
-			if (meshDescriptor) {
-				switch (meshDescriptor->shared) {
+			for (const auto& matchedMesh : matchedMeshes) {
+				const auto& decodedMesh = *matchedMesh.mesh;
+				for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size(); ++boneIndex) {
+					const auto& decodedBone = decodedMesh.bones[boneIndex];
+					PrototypeBody* matchedBody = findPrototypeBody(decodedBone);
+					const auto weightedBone = std::ranges::any_of(decodedMesh.vertices, [boneIndex](const hdt::Vertex& a_vertex) {
+						for (int influence = 0; influence < 4; ++influence) {
+							if (a_vertex.weight_[influence] > FLT_EPSILON && a_vertex.getBoneIdx(influence) == boneIndex) {
+								return true;
+							}
+						}
+						return false;
+					});
+
+					if (!matchedBody || !matchedBody->bone) {
+						if (weightedBone) {
+							matchedBody = createFallbackSkinBody(decodedBone, decodedMesh.name);
+							if (!matchedBody || !matchedBody->bone) {
+								++skippedMissingBones;
+								spdlog::warn(
+									"mesh '{}' could not create mesh-only fallback body for weighted skin bone '{}' node={} because no trusted actor skeleton node or plugin-owned merged clone was resolved",
+									decodedMesh.name,
+									decodedBone.name,
+									static_cast<void*>(decodedBone.node));
+							}
+						}
+						if (!matchedBody || !matchedBody->bone) {
+							meshBody->addBone(
+								nullptr,
+								decodedBone.hasSkinToBone ? decodedBone.skinToBone : hdt::btQsTransform::getIdentity(),
+								decodedBone.hasBoneData ? decodedBone.boundingSphere : hdt::BoundingSphere(btVector3(0.0F, 0.0F, 0.0F), 0.0F));
+							continue;
+						}
+					}
+
+					const auto sphere = decodedBone.hasBoneData ?
+						decodedBone.boundingSphere :
+						CalculateBoneSphere(decodedMesh, boneIndex).value_or(hdt::BoundingSphere(btVector3(0.0F, 0.0F, 0.0F), 0.0F));
+					meshBody->addBone(matchedBody->bone.get(), decodedBone.hasSkinToBone ? decodedBone.skinToBone : hdt::btQsTransform::getIdentity(), sphere);
+				}
+			}
+
+			switch (meshDescriptor->shared) {
 				case PhysicsMeshSharedScope::kInternal:
 					meshBody->shared_ = hdt::SkinnedMeshBody::SharedType::kInternal;
 					break;
@@ -1228,74 +1277,111 @@ namespace Smp
 					meshBody->shared_ = hdt::SkinnedMeshBody::SharedType::kPublic;
 					break;
 				}
-				for (const auto& tag : meshDescriptor->tags) {
-					meshBody->tags_.emplace_back(tag.c_str());
-				}
-				for (const auto& tag : meshDescriptor->canCollideWithTags) {
-					meshBody->canCollideWithTags_.emplace_back(tag.c_str());
-				}
-				for (const auto& tag : meshDescriptor->noCollideWithTags) {
-					meshBody->noCollideWithTags_.emplace_back(tag.c_str());
-				}
-				meshBody->disableTag_ = meshDescriptor->disableTag;
-				meshBody->disablePriority_ = meshDescriptor->disablePriority;
-				for (const auto& boneName : meshDescriptor->canCollideWithBones) {
-					auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
+			for (const auto& tag : meshDescriptor->tags) {
+				meshBody->tags_.emplace_back(tag.c_str());
+			}
+			for (const auto& tag : meshDescriptor->canCollideWithTags) {
+				meshBody->canCollideWithTags_.emplace_back(tag.c_str());
+			}
+			for (const auto& tag : meshDescriptor->noCollideWithTags) {
+				meshBody->noCollideWithTags_.emplace_back(tag.c_str());
+			}
+			meshBody->disableTag_ = meshDescriptor->disableTag;
+			meshBody->disablePriority_ = meshDescriptor->disablePriority;
+			for (const auto& boneName : meshDescriptor->canCollideWithBones) {
+				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
+					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+				});
+				PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
+				if (!resolvedBody) {
+					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
 						return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 					});
-					PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
-					if (!resolvedBody) {
-						const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-							return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
-						});
-						if (stagedBody != a_stagedBodies.end()) {
-							resolvedBody = std::addressof(*stagedBody);
-						}
-					}
-					if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
-						meshBody->canCollideWithBones_.push_back(resolvedBody->bone.get());
-					} else {
-						++unresolvedCanCollideBones;
-						spdlog::debug("mesh '{}' could not resolve can-collide-with-bone '{}'", decodedMesh.name, boneName);
+					if (stagedBody != a_stagedBodies.end()) {
+						resolvedBody = std::addressof(*stagedBody);
 					}
 				}
-				for (const auto& boneName : meshDescriptor->noCollideWithBones) {
-					auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
+				if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
+					meshBody->canCollideWithBones_.push_back(resolvedBody->bone.get());
+				} else {
+					++unresolvedCanCollideBones;
+					spdlog::debug("mesh '{}' could not resolve can-collide-with-bone '{}'", meshDescriptor->name, boneName);
+				}
+			}
+			for (const auto& boneName : meshDescriptor->noCollideWithBones) {
+				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
+					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+				});
+				PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
+				if (!resolvedBody) {
+					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
 						return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 					});
-					PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
-					if (!resolvedBody) {
-						const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-							return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
-						});
-						if (stagedBody != a_stagedBodies.end()) {
-							resolvedBody = std::addressof(*stagedBody);
-						}
-					}
-					if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
-						meshBody->noCollideWithBones_.push_back(resolvedBody->bone.get());
-					} else {
-						++unresolvedNoCollideBones;
-						spdlog::debug("mesh '{}' could not resolve no-collide-with-bone '{}'", decodedMesh.name, boneName);
+					if (stagedBody != a_stagedBodies.end()) {
+						resolvedBody = std::addressof(*stagedBody);
 					}
 				}
-				for (const auto& [boneName, threshold] : meshDescriptor->weightThresholds) {
-					bool appliedThreshold = false;
-					for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size() && boneIndex < meshBody->skinnedBones_.size(); ++boneIndex) {
+				if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
+					meshBody->noCollideWithBones_.push_back(resolvedBody->bone.get());
+				} else {
+					++unresolvedNoCollideBones;
+					spdlog::debug("mesh '{}' could not resolve no-collide-with-bone '{}'", meshDescriptor->name, boneName);
+				}
+			}
+			for (const auto& [boneName, threshold] : meshDescriptor->weightThresholds) {
+				bool appliedThreshold = false;
+				for (const auto& matchedMesh : matchedMeshes) {
+					const auto& decodedMesh = *matchedMesh.mesh;
+					for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size(); ++boneIndex) {
+						const auto skinnedBoneIndex = matchedMesh.boneOffset + boneIndex;
+						if (skinnedBoneIndex >= meshBody->skinnedBones_.size()) {
+							continue;
+						}
 						if (PhysicsNamesEqual(decodedMesh.bones[boneIndex].name, boneName)) {
-							meshBody->skinnedBones_[boneIndex].weightThreshold = threshold;
+							meshBody->skinnedBones_[skinnedBoneIndex].weightThreshold = threshold;
 							appliedThreshold = true;
-							break;
 						}
 					}
-					if (!appliedThreshold) {
-						++unresolvedWeightThresholds;
-						spdlog::debug("mesh '{}' could not resolve weight-threshold bone '{}'", decodedMesh.name, boneName);
+				}
+				if (!appliedThreshold) {
+					for (auto& skinnedBone : meshBody->skinnedBones_) {
+						if (skinnedBone.ptr && PhysicsNamesEqual(skinnedBone.ptr->m_name, boneName)) {
+							skinnedBone.weightThreshold = threshold;
+							appliedThreshold = true;
+						}
 					}
+				}
+				if (!appliedThreshold) {
+					for (const auto& prototypeBody : a_state.bodies) {
+						if (!prototypeBody.bone || !PhysicsNamesEqual(prototypeBody.boneName, boneName)) {
+							continue;
+						}
+						for (auto& skinnedBone : meshBody->skinnedBones_) {
+							if (skinnedBone.ptr == prototypeBody.bone.get()) {
+								skinnedBone.weightThreshold = threshold;
+								appliedThreshold = true;
+							}
+						}
+					}
+					for (const auto& prototypeBody : a_stagedBodies) {
+						if (!prototypeBody.bone || !PhysicsNamesEqual(prototypeBody.boneName, boneName)) {
+							continue;
+						}
+						for (auto& skinnedBone : meshBody->skinnedBones_) {
+							if (skinnedBone.ptr == prototypeBody.bone.get()) {
+								skinnedBone.weightThreshold = threshold;
+								appliedThreshold = true;
+							}
+						}
+					}
+				}
+				if (!appliedThreshold) {
+					++unresolvedWeightThresholds;
+					spdlog::debug("mesh '{}' could not resolve weight-threshold bone '{}'", meshDescriptor->name, boneName);
 				}
 			}
 
-			if (meshDescriptor && meshDescriptor->kind == PhysicsMeshShapeKind::kPerTriangle && decodedMesh.indices.size() >= 3) {
+			if (meshDescriptor->kind == PhysicsMeshShapeKind::kPerTriangle) {
 				auto* shape = new hdt::PerTriangleShape(meshBody.get());
 				if (meshDescriptor->hasMargin) {
 					shape->shapeProp_.margin = meshDescriptor->margin;
@@ -1303,21 +1389,24 @@ namespace Smp
 				if (meshDescriptor->hasPenetration) {
 					shape->shapeProp_.penetration = meshDescriptor->penetration;
 				}
-				for (std::size_t index = 0; index + 2 < decodedMesh.indices.size(); index += 3) {
-					if (decodedMesh.indices[index] >= decodedMesh.vertices.size() ||
-						decodedMesh.indices[index + 1] >= decodedMesh.vertices.size() ||
-						decodedMesh.indices[index + 2] >= decodedMesh.vertices.size()) {
-						++skippedInvalidTriangleIndices;
-						continue;
+				for (const auto& matchedMesh : matchedMeshes) {
+					const auto& decodedMesh = *matchedMesh.mesh;
+					for (std::size_t index = 0; index + 2 < decodedMesh.indices.size(); index += 3) {
+						if (decodedMesh.indices[index] >= decodedMesh.vertices.size() ||
+							decodedMesh.indices[index + 1] >= decodedMesh.vertices.size() ||
+							decodedMesh.indices[index + 2] >= decodedMesh.vertices.size()) {
+							++skippedInvalidTriangleIndices;
+							continue;
+						}
+						shape->addTriangle(
+							static_cast<int>(decodedMesh.indices[index] + matchedMesh.vertexOffset),
+							static_cast<int>(decodedMesh.indices[index + 1] + matchedMesh.vertexOffset),
+							static_cast<int>(decodedMesh.indices[index + 2] + matchedMesh.vertexOffset));
 					}
-					shape->addTriangle(
-						static_cast<int>(decodedMesh.indices[index]),
-						static_cast<int>(decodedMesh.indices[index + 1]),
-						static_cast<int>(decodedMesh.indices[index + 2]));
 				}
 			} else {
 				auto* shape = new hdt::PerVertexShape(meshBody.get());
-				if (meshDescriptor && meshDescriptor->hasMargin) {
+				if (meshDescriptor->hasMargin) {
 					shape->shapeProp_.margin = meshDescriptor->margin;
 				}
 				shape->autoGen();
@@ -1330,14 +1419,15 @@ namespace Smp
 			}
 
 			meshBody->internalUpdate();
-			const auto rawVertexStats = CalculateSkinVertexStats(decodedMesh.vertices);
+			const auto rawVertexStats = CalculateSkinVertexStats(meshBody->vertices_);
 			const auto skinnedVertexStats = CalculateVertexPositionStats(meshBody->vertexPositions_);
 			const auto skinnedBoneStats = CalculateSkinnedBoneStats(*meshBody);
-			const auto skinRootTransform = decodedMesh.skinRootNode ?
-				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(decodedMesh.skinRootNode->world) :
+			const auto* primaryMesh = matchedMeshes.front().mesh;
+			const auto skinRootTransform = primaryMesh && primaryMesh->skinRootNode ?
+				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(primaryMesh->skinRootNode->world) :
 				hdt::btQsTransform::getIdentity();
-			const auto geometryTransform = decodedMesh.geometry ?
-				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(decodedMesh.geometry->world) :
+			const auto geometryTransform = primaryMesh && primaryMesh->geometry ?
+				Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(primaryMesh->geometry->world) :
 				hdt::btQsTransform::getIdentity();
 			const auto rawCenterThroughSkinRoot = skinRootTransform * rawVertexStats.center;
 			const auto rawCenterThroughGeometry = geometryTransform * rawVertexStats.center;
@@ -1345,7 +1435,7 @@ namespace Smp
 			spdlog::debug(
 				"mesh coordinate diagnostic actor={} mesh='{}' buildGroup={} domain={} samples(raw={}, skinned={}, bones={}) actorPos=({:.3f},{:.3f},{:.3f}) geometry={} geometryName='{}' geometryWorld=({:.3f},{:.3f},{:.3f}) skinRoot={} skinRootName='{}' skinRootWorld=({:.3f},{:.3f},{:.3f}) rawCenter=({:.3f},{:.3f},{:.3f}) rawAabbCenter=({:.3f},{:.3f},{:.3f}) rawCenterViaGeometry=({:.3f},{:.3f},{:.3f}) rawCenterViaSkinRoot=({:.3f},{:.3f},{:.3f}) vertexCenter=({:.3f},{:.3f},{:.3f}) vertexAabbCenter=({:.3f},{:.3f},{:.3f}) boneCenter=({:.3f},{:.3f},{:.3f}) boneAabbCenter=({:.3f},{:.3f},{:.3f}) objectOrigin=({:.3f},{:.3f},{:.3f})",
 				static_cast<void*>(a_state.actor),
-				decodedMesh.name,
+				meshDescriptor->name,
 				a_buildGroup,
 				PrototypeDomainName(a_domain),
 				rawVertexStats.samples,
@@ -1354,13 +1444,13 @@ namespace Smp
 				actorPosition.x,
 				actorPosition.y,
 				actorPosition.z,
-				static_cast<void*>(decodedMesh.geometry),
-				decodedMesh.geometry ? std::string_view(decodedMesh.geometry->GetName()) : std::string_view{},
+				static_cast<void*>(primaryMesh ? primaryMesh->geometry : nullptr),
+				primaryMesh && IsProbablyValidNiObject(primaryMesh->geometry) ? std::string_view(primaryMesh->geometry->GetName()) : std::string_view{},
 				geometryTransform.getOrigin().x(),
 				geometryTransform.getOrigin().y(),
 				geometryTransform.getOrigin().z(),
-				static_cast<void*>(decodedMesh.skinRootNode),
-				decodedMesh.skinRootNode ? std::string_view(decodedMesh.skinRootNode->GetName()) : std::string_view{},
+				static_cast<void*>(primaryMesh ? primaryMesh->skinRootNode : nullptr),
+				primaryMesh && primaryMesh->skinRootNode ? std::string_view(primaryMesh->skinRootNode->GetName()) : std::string_view{},
 				skinRootTransform.getOrigin().x(),
 				skinRootTransform.getOrigin().y(),
 				skinRootTransform.getOrigin().z(),
@@ -1393,9 +1483,10 @@ namespace Smp
 				meshBody->getWorldTransform().getOrigin().z());
 
 			PrototypeMesh prototypeMesh;
-			prototypeMesh.name = decodedMesh.name;
-			prototypeMesh.geometry = decodedMesh.geometry;
+			prototypeMesh.name = meshDescriptor->name;
+			prototypeMesh.geometry = primaryMesh && IsProbablyValidNiObject(primaryMesh->geometry) ? primaryMesh->geometry : nullptr;
 			prototypeMesh.buildGroup = a_buildGroup;
+			prototypeMesh.descriptorIndex = meshDescriptorIndex;
 			prototypeMesh.bipedObject = a_event.bipedObject;
 			prototypeMesh.domain = a_domain;
 			prototypeMesh.body = std::move(meshBody);

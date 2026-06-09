@@ -13,8 +13,8 @@ namespace
 	constexpr std::size_t ParallelCollisionPairThreshold = 32;
 	constexpr float kMeshContactMaxDepth = 0.04F;
 	constexpr float kMeshKinematicContactDepthScale = 0.25F;
-	constexpr int kMeshContactMaxVertexInfluences = 2;
-	constexpr int kMeshContactMaxTriangleInfluences = 1;
+	constexpr int kMeshContactMaxVertexInfluences = 4;
+	constexpr int kMeshContactMaxTriangleInfluences = 12;
 
 	__m128 CrossProduct(const __m128 a_lhs, const __m128 a_rhs)
 	{
