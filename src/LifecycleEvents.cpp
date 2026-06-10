@@ -61,6 +61,10 @@ namespace Smp
 			retained.retainedMergeSourceObject = a_event.mergeSourceObject;
 			retained.retainedDestinationRoot = a_event.destinationRoot;
 			retained.retainedSourceRoot = a_event.sourceRoot;
+			retained.retainedTrustedActorSkeletonNodes.reserve(a_event.trustedActorSkeletonNodes.size());
+			for (auto* node : a_event.trustedActorSkeletonNodes) {
+				retained.retainedTrustedActorSkeletonNodes.emplace_back(node);
+			}
 			retained.retainedActor = GetRetainedActorHandle(a_event.actor);
 			return retained;
 		}

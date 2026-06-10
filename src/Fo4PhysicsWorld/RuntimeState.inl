@@ -333,7 +333,7 @@ namespace Smp
 				if (slot.index < slot.skin->bones.size() &&
 					slot.skin->bones[slot.index] == slot.reboundBone.get() &&
 					slot.originalBone) {
-					slot.skin->bones[slot.index] = slot.originalBone.get();
+					slot.skin->bones[slot.index] = slot.originalBone;
 					++restored;
 				}
 				if (slot.index < slot.skin->worldTransforms.size() &&
@@ -347,8 +347,8 @@ namespace Smp
 			if (!hasActiveSkin(slot.skin.get()) &&
 				!hasRetainedSuspendedSkin(slot) &&
 				slot.originalRootNode &&
-				slot.skin->rootNode != slot.originalRootNode.get()) {
-				slot.skin->rootNode = slot.originalRootNode.get();
+				slot.skin->rootNode != slot.originalRootNode) {
+				slot.skin->rootNode = slot.originalRootNode;
 				++restored;
 			}
 		}
@@ -443,7 +443,8 @@ namespace Smp
 		}
 		a_state.bodies.clear();
 		for (auto& mergedNode : a_state.mergedNodes) {
-			if (mergedNode.parent && mergedNode.node) {
+			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
+			if (mergedNode.parent && node && node->parent == mergedNode.parent) {
 				mergedNode.parent->DetachChild(mergedNode.node.get());
 			}
 		}

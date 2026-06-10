@@ -219,6 +219,7 @@ namespace Smp
 			const auto resolvedActor = candidate.actorHandle.get();
 			if (resolvedActor && resolvedActor.get() == a_actor) {
 				candidate.firstPerson = a_firstPerson;
+				StripQueuedArmorRuntimePointers(a_armorRecords);
 				candidate.armorRecords = std::move(a_armorRecords);
 				return;
 			}
@@ -229,6 +230,7 @@ namespace Smp
 			return;
 		}
 
+		StripQueuedArmorRuntimePointers(a_armorRecords);
 		suspendedActors_.push_back({
 			.actorHandle = handle,
 			.firstPerson = a_firstPerson,
@@ -464,6 +466,16 @@ namespace Smp
 		}
 	}
 
+	void Fo4PhysicsWorld::StripQueuedArmorRuntimePointers(std::vector<PrototypeArmorRecord>& a_records)
+	{
+		for (auto& record : a_records) {
+			record.attachedObject = nullptr;
+			record.sourceObject = nullptr;
+			record.mergeSourceObject = nullptr;
+			record.buildGroups.clear();
+		}
+	}
+
 	std::uint32_t Fo4PhysicsWorld::PruneStalePendingHairSlotArmorRecords(std::vector<PrototypeArmorRecord>& a_records)
 	{
 		std::uint32_t removed = 0;
@@ -582,6 +594,7 @@ namespace Smp
 		}) ? kCpuCopyPendingRetryDelayTasks : 0U;
 		const auto rebuildDelay = a_forceArmorRescan ? std::max(requestedDelay, kArmorChangeRebuildDelayTasks) : requestedDelay;
 		const auto frameDelay = std::max(rebuildDelay, a_scheduleImmediately ? 0U : 1U);
+		StripQueuedArmorRuntimePointers(a_armorRecords);
 		if (auto* pending = FindPendingActorRebuildLocked(a_actor, a_firstPerson)) {
 			if (a_replaceArmorRecords) {
 				pending->armorRecords = std::move(a_armorRecords);
@@ -825,18 +838,20 @@ namespace Smp
 				});
 			}
 		}
-		for (const auto& binding : mergeParentBindings) {
-			spdlog::debug(
-				"recorded armor merge parent binding actor={} bipedObject={} xml='{}' source='{}' parent='{}' buildGroup={} localToParent=({:.3f},{:.3f},{:.3f})",
-				static_cast<void*>(a_state.actor),
-				std::to_underlying(a_bipedObject),
-				a_physicsXmlPath,
-				binding.sourceName,
-				binding.parentName,
-				a_buildGroup,
-				binding.localToParent.translate.x,
-				binding.localToParent.translate.y,
-				binding.localToParent.translate.z);
+		if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+			for (const auto& binding : mergeParentBindings) {
+				spdlog::debug(
+					"recorded armor merge parent binding actor={} bipedObject={} xml='{}' source='{}' parent='{}' buildGroup={} localToParent=({:.3f},{:.3f},{:.3f})",
+					static_cast<void*>(a_state.actor),
+					std::to_underlying(a_bipedObject),
+					a_physicsXmlPath,
+					binding.sourceName,
+					binding.parentName,
+					a_buildGroup,
+					binding.localToParent.translate.x,
+					binding.localToParent.translate.y,
+					binding.localToParent.translate.z);
+			}
 		}
 
 		const auto normalizedXml = ConfigPaths::LowerString(a_physicsXmlPath);
@@ -1134,9 +1149,26 @@ namespace Smp
 				++it;
 				continue;
 			}
-			auto* rebuildObject = record.attachedObject && IsProbablyValidNiObject(record.attachedObject.get()) ? record.attachedObject.get() : partClone;
-			auto* rebuildSourceObject = record.sourceObject && IsProbablyValidNiObject(record.sourceObject.get()) ? record.sourceObject.get() : partClone;
-			auto* rebuildSourceRoot = rebuildSourceObject ? rebuildSourceObject->IsNode() : partClone->IsNode();
+			const auto hadQueuedRuntimeObject = record.attachedObject || record.sourceObject || record.mergeSourceObject;
+			if (hadQueuedRuntimeObject &&
+				(record.attachedObject.get() != partClone ||
+					(record.sourceObject && record.sourceObject.get() != partClone) ||
+					record.mergeSourceObject)) {
+				if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+					spdlog::debug(
+						"rebasing pending armor rebuild onto current biped partClone actor={} bipedObject={} xml='{}' queuedObject={} queuedSource={} queuedMergeSource={} currentPartClone={}",
+						static_cast<void*>(a_actor),
+						std::to_underlying(record.bipedObject),
+						record.physicsXmlPath,
+						static_cast<void*>(record.attachedObject.get()),
+						static_cast<void*>(record.sourceObject.get()),
+						static_cast<void*>(record.mergeSourceObject.get()),
+						static_cast<void*>(partClone));
+				}
+			}
+			auto* rebuildObject = partClone;
+			auto* rebuildSourceObject = partClone;
+			auto* rebuildSourceRoot = partClone->IsNode();
 
 			const auto selectedSummary = loader->LoadSummary(record.physicsXmlPath);
 			if (!selectedSummary) {
@@ -1157,7 +1189,7 @@ namespace Smp
 				.bipedObject = record.bipedObject,
 				.object = rebuildObject,
 				.sourceObject = rebuildSourceObject,
-				.mergeSourceObject = record.mergeSourceObject.get(),
+				.mergeSourceObject = nullptr,
 				.mergeParentBindings = record.mergeParentBindings,
 				.mergeRenameMap = record.mergeRenameMap,
 				.sourceRoot = rebuildSourceRoot,
@@ -1220,27 +1252,29 @@ namespace Smp
 				static_cast<void*>(rebuildObject),
 				record.physicsXmlPath,
 				staleArmorBuildGroups.size());
-			for (const auto& binding : record.mergeParentBindings) {
-				spdlog::debug(
-					"pending armor rebuild merge parent binding actor={} bipedObject={} xml='{}' source='{}' parent='{}' hasLocal={} localToParent=({:.3f},{:.3f},{:.3f})",
-					static_cast<void*>(a_actor),
-					std::to_underlying(record.bipedObject),
-					record.physicsXmlPath,
-					binding.sourceName,
-					binding.parentName,
-					binding.hasLocalToParent,
-					binding.localToParent.translate.x,
-					binding.localToParent.translate.y,
-					binding.localToParent.translate.z);
-			}
-			for (const auto& rename : record.mergeRenameMap) {
-				spdlog::debug(
-					"pending armor rebuild rename map actor={} bipedObject={} xml='{}' source='{}' renamed='{}'",
-					static_cast<void*>(a_actor),
-					std::to_underlying(record.bipedObject),
-					record.physicsXmlPath,
-					rename.sourceName,
-					rename.renamedName);
+			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+				for (const auto& binding : record.mergeParentBindings) {
+					spdlog::debug(
+						"pending armor rebuild merge parent binding actor={} bipedObject={} xml='{}' source='{}' parent='{}' hasLocal={} localToParent=({:.3f},{:.3f},{:.3f})",
+						static_cast<void*>(a_actor),
+						std::to_underlying(record.bipedObject),
+						record.physicsXmlPath,
+						binding.sourceName,
+						binding.parentName,
+						binding.hasLocalToParent,
+						binding.localToParent.translate.x,
+						binding.localToParent.translate.y,
+						binding.localToParent.translate.z);
+				}
+				for (const auto& rename : record.mergeRenameMap) {
+					spdlog::debug(
+						"pending armor rebuild rename map actor={} bipedObject={} xml='{}' source='{}' renamed='{}'",
+						static_cast<void*>(a_actor),
+						std::to_underlying(record.bipedObject),
+						record.physicsXmlPath,
+						rename.sourceName,
+						rename.renamedName);
+				}
 			}
 			auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
@@ -1259,7 +1293,7 @@ namespace Smp
 					record.meshNameMap,
 					rebuildObject,
 					rebuildSourceObject,
-					record.mergeSourceObject.get(),
+					nullptr,
 					record.mergeRenameMap,
 					buildResult.buildGroup);
 				if (hairSlotArmorBuild) {

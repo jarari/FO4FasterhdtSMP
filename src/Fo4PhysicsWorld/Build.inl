@@ -412,13 +412,15 @@ namespace Smp
 			}
 
 			if (a_domain == PrototypeBuildDomain::kArmor && matchedBone.meshOnlySkinBoneCandidate) {
-				spdlog::debug(
-					"deferring armor mesh-only skin bone '{}' actor={} node={} nodeName='{}' buildGroup={} to mesh deformer fallback",
-					matchedBone.name,
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(matchedBone.node),
-					matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{},
-					buildGroup);
+				if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+					spdlog::debug(
+						"deferring armor mesh-only skin bone '{}' actor={} node={} nodeName='{}' buildGroup={} to mesh deformer fallback",
+						matchedBone.name,
+						static_cast<void*>(a_event.actor),
+						static_cast<void*>(matchedBone.node),
+						matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{},
+						buildGroup);
+				}
 				continue;
 			}
 
@@ -476,16 +478,18 @@ namespace Smp
 			}
 			bone->readTransform(0.0F);
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
-			spdlog::debug(
-				"staged prototype body writeback target actor={} bone='{}' node={} nodeName='{}' sourceNode={} sourceName='{}' buildGroup={} mass={:.4f}",
-				static_cast<void*>(a_event.actor),
-				matchedBone.name,
-				static_cast<void*>(matchedBone.node),
-				matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{},
-				static_cast<void*>(matchedBone.sourceNode),
-				matchedBone.sourceNode ? std::string_view(matchedBone.sourceNode->GetName()) : std::string_view{},
-				buildGroup,
-				mass);
+			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+				spdlog::debug(
+					"staged prototype body writeback target actor={} bone='{}' node={} nodeName='{}' sourceNode={} sourceName='{}' buildGroup={} mass={:.4f}",
+					static_cast<void*>(a_event.actor),
+					matchedBone.name,
+					static_cast<void*>(matchedBone.node),
+					matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{},
+					static_cast<void*>(matchedBone.sourceNode),
+					matchedBone.sourceNode ? std::string_view(matchedBone.sourceNode->GetName()) : std::string_view{},
+					buildGroup,
+					mass);
+			}
 
 			PrototypeBody prototypeBody;
 			prototypeBody.actor = a_event.actor;
@@ -597,9 +601,9 @@ namespace Smp
 					skinWorld.skin.get(),
 					skinWorld.index,
 					buildGroup,
-					skinWorld.originalBone.get(),
+					skinWorld.originalBone,
 					skinWorld.originalWorldTransform,
-					skinWorld.originalRootNode.get());
+					skinWorld.originalRootNode);
 			}
 		}
 		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
@@ -649,6 +653,11 @@ namespace Smp
 
 	void Fo4PhysicsWorld::LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, const std::string_view a_reason) const
 	{
+		auto* logger = spdlog::default_logger_raw();
+		if (!logger || !logger->should_log(spdlog::level::debug)) {
+			return;
+		}
+
 		spdlog::debug(
 			"begin actor bullet physics object dump actor={} firstPerson={} bodies={} meshes={} constraints={} reason={}",
 			static_cast<void*>(a_state.actor),
@@ -1091,16 +1100,18 @@ namespace Smp
 			prototypeBody.meshOnlySkinBone = true;
 			a_stagedBodies.push_back(std::move(prototypeBody));
 			++createdFallbackSkinBones;
-			spdlog::debug(
-				"created mesh-only kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' rawNode={} rawNodeName='{}' buildGroup={} because weighted skin bone was not resolved through XML bodies",
-				a_meshName,
-				static_cast<void*>(a_event.actor),
-				a_decodedBone.name,
-				static_cast<void*>(fallbackNode),
-				std::string_view(fallbackNode->GetName()),
-				static_cast<void*>(a_decodedBone.node),
-				a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
-				a_buildGroup);
+			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+				spdlog::debug(
+					"created mesh-only kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' rawNode={} rawNodeName='{}' buildGroup={} because weighted skin bone was not resolved through XML bodies",
+					a_meshName,
+					static_cast<void*>(a_event.actor),
+					a_decodedBone.name,
+					static_cast<void*>(fallbackNode),
+					std::string_view(fallbackNode->GetName()),
+					static_cast<void*>(a_decodedBone.node),
+					a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
+					a_buildGroup);
+			}
 			return std::addressof(a_stagedBodies.back());
 		};
 		struct MatchedDescriptorMesh

@@ -2,11 +2,6 @@
 
 #include "RE/B/BSGraphics.h"
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -23,32 +18,6 @@ namespace Smp::Fo4CpuBuffer
 		std::uint64_t availableBytes{ 0 };
 		bool usedRawDataFallback{ false };
 	};
-
-	[[nodiscard]] inline bool IsReadableRange(const void* a_data, const std::size_t a_size)
-	{
-		if (!a_data || a_size == 0) {
-			return false;
-		}
-
-		const auto* current = static_cast<const std::byte*>(a_data);
-		const auto* const end = current + a_size;
-		while (current < end) {
-			MEMORY_BASIC_INFORMATION info{};
-			if (VirtualQuery(current, std::addressof(info), sizeof(info)) == 0) {
-				return false;
-			}
-			if (info.State != MEM_COMMIT || (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
-				return false;
-			}
-
-			const auto* regionEnd = static_cast<const std::byte*>(info.BaseAddress) + info.RegionSize;
-			if (regionEnd <= current) {
-				return false;
-			}
-			current = regionEnd;
-		}
-		return true;
-	}
 
 	[[nodiscard]] inline std::uint64_t GetAvailableBytes(const RE::BSGraphics::Buffer* a_buffer)
 	{
@@ -83,9 +52,8 @@ namespace Smp::Fo4CpuBuffer
 		}
 
 		const auto* rawData = static_cast<const std::uint8_t*>(a_buffer->data);
-		const auto requiredSize = static_cast<std::size_t>(a_requiredBytes);
 
-		if (a_buffer->heapAllocated && a_buffer->dataSize >= a_requiredBytes && IsReadableRange(rawData, requiredSize)) {
+		if (a_buffer->heapAllocated && a_buffer->dataSize >= a_requiredBytes) {
 			a_result.data = rawData;
 			a_result.availableBytes = a_buffer->dataSize;
 			a_result.usedRawDataFallback = false;
@@ -95,15 +63,13 @@ namespace Smp::Fo4CpuBuffer
 		const auto primaryAvailableBytes = a_buffer->dataSize > a_buffer->dataOffset ? a_buffer->dataSize - a_buffer->dataOffset : 0;
 		if (primaryAvailableBytes >= a_requiredBytes) {
 			const auto* primaryData = rawData + a_buffer->dataOffset;
-			if (IsReadableRange(primaryData, requiredSize)) {
-				a_result.data = primaryData;
-				a_result.availableBytes = primaryAvailableBytes;
-				a_result.usedRawDataFallback = false;
-				return true;
-			}
+			a_result.data = primaryData;
+			a_result.availableBytes = primaryAvailableBytes;
+			a_result.usedRawDataFallback = false;
+			return true;
 		}
 
-		if (!a_buffer->heapAllocated && a_buffer->dataOffset != 0 && IsReadableRange(rawData, requiredSize)) {
+		if (!a_buffer->heapAllocated && a_buffer->dataOffset != 0 && a_buffer->dataSize >= a_requiredBytes) {
 			spdlog::warn(
 				"mesh '{}' using CPU {} data without dataOffset fallback data={} badOffset={} dataSize={} requiredBytes={}",
 				a_meshName,

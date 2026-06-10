@@ -12,6 +12,7 @@
 		bool ShouldBuildSuspendedArmorCandidateLocked(const LifecycleEvent& a_event) const;
 		void SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event);
 		static void MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record);
+		static void StripQueuedArmorRuntimePointers(std::vector<PrototypeArmorRecord>& a_records);
 		static bool PrototypeArmorRecordsIncludeHairSlot(std::span<const PrototypeArmorRecord> a_records);
 		static std::uint32_t PruneStalePendingHairSlotArmorRecords(std::vector<PrototypeArmorRecord>& a_records);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);

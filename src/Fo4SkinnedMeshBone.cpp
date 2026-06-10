@@ -185,8 +185,8 @@ namespace Smp
 							a_slot.index,
 							static_cast<void*>(a_slot.skin.get()),
 							static_cast<void*>(node),
-							static_cast<void*>(a_slot.originalBone.get()));
-						bone = a_slot.originalBone.get();
+							static_cast<void*>(a_slot.originalBone));
+						bone = a_slot.originalBone;
 					}
 				}
 				if (node && a_slot.index < a_slot.skin->worldTransforms.size()) {
@@ -202,15 +202,17 @@ namespace Smp
 					std::ranges::any_of(a_activeSlots, [&a_slot, a_buildGroup](const ActiveSkinSlot& a_other) {
 						return a_other.buildGroup != a_buildGroup && a_other.skin == a_slot.skin.get();
 					});
-				if (!keepRootRebound && a_slot.originalRootNode && a_slot.skin->rootNode != a_slot.originalRootNode.get()) {
-					spdlog::debug(
-						"restored FO4 skin root for '{}' buildGroup={} skin={} root={} originalRoot={}",
-						m_name.c_str(),
-						a_buildGroup,
-						static_cast<void*>(a_slot.skin.get()),
-						static_cast<void*>(a_slot.skin->rootNode),
-						static_cast<void*>(a_slot.originalRootNode.get()));
-					a_slot.skin->rootNode = a_slot.originalRootNode.get();
+				if (!keepRootRebound && a_slot.originalRootNode && a_slot.skin->rootNode != a_slot.originalRootNode) {
+					if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+						spdlog::debug(
+							"restored FO4 skin root for '{}' buildGroup={} skin={} root={} originalRoot={}",
+							m_name.c_str(),
+							a_buildGroup,
+							static_cast<void*>(a_slot.skin.get()),
+							static_cast<void*>(a_slot.skin->rootNode),
+							static_cast<void*>(a_slot.originalRootNode));
+					}
+					a_slot.skin->rootNode = a_slot.originalRootNode;
 				}
 			}
 			return a_slot.buildGroup == a_buildGroup;
@@ -227,27 +229,35 @@ namespace Smp
 		if (!node) {
 			return nullptr;
 		}
+		const auto logDebug = [] {
+			auto* logger = spdlog::default_logger_raw();
+			return logger && logger->should_log(spdlog::level::debug);
+		};
 
 		if (a_slot.index < a_slot.skin->bones.size() && a_slot.skin->bones[a_slot.index] != node) {
-			spdlog::debug(
-				"rebound active FO4 skin bone slot for '{}' buildGroup={} index={} skin={} oldNode={} newNode={}",
-				m_name.c_str(),
-				a_slot.buildGroup,
-				a_slot.index,
-				static_cast<void*>(a_slot.skin.get()),
-				static_cast<void*>(a_slot.skin->bones[a_slot.index]),
-				static_cast<void*>(node));
+			if (logDebug()) {
+				spdlog::debug(
+					"rebound active FO4 skin bone slot for '{}' buildGroup={} index={} skin={} oldNode={} newNode={}",
+					m_name.c_str(),
+					a_slot.buildGroup,
+					a_slot.index,
+					static_cast<void*>(a_slot.skin.get()),
+					static_cast<void*>(a_slot.skin->bones[a_slot.index]),
+					static_cast<void*>(node));
+			}
 			a_slot.skin->bones[a_slot.index] = node;
 		}
 		if (a_slot.skin->worldTransforms[a_slot.index] != std::addressof(node->world)) {
-			spdlog::debug(
-				"rebound active FO4 skin world transform for '{}' buildGroup={} index={} skin={} old={} new={}",
-				m_name.c_str(),
-				a_slot.buildGroup,
-				a_slot.index,
-				static_cast<void*>(a_slot.skin.get()),
-				static_cast<void*>(a_slot.skin->worldTransforms[a_slot.index]),
-				static_cast<void*>(std::addressof(node->world)));
+			if (logDebug()) {
+				spdlog::debug(
+					"rebound active FO4 skin world transform for '{}' buildGroup={} index={} skin={} old={} new={}",
+					m_name.c_str(),
+					a_slot.buildGroup,
+					a_slot.index,
+					static_cast<void*>(a_slot.skin.get()),
+					static_cast<void*>(a_slot.skin->worldTransforms[a_slot.index]),
+					static_cast<void*>(std::addressof(node->world)));
+			}
 			a_slot.skin->worldTransforms[a_slot.index] = std::addressof(node->world);
 		}
 
@@ -257,13 +267,15 @@ namespace Smp
 		}
 
 		if (a_slot.cached && current != a_slot.cached) {
-			spdlog::debug(
-				"recached FO4 skin world transform for bone '{}' buildGroup={} index={} old={} new={}",
-				m_name.c_str(),
-				a_slot.buildGroup,
-				a_slot.index,
-				static_cast<void*>(a_slot.cached),
-				static_cast<void*>(current));
+			if (logDebug()) {
+				spdlog::debug(
+					"recached FO4 skin world transform for bone '{}' buildGroup={} index={} old={} new={}",
+					m_name.c_str(),
+					a_slot.buildGroup,
+					a_slot.index,
+					static_cast<void*>(a_slot.cached),
+					static_cast<void*>(current));
+			}
 		}
 		a_slot.cached = current;
 		return current;

@@ -28,9 +28,9 @@ namespace Smp
 			std::uint64_t buildGroup{ 0 };
 			RE::NiPointer<RE::NiAVObject> reboundBone;
 			RE::NiTransform* reboundWorldTransform{ nullptr };
-			RE::NiPointer<RE::NiAVObject> originalBone;
+			RE::NiAVObject* originalBone{ nullptr };
 			RE::NiTransform* originalWorldTransform{ nullptr };
-			RE::NiPointer<RE::NiAVObject> originalRootNode;
+			RE::NiAVObject* originalRootNode{ nullptr };
 		};
 
 		void AddSkinWorldTransform(
@@ -57,9 +57,9 @@ namespace Smp
 			RE::NiPointer<RE::BSSkin::Instance> skin;
 			std::uint32_t index{ 0 };
 			std::uint64_t buildGroup{ 0 };
-			RE::NiPointer<RE::NiAVObject> originalBone;
+			RE::NiAVObject* originalBone{ nullptr };
 			RE::NiTransform* originalWorldTransform{ nullptr };
-			RE::NiPointer<RE::NiAVObject> originalRootNode;
+			RE::NiAVObject* originalRootNode{ nullptr };
 			RE::NiTransform* cached{ nullptr };
 		};
 

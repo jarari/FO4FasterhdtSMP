@@ -1245,9 +1245,9 @@ namespace
 		{
 			RE::NiPointer<RE::BSSkin::Instance> skin;
 			std::uint32_t index{ 0 };
-			RE::NiPointer<RE::NiAVObject> originalBone;
+			RE::NiAVObject* originalBone{ nullptr };
 			RE::NiTransform* originalWorldTransform{ nullptr };
-			RE::NiPointer<RE::NiAVObject> originalRootNode;
+			RE::NiAVObject* originalRootNode{ nullptr };
 		};
 
 		RE::NiNode* node{ nullptr };
@@ -2003,27 +2003,38 @@ namespace
 			if (!skin->worldTransforms.empty() && skin->worldTransforms.size() != skin->bones.size()) {
 				spdlog::warn("FO4 skin instance on geometry '{}' has {} bones but {} world transforms", geometry->GetName(), skin->bones.size(), skin->worldTransforms.size());
 			}
+			std::vector<RE::NiNode*> skinBones;
+			skinBones.reserve(skin->bones.size());
 			for (std::uint32_t index = 0; index < skin->bones.size(); ++index) {
 				auto* boneObject = skin->bones[index];
 				if (!boneObject) {
+					skinBones.push_back(nullptr);
 					continue;
 				}
 				if (!IsProbablyValidNiObject(boneObject)) {
 					spdlog::warn(
-						"skipping invalid skin bone pointer={} slot={} on geometry '{}'",
+						"skipping geometry '{}' because skin bone pointer={} slot={} is invalid",
+						geometry->GetName(),
 						static_cast<void*>(boneObject),
-						index,
-						geometry->GetName());
-					continue;
+						index);
+					return;
 				}
 
 				auto* bone = boneObject->IsNode();
 				if (!bone) {
-					spdlog::warn("skipping non-node skin bone '{}' on geometry '{}'", boneObject->GetName(), geometry->GetName());
+					spdlog::warn("skipping geometry '{}' because skin bone '{}' slot={} is not a node", geometry->GetName(), boneObject->GetName(), index);
+					return;
+				}
+				skinBones.push_back(bone);
+			}
+
+			for (std::uint32_t index = 0; index < skinBones.size(); ++index) {
+				auto* bone = skinBones[index];
+				if (!bone) {
 					continue;
 				}
 
-				const auto name = boneObject->GetName();
+				const auto name = bone->GetName();
 				const auto matchedName = Smp::FindMatchingPhysicsName(a_boneNames, name);
 				if (!name.empty() && (includeAllSkinBones || includeAllWhenUnfiltered || matchedName)) {
 					if (auto* existing = FindMatchedSkinBone(a_result, bone)) {
@@ -2850,16 +2861,18 @@ namespace
 						node->local = parentBinding->localToParent;
 					}
 					UpdateNodeWorldFromLocal(node);
-					spdlog::debug(
-						"realigned pre-merged armor node source='{}' renamed='{}' node={} to actor parent={} parentName='{}' local=({:.3f},{:.3f},{:.3f})",
-						entry.sourceName,
-						entry.renamedName,
-						static_cast<void*>(node),
-						static_cast<void*>(expectedParent),
-						std::string_view(expectedParent->GetName()),
-						node->local.translate.x,
-						node->local.translate.y,
-						node->local.translate.z);
+					if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+						spdlog::debug(
+							"realigned pre-merged armor node source='{}' renamed='{}' node={} to actor parent={} parentName='{}' local=({:.3f},{:.3f},{:.3f})",
+							entry.sourceName,
+							entry.renamedName,
+							static_cast<void*>(node),
+							static_cast<void*>(expectedParent),
+							std::string_view(expectedParent->GetName()),
+							node->local.translate.x,
+							node->local.translate.y,
+							node->local.translate.z);
+					}
 				} else if (expectedParent &&
 					hasRecordLocal &&
 					node->parent &&
@@ -2872,17 +2885,19 @@ namespace
 						Smp::PhysicsNamesEqual(parentRecordBinding->parentName, parentBinding->parentName)) {
 						node->local = parentRecordBinding->localToParent.Invert() * parentBinding->localToParent;
 						UpdateNodeWorldFromLocal(node);
-						spdlog::debug(
-							"restored pre-merged armor descendant reference pose source='{}' renamed='{}' node={} parent={} parentName='{}' recordParent='{}' local=({:.3f},{:.3f},{:.3f})",
-							entry.sourceName,
-							entry.renamedName,
-							static_cast<void*>(node),
-							static_cast<void*>(node->parent),
-							std::string_view(node->parent->GetName()),
-							std::string_view(parentBinding->parentName),
-							node->local.translate.x,
-							node->local.translate.y,
-							node->local.translate.z);
+						if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+							spdlog::debug(
+								"restored pre-merged armor descendant reference pose source='{}' renamed='{}' node={} parent={} parentName='{}' recordParent='{}' local=({:.3f},{:.3f},{:.3f})",
+								entry.sourceName,
+								entry.renamedName,
+								static_cast<void*>(node),
+								static_cast<void*>(node->parent),
+								std::string_view(node->parent->GetName()),
+								std::string_view(parentBinding->parentName),
+								node->local.translate.x,
+								node->local.translate.y,
+								node->local.translate.z);
+						}
 					}
 				}
 			}
@@ -2901,21 +2916,23 @@ namespace
 			});
 			registeredNames.insert(sourceKey);
 
-			spdlog::debug(
-				"registered pre-merged armor rename source='{}' renamed='{}' node={} parent={} parentName='{}' recordBinding={} recordParent='{}' local=({:.3f},{:.3f},{:.3f}) recordLocal=({:.3f},{:.3f},{:.3f})",
-				entry.sourceName,
-				entry.renamedName,
-				static_cast<void*>(node),
-				static_cast<void*>(node->parent),
-				node->parent ? std::string_view(node->parent->GetName()) : std::string_view{},
-				hasRecordBinding,
-				hasRecordBinding ? std::string_view(parentBinding->parentName) : std::string_view{},
-				node->local.translate.x,
-				node->local.translate.y,
-				node->local.translate.z,
-				recordLocal.translate.x,
-				recordLocal.translate.y,
-				recordLocal.translate.z);
+			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
+				spdlog::debug(
+					"registered pre-merged armor rename source='{}' renamed='{}' node={} parent={} parentName='{}' recordBinding={} recordParent='{}' local=({:.3f},{:.3f},{:.3f}) recordLocal=({:.3f},{:.3f},{:.3f})",
+					entry.sourceName,
+					entry.renamedName,
+					static_cast<void*>(node),
+					static_cast<void*>(node->parent),
+					node->parent ? std::string_view(node->parent->GetName()) : std::string_view{},
+					hasRecordBinding,
+					hasRecordBinding ? std::string_view(parentBinding->parentName) : std::string_view{},
+					node->local.translate.x,
+					node->local.translate.y,
+					node->local.translate.z,
+					recordLocal.translate.x,
+					recordLocal.translate.y,
+					recordLocal.translate.z);
+			}
 		}
 	}
 

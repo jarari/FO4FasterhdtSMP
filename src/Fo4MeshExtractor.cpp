@@ -171,8 +171,7 @@ namespace
 		RE::BSGeometry* a_geometry,
 		const RE::BSGraphics::VertexDesc& a_rendererVertexDesc,
 		const RE::BSGraphics::VertexDesc& a_geometryVertexDesc,
-		const std::uint32_t a_vertexCount,
-		const std::string& a_meshName)
+		const std::uint32_t a_vertexCount)
 	{
 		if (!a_geometry || a_vertexCount == 0 || a_rendererVertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX)) {
 			return std::nullopt;
@@ -186,27 +185,11 @@ namespace
 		const auto* geometryBytes = reinterpret_cast<const std::uint8_t*>(a_geometry);
 		constexpr std::size_t kSplitPositionDataSizeOffset = 0x170;
 		constexpr std::size_t kSplitPositionDataPointerOffset = 0x180;
-		constexpr std::size_t kSplitPositionReadableBytes = kSplitPositionDataPointerOffset + sizeof(const std::uint8_t*);
-		if (!Smp::Fo4CpuBuffer::IsReadableRange(a_geometry, kSplitPositionReadableBytes)) {
-			return std::nullopt;
-		}
 
 		const auto dataSize = ReadUnaligned<std::uint32_t>(geometryBytes + kSplitPositionDataSizeOffset);
 		const auto data = ReadUnaligned<const std::uint8_t*>(geometryBytes + kSplitPositionDataPointerOffset);
 		const auto requiredBytes = static_cast<std::uint64_t>(splitStride) * a_vertexCount;
 		if (requiredBytes > std::numeric_limits<std::uint32_t>::max() || dataSize != requiredBytes || !data) {
-			return std::nullopt;
-		}
-		if (!Smp::Fo4CpuBuffer::IsReadableRange(data, static_cast<std::size_t>(requiredBytes))) {
-			spdlog::debug(
-				"mesh '{}' ignored unreadable split position stream positions={} stride={} bytes={} vertices={} rendererDesc={:#x} geometryDesc={:#x}",
-				a_meshName,
-				static_cast<const void*>(data),
-				splitStride,
-				dataSize,
-				a_vertexCount,
-				a_rendererVertexDesc.desc,
-				a_geometryVertexDesc.desc);
 			return std::nullopt;
 		}
 
@@ -272,18 +255,6 @@ namespace
 					fod->positionCount,
 					fod->vertexCount,
 					a_vertexCount);
-				continue;
-			}
-
-			const auto requiredBytes = static_cast<std::uint64_t>(a_vertexCount) * sizeof(RE::NiPoint3);
-			if (requiredBytes > std::numeric_limits<std::size_t>::max() ||
-				!Smp::Fo4CpuBuffer::IsReadableRange(fod->positions, static_cast<std::size_t>(requiredBytes))) {
-				spdlog::debug(
-					"mesh '{}' ignored unreadable FaceGen object data positions={} vertices={} requiredBytes={}",
-					a_meshName,
-					static_cast<const void*>(fod->positions),
-					a_vertexCount,
-					requiredBytes);
 				continue;
 			}
 
@@ -376,28 +347,6 @@ namespace
 		return Smp::FindMatchingPhysicsName(a_meshNames, name).has_value();
 	}
 
-	bool IsValidNiObjectForIsNode(const RE::NiAVObject* a_object)
-	{
-		constexpr std::uintptr_t kCanonicalUserSpaceMax = 0x00007FFFFFFFFFFFULL;
-		if (!a_object || reinterpret_cast<std::uintptr_t>(a_object) > kCanonicalUserSpaceMax) {
-			return false;
-		}
-		if (!Smp::Fo4CpuBuffer::IsReadableRange(a_object, sizeof(void*))) {
-			return false;
-		}
-
-		const auto vtable = *reinterpret_cast<void* const* const*>(a_object);
-		if (!vtable || reinterpret_cast<std::uintptr_t>(vtable) > kCanonicalUserSpaceMax) {
-			return false;
-		}
-		if (!Smp::Fo4CpuBuffer::IsReadableRange(vtable, sizeof(void*) * 5)) {
-			return false;
-		}
-
-		const auto isNode = vtable[4];
-		return isNode && reinterpret_cast<std::uintptr_t>(isNode) <= kCanonicalUserSpaceMax;
-	}
-
 	std::uint32_t CountNullSkinBones(RE::BSSkin::Instance* a_skin)
 	{
 		if (!a_skin) {
@@ -438,18 +387,19 @@ namespace
 		}
 	}
 
-	void DecodeSkinBones(RE::BSSkin::Instance* a_skin, std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
+	bool DecodeSkinBones(RE::BSSkin::Instance* a_skin, std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
 	{
 		if (!a_skin) {
-			return;
+			return false;
 		}
 
 		if (a_skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
 			spdlog::warn("skipping suspicious FO4 skin instance with {} bones", a_skin->bones.size());
-			return;
+			return false;
 		}
 		if (!a_skin->worldTransforms.empty() && a_skin->worldTransforms.size() != a_skin->bones.size()) {
 			spdlog::warn("FO4 skin instance has {} bones but {} world transforms", a_skin->bones.size(), a_skin->worldTransforms.size());
+			return false;
 		}
 		const bool useBoneData = a_skin->boneData && a_skin->boneData->transforms.size() <= RE::BSSkin::kMaxExpectedBones;
 		if (a_skin->boneData && !useBoneData) {
@@ -462,20 +412,13 @@ namespace
 			Smp::Fo4DecodedSkinBone decoded;
 			if (!boneObject) {
 				++a_stats.nullBones;
-				a_bones.push_back(decoded);
-				continue;
-			}
-			if (!IsValidNiObjectForIsNode(boneObject)) {
-				++a_stats.nonNodeBones;
-				a_bones.push_back(decoded);
-				continue;
+				return false;
 			}
 
 			auto* bone = boneObject->IsNode();
 			if (!bone) {
 				++a_stats.nonNodeBones;
-				a_bones.push_back(decoded);
-				continue;
+				return false;
 			}
 
 			const auto name = boneObject->GetName();
@@ -496,6 +439,7 @@ namespace
 
 			a_bones.push_back(std::move(decoded));
 		}
+		return true;
 	}
 
 	std::uint32_t CountBadBoneIndex(
@@ -626,7 +570,10 @@ namespace
 		mesh.skinRootNode = skin->rootNode;
 		mesh.name = ResolveGeometryName(a_geometry);
 		MakeSkinBonesReal(skin, mesh.name);
-		DecodeSkinBones(skin, mesh.bones, a_result.stats);
+		if (!DecodeSkinBones(skin, mesh.bones, a_result.stats)) {
+			spdlog::warn("skipping mesh '{}' because its FO4 skin bone array is not coherent", mesh.name);
+			return false;
+		}
 		mesh.vertices.reserve(triShape->numVertices);
 		std::vector<std::uint32_t> vertexRemap(triShape->numVertices, std::numeric_limits<std::uint32_t>::max());
 
@@ -647,7 +594,7 @@ namespace
 		const auto hasDecodablePositionData = vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_VERTEX);
 		const auto splitPositions = hasDecodablePositionData ?
 			std::optional<SplitPositionStream>{} :
-			ResolveSplitPositionStream(a_geometry, rendererVertexDesc, geometryVertexDesc, triShape->numVertices, mesh.name);
+			ResolveSplitPositionStream(a_geometry, rendererVertexDesc, geometryVertexDesc, triShape->numVertices);
 		const auto* faceGenPositions = hasDecodablePositionData || splitPositions.has_value() ?
 			nullptr :
 			ResolveFaceGenObjectPositions(a_geometry, triShape->numVertices, mesh.name);

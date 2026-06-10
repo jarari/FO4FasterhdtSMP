@@ -65,6 +65,7 @@ namespace Smp
 		RE::NiPointer<RE::NiAVObject> retainedMergeSourceObject;
 		RE::NiPointer<RE::NiNode>     retainedDestinationRoot;
 		RE::NiPointer<RE::NiNode>     retainedSourceRoot;
+		std::vector<RE::NiPointer<RE::NiAVObject>> retainedTrustedActorSkeletonNodes;
 		RE::ActorHandle               retainedActor;
 	};
 
