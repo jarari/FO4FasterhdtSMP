@@ -274,6 +274,10 @@ namespace Smp
 				it = suspendedActors_.erase(it);
 				continue;
 			}
+			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
+				++it;
+				continue;
+			}
 			if (existingState) {
 				if ((existingState->runtimeSuspended || existingState->runtimeSoftSuspended) && !it->armorRecords.empty()) {
 					for (auto& record : it->armorRecords) {
@@ -334,6 +338,9 @@ namespace Smp
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		for (auto& actorState : prototypeActors_) {
+			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actorState.actor)) {
+				continue;
+			}
 			const auto needsSoftResume = actorState.runtimeSoftSuspended;
 			const auto needsRebuild = actorState.runtimeSuspended && !actorState.armorRecords.empty();
 			if ((!needsSoftResume && !needsRebuild) || actorState.actor == player) {
@@ -436,6 +443,9 @@ namespace Smp
 			}
 			if (!a_record.mergeSourceObject && existing->mergeSourceObject) {
 				a_record.mergeSourceObject = existing->mergeSourceObject;
+			}
+			if (!a_record.mergeSourceSnapshot && existing->mergeSourceSnapshot) {
+				a_record.mergeSourceSnapshot = existing->mergeSourceSnapshot;
 			}
 			if (mayInheritRecordedMergeState && a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
 				a_record.mergeParentBindings = existing->mergeParentBindings;
@@ -764,6 +774,7 @@ namespace Smp
 			.attachedObject = a_event.object,
 			.sourceObject = a_event.sourceObject,
 			.mergeSourceObject = a_event.mergeSourceObject,
+			.mergeSourceSnapshot = CloneNodeExact(a_event.mergeSourceObject ? a_event.mergeSourceObject->IsNode() : nullptr),
 			.mergeParentBindings = a_event.mergeParentBindings,
 			.mergeRenameMap = a_event.mergeRenameMap,
 		});
@@ -855,6 +866,7 @@ namespace Smp
 		}
 
 		const auto normalizedXml = ConfigPaths::LowerString(a_physicsXmlPath);
+		auto mergeSourceSnapshot = CloneNodeExact(a_mergeSourceObject ? a_mergeSourceObject->IsNode() : nullptr);
 		const auto appendBuildGroup = [](std::vector<std::uint64_t>& a_buildGroups, const std::uint64_t a_buildGroup) {
 			if (a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) == a_buildGroups.end()) {
 				a_buildGroups.push_back(a_buildGroup);
@@ -880,6 +892,9 @@ namespace Smp
 			if (a_mergeSourceObject) {
 				existing->mergeSourceObject = a_mergeSourceObject;
 			}
+			if (mergeSourceSnapshot) {
+				existing->mergeSourceSnapshot = std::move(mergeSourceSnapshot);
+			}
 			existing->mergeParentBindings = std::move(mergeParentBindings);
 			existing->mergeRenameMap = std::move(mergeRenameMap);
 			appendBuildGroup(existing->buildGroups, a_buildGroup);
@@ -893,6 +908,7 @@ namespace Smp
 				.attachedObject = a_attachedObject,
 				.sourceObject = a_sourceObject,
 				.mergeSourceObject = a_mergeSourceObject,
+				.mergeSourceSnapshot = std::move(mergeSourceSnapshot),
 				.mergeParentBindings = std::move(mergeParentBindings),
 				.mergeRenameMap = std::move(mergeRenameMap),
 				.buildGroups = std::move(buildGroups),
@@ -1066,6 +1082,9 @@ namespace Smp
 				if (!a_target.mergeSourceObject && a_source.mergeSourceObject) {
 					a_target.mergeSourceObject = a_source.mergeSourceObject;
 				}
+				if (!a_target.mergeSourceSnapshot && a_source.mergeSourceSnapshot) {
+					a_target.mergeSourceSnapshot = a_source.mergeSourceSnapshot;
+				}
 				if (a_target.meshNameMap.empty() && !a_source.meshNameMap.empty()) {
 					a_target.meshNameMap = a_source.meshNameMap;
 				}
@@ -1189,7 +1208,7 @@ namespace Smp
 				.bipedObject = record.bipedObject,
 				.object = rebuildObject,
 				.sourceObject = rebuildSourceObject,
-				.mergeSourceObject = nullptr,
+				.mergeSourceObject = record.mergeSourceSnapshot.get(),
 				.mergeParentBindings = record.mergeParentBindings,
 				.mergeRenameMap = record.mergeRenameMap,
 				.sourceRoot = rebuildSourceRoot,
@@ -1293,7 +1312,7 @@ namespace Smp
 					record.meshNameMap,
 					rebuildObject,
 					rebuildSourceObject,
-					nullptr,
+					record.mergeSourceSnapshot.get(),
 					record.mergeRenameMap,
 					buildResult.buildGroup);
 				if (hairSlotArmorBuild) {
@@ -1350,9 +1369,6 @@ namespace Smp
 
 	void Fo4PhysicsWorld::TryRebuildPendingActorsLocked(RE::Actor* a_actor)
 	{
-		if (characterCustomizationMenuDepth_ > 0) {
-			return;
-		}
 		if (pendingActorRebuilds_.empty()) {
 			return;
 		}
@@ -1373,6 +1389,10 @@ namespace Smp
 				continue;
 			}
 			if (a_actor && actor != a_actor) {
+				++it;
+				continue;
+			}
+			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
 				++it;
 				continue;
 			}
@@ -1527,7 +1547,7 @@ namespace Smp
 
 	void Fo4PhysicsWorld::TryRebuildPendingHeadsLocked()
 	{
-		if (characterCustomizationMenuDepth_ > 0 || pendingHeadRebuilds_.empty()) {
+		if (pendingHeadRebuilds_.empty()) {
 			return;
 		}
 		if (!InitializeLocked()) {
@@ -1544,6 +1564,10 @@ namespace Smp
 			auto* actor = resolvedActor.get();
 			if (!actor) {
 				it = pendingHeadRebuilds_.erase(it);
+				continue;
+			}
+			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
+				++it;
 				continue;
 			}
 			const auto actorRebuildPending = std::ranges::any_of(pendingActorRebuilds_, [actor](const PendingActorRebuild& a_pending) {

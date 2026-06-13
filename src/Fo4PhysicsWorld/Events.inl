@@ -52,6 +52,10 @@ namespace Smp
 					static_cast<void*>(a_event.object));
 				return RE::BSEventNotifyControl::kContinue;
 			}
+			if (DeferCharacterCustomizationLifecycleLocked(a_event, true, false)) {
+				return RE::BSEventNotifyControl::kContinue;
+			}
+
 			auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState) {
 				spdlog::trace(
@@ -109,9 +113,13 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 		} else if (IsResetCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
+			const auto deferForCustomization = DeferCharacterCustomizationLifecycleLocked(a_event, true, true);
 			bool queuedSoftReload = false;
 			for (auto& actorState : prototypeActors_) {
 				if (actorState.actor != a_event.actor) {
+					continue;
+				}
+				if (deferForCustomization) {
 					continue;
 				}
 				queuedSoftReload = SoftReloadPrototypeStateLocked(actorState, a_event.type) || queuedSoftReload;
@@ -119,7 +127,6 @@ namespace Smp
 			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
 				return !a_state.actor && !a_state.HasRuntime() && a_state.armorRecords.empty();
 			});
-			const auto deferForCustomization = characterCustomizationMenuDepth_ > 0;
 			if (!deferForCustomization) {
 				PruneInvalidPrototypeStatesLocked();
 			}
@@ -129,7 +136,7 @@ namespace Smp
 				rebuilt = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) != nullptr;
 			}
 			if (!rebuilt && queuedSoftReload) {
-				if (characterCustomizationMenuDepth_ == 0) {
+				if (!deferForCustomization) {
 					MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson);
 				}
 			}
@@ -147,9 +154,9 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 		} else if (IsHeadCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
-			if (characterCustomizationMenuDepth_ > 0) {
+			if (DeferCharacterCustomizationLifecycleLocked(a_event, false, true)) {
 				spdlog::debug(
-					"deferred head physics rebuild candidate {} actor={} object={} while customization is active",
+					"deferred head physics rebuild candidate {} for customization target actor={} object={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object));
@@ -203,23 +210,22 @@ namespace Smp
 			const auto wasClosed = characterCustomizationMenuDepth_ == 0;
 			++characterCustomizationMenuDepth_;
 			if (wasClosed) {
-				pendingActorRebuilds_.clear();
-				pendingHeadRebuilds_.clear();
-				SuspendPrototypeStatesForCustomizationMenuLocked();
+				SuspendCharacterCustomizationTargetLocked();
 			}
 			spdlog::debug(
-				"character customization menu '{}' opened; prototype physics suspended for active actors",
-				std::string_view(a_event.menuName));
+				"character customization menu '{}' opened; target-scoped prototype physics suspension active actor={}",
+				std::string_view(a_event.menuName),
+				static_cast<void*>(ResolveCharacterCustomizationTargetLocked()));
 		} else {
 			if (characterCustomizationMenuDepth_ > 0) {
 				--characterCustomizationMenuDepth_;
 			}
 			if (characterCustomizationMenuDepth_ == 0) {
-				ReloadPrototypeStatesForCustomizationMenuLocked();
+				ReloadCharacterCustomizationTargetLocked();
 			}
 			ResetStepClockLocked();
 			spdlog::debug(
-				"character customization menu '{}' closed; prototype physics reloaded from tracked armor records",
+				"character customization menu '{}' closed; target-scoped prototype physics reload queued",
 				std::string_view(a_event.menuName));
 		}
 

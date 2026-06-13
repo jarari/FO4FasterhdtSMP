@@ -83,6 +83,7 @@ namespace Smp
 		void WriteBackPrototypeBodies(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
+		void NoteCharacterCustomizationTarget(RE::Actor* a_actor, std::uint32_t a_editMode);
 
 		RE::BSEventNotifyControl ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>* a_source) override;
 		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_source) override;

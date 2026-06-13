@@ -80,6 +80,7 @@ namespace Smp
 		targetWind_.setZero();
 		windWeatherCooldown_ = 0.0F;
 		characterCustomizationMenuDepth_ = 0;
+		ClearCharacterCustomizationTargetLocked();
 	}
 
 	void Fo4PhysicsWorld::NoteLifecycleCandidate(const LifecycleEvent& a_event)
@@ -119,25 +120,21 @@ namespace Smp
 			return;
 		}
 
-		if (characterCustomizationMenuDepth_ > 0) {
+		if (DeferCharacterCustomizationLifecycleLocked(a_event, true, false)) {
 			if (actorArmorAttach) {
-				auto armorRecords = CollectQueuedArmorRecordsForAttachLocked(a_event);
-				const auto queuedRecords = armorRecords.size();
-				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords), false, false);
 				spdlog::debug(
-					"queued scoped armor prototype physics resume for customization attach {} actor={} object={} armorRecords={}",
+					"deferred scoped armor prototype physics resume for customization target attach {} actor={} object={} armorRecords={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object),
-					queuedRecords);
+					characterCustomizationArmorRecords_.size());
 			} else {
 				spdlog::debug(
-					"deferred prototype physics attach candidate {} actor={} object={} while customization is active",
+					"deferred prototype physics attach candidate {} for customization target actor={} object={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object));
 			}
-			ResetStepClockLocked();
 			return;
 		}
 

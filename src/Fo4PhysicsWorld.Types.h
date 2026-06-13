@@ -68,6 +68,7 @@
 			RE::NiPointer<RE::NiAVObject> attachedObject;
 			RE::NiPointer<RE::NiAVObject> sourceObject;
 			RE::NiPointer<RE::NiAVObject> mergeSourceObject;
+			RE::NiPointer<RE::NiAVObject> mergeSourceSnapshot;
 			std::vector<MergeParentBinding> mergeParentBindings;
 			std::vector<MergeRename> mergeRenameMap;
 			std::vector<std::uint64_t> buildGroups;

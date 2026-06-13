@@ -48,6 +48,7 @@ namespace Hooks
 		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataGetBoneName{ REL::ID{ 190712, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenNiNodeFixSkinInstances{ REL::ID{ 399655, 0 } };
+		REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu{ REL::ID{ 411372, 2223366 } };
 	}
 
 	using MainOnIdleUpdateHighActorsArraySorted_t = void (*)(RE::Main*, float);
@@ -64,6 +65,7 @@ namespace Hooks
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
 	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
+	using LooksMenuUtilsShowLooksMenu_t = void (*)(RE::TESObjectREFR*, std::uint32_t, RE::TESObjectREFR*, RE::TESObjectREFR*, RE::TESObjectREFR*);
 
 	MainOnIdleUpdateHighActorsArraySorted_t OriginalMainOnIdleUpdateHighActorsArraySorted{ nullptr };
 	MainSwap_t                     OriginalMainSwap{ nullptr };
@@ -82,6 +84,7 @@ namespace Hooks
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
+	LooksMenuUtilsShowLooksMenu_t  OriginalLooksMenuUtilsShowLooksMenu{ nullptr };
 
 	inline constexpr std::size_t kApplySkinnedObjectsPrologueSize = 14;
 	inline constexpr std::size_t kAttachSkinnedObjectPrologueSize = 15;
@@ -712,6 +715,7 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::RemovePart", Addresses::BipedAnimRemovePart.address());
 		LogRelocationTarget("AIProcess::Update3DModel", Addresses::Update3DModel.address());
 		LogRelocationTarget("Actor::Reset3D", Addresses::Reset3D.address());
+		LogRelocationTarget("LooksMenuUtils::ShowLooksMenu", Addresses::LooksMenuUtilsShowLooksMenu.address());
 		if (REX::FModule::IsRuntimeOG()) {
 			LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Addresses::BSFaceGenAddHeadPartOnActor.address());
 		} else {
@@ -1091,6 +1095,24 @@ namespace Hooks
 			a_boneName && a_boneName->c_str() ? a_boneName->c_str() : "");
 	}
 
+	void HookedLooksMenuUtilsShowLooksMenu(
+		RE::TESObjectREFR* a_target,
+		const std::uint32_t a_editMode,
+		RE::TESObjectREFR* a_target2,
+		RE::TESObjectREFR* a_swapTarget,
+		RE::TESObjectREFR* a_vendor)
+	{
+		auto* actor = AsActor(a_target);
+		if (!actor) {
+			actor = RE::PlayerCharacter::GetSingleton();
+		}
+		if (actor) {
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteCharacterCustomizationTarget(actor, a_editMode);
+		}
+
+		OriginalLooksMenuUtilsShowLooksMenu(a_target, a_editMode, a_target2, a_swapTarget, a_vendor);
+	}
+
 	void HookedMainOnIdleUpdateHighActorsArraySorted(RE::Main* a_main, float a_distance)
 	{
 		OriginalMainOnIdleUpdateHighActorsArraySorted(a_main, a_distance);
@@ -1213,6 +1235,25 @@ namespace Hooks
 				spdlog::info("BSFaceGenModelExtraData::SetBoneName detour installed at {:x}", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
 			}
 		}
+		if (!OriginalLooksMenuUtilsShowLooksMenu) {
+			OriginalLooksMenuUtilsShowLooksMenu = reinterpret_cast<LooksMenuUtilsShowLooksMenu_t>(Addresses::LooksMenuUtilsShowLooksMenu.address());
+			DetourTransactionBegin();
+			DetourUpdateThread(GetCurrentThread());
+			const auto detourError = DetourAttach(
+				reinterpret_cast<PVOID*>(std::addressof(OriginalLooksMenuUtilsShowLooksMenu)),
+				reinterpret_cast<PVOID>(&HookedLooksMenuUtilsShowLooksMenu));
+			const auto commitError = DetourTransactionCommit();
+			if (detourError != NO_ERROR || commitError != NO_ERROR) {
+				spdlog::error(
+					"LooksMenuUtils::ShowLooksMenu detour failed attachError={} commitError={} target={}",
+					detourError,
+					commitError,
+					reinterpret_cast<void*>(Addresses::LooksMenuUtilsShowLooksMenu.address()));
+				OriginalLooksMenuUtilsShowLooksMenu = nullptr;
+			} else {
+				spdlog::info("LooksMenuUtils::ShowLooksMenu detour installed at {:x}", Addresses::LooksMenuUtilsShowLooksMenu.address());
+			}
+		}
 		if (isOG && !OriginalFaceGenSkinSingleGeometry) {
 			const auto skinSingleCallsite = Addresses::BSFaceGenAddHeadPartOnActor.address() + (isOG ? kAddHeadPartSkinSingleCallOffsetOG : kAddHeadPartSkinSingleCallOffsetOG);
 			OriginalFaceGenSkinSingleGeometry = reinterpret_cast<FaceGenSkinSingleGeometry_t>(
@@ -1235,6 +1276,7 @@ namespace Hooks
 			OriginalFaceGenSkinAllGeometry &&
 			OriginalUpdate3DModel &&
 			OriginalReset3D &&
+			OriginalLooksMenuUtilsShowLooksMenu &&
 			faceGenBoneNameLimitsValid &&
 			(!isOG || OriginalSetFaceGenBoneName) &&
 			(!isOG || OriginalFaceGenSkinSingleGeometry);

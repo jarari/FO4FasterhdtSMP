@@ -30,10 +30,6 @@ namespace Smp
 				ResumeFromLoadingMenuLocked();
 				return;
 			}
-			if (characterCustomizationMenuDepth_ > 0) {
-				ResetStepClockLocked();
-				return;
-			}
 
 			accumulatedInterval_ += delta;
 			averageInterval_ += (delta - averageInterval_) * 0.125F;
@@ -570,7 +566,7 @@ namespace Smp
 		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
-			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
+			if (loadingPhysicsSuspended_) {
 				ResetStepClockLocked();
 				return;
 			}
@@ -655,7 +651,7 @@ namespace Smp
 		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
-			if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
+			if (loadingPhysicsSuspended_) {
 				ResetStepClockLocked();
 				return;
 			}
@@ -740,7 +736,7 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		if (loadingPhysicsSuspended_ || characterCustomizationMenuDepth_ > 0) {
+		if (loadingPhysicsSuspended_) {
 			return;
 		}
 

@@ -40,8 +40,13 @@
 		bool RebuildPendingArmorRecordsLocked(RE::Actor* a_actor, PendingActorRebuild& a_pending);
 		void TryRebuildPendingActorsLocked(RE::Actor* a_actor = nullptr);
 		void TryRebuildPendingHeadsLocked();
-		void SuspendPrototypeStatesForCustomizationMenuLocked();
-		void ReloadPrototypeStatesForCustomizationMenuLocked();
+		bool NoteCharacterCustomizationTargetLocked(RE::Actor* a_actor, std::uint32_t a_editMode);
+		RE::Actor* ResolveCharacterCustomizationTargetLocked();
+		bool IsCharacterCustomizationTargetLocked(RE::Actor* a_actor);
+		bool DeferCharacterCustomizationLifecycleLocked(const LifecycleEvent& a_event, bool a_actorDirty, bool a_headDirty);
+		void SuspendCharacterCustomizationTargetLocked();
+		void ReloadCharacterCustomizationTargetLocked();
+		void ClearCharacterCustomizationTargetLocked();
 		void SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state);
 		void SoftSuspendPrototypeRuntimeLocked(PrototypeActorState& a_state);
 		bool ResumeSoftSuspendedPrototypeRuntimeLocked(PrototypeActorState& a_state);
