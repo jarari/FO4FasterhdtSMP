@@ -431,7 +431,7 @@ namespace
 			}
 			visitedRoots.insert(root);
 
-			if (auto* found = Smp::NiObject::FindNodeByName(root, name)) {
+			if (auto* found = Smp::NiObject::GetObjectNodeByName(root, name)) {
 				return found;
 			}
 		}

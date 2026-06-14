@@ -346,7 +346,6 @@ namespace
 	};
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
-	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
 	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor);
 	bool IsReadableMemory(const void* a_address, std::size_t a_minSize);
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object);
@@ -373,9 +372,6 @@ namespace
 	RE::NiPoint3 ResolveActorCullPosition(RE::Actor* a_actor, RE::NiAVObject* a_root)
 	{
 		if (a_root) {
-			if (auto* npcRoot = FindNodeByName(a_root, "NPC Root [Root]")) {
-				return npcRoot->world.translate;
-			}
 			return a_root->world.translate;
 		}
 		return a_actor ? a_actor->GetPosition() : RE::NiPoint3::ZERO;
@@ -605,12 +601,12 @@ namespace
 	{
 		if (a_actor) {
 			if (auto* root = a_actor->Get3D(false); root) {
-				if (auto* headNode = FindNodeByName(root, "NPC Head [Head]")) {
+				if (auto* headNode = Smp::NiObject::GetObjectNodeByName(root, "HEAD")) {
 					return headNode->world.translate;
 				}
 			}
 			if (auto* root = a_actor->Get3D(); root) {
-				if (auto* headNode = FindNodeByName(root, "NPC Head [Head]")) {
+				if (auto* headNode = Smp::NiObject::GetObjectNodeByName(root, "HEAD")) {
 					return headNode->world.translate;
 				}
 			}
@@ -1369,11 +1365,6 @@ namespace
 			.originalWorldTransform = a_skin->worldTransforms[a_index],
 			.originalRootNode = a_skin->rootNode,
 		});
-	}
-
-	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
-	{
-		return Smp::NiObject::FindNodeByName(a_root, a_name);
 	}
 
 	RE::NiNode* FindExactNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
@@ -2844,7 +2835,7 @@ namespace
 			const auto hasRecordBinding = parentBinding && !parentBinding->parentName.empty();
 			const auto hasRecordLocal = parentBinding && parentBinding->hasLocalToParent;
 			if (hasRecordBinding) {
-				auto* expectedParent = FindNodeByName(a_actorRoot, parentBinding->parentName);
+				auto* expectedParent = Smp::NiObject::GetObjectNodeByName(a_actorRoot, parentBinding->parentName);
 				if (expectedParent &&
 					expectedParent != node &&
 					(a_trustedActorSkeletonNodes.empty() || a_trustedActorSkeletonNodes.contains(expectedParent)) &&
@@ -2957,7 +2948,7 @@ namespace
 				continue;
 			}
 
-			auto* sourceNode = FindNodeByName(a_sourceRoot, entry.originalName);
+			auto* sourceNode = Smp::NiObject::GetObjectNodeByName(a_sourceRoot, entry.originalName);
 			if (!sourceNode) {
 				continue;
 			}

@@ -25,5 +25,5 @@ namespace Smp::NiObject
 		std::vector<RE::NiAVObject*>& a_nodes);
 	bool IsDescendantOf(RE::NiAVObject* a_object, RE::NiAVObject* a_ancestor);
 	RE::NiTransform BuildLocalToAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor);
-	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
+	RE::NiNode* GetObjectNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
 }

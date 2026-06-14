@@ -2,6 +2,7 @@
 
 #include "ConfigPaths.h"
 #include "PhysicsName.h"
+#include "RE/B/BSFixedString.h"
 #include "RE/N/NiAVObject.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiStringExtraData.h"
@@ -113,27 +114,14 @@ namespace Smp::NiObject
 		return localToAncestor;
 	}
 
-	RE::NiNode* FindNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
+	RE::NiNode* GetObjectNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
 	{
 		if (!a_root || a_name.empty()) {
 			return nullptr;
 		}
 
-		if (const auto name = a_root->GetName(); !name.empty() && PhysicsNamesEqual(name, a_name)) {
-			return a_root->IsNode();
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindNodeByName(child.get(), a_name)) {
-				return found;
-			}
-		}
-
-		return nullptr;
+		auto* object = a_root->GetObjectByName(RE::BSFixedString(std::string(a_name)));
+		return object ? object->IsNode() : nullptr;
 	}
+
 }
