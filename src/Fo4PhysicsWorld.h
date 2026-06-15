@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -84,6 +85,19 @@ namespace Smp
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
 		void NoteCharacterCustomizationTarget(RE::Actor* a_actor, std::uint32_t a_editMode);
+
+		struct ReusableArmorMergeState
+		{
+			RE::NiPointer<RE::NiAVObject> mergeSourceSnapshot;
+			std::vector<MergeParentBinding> mergeParentBindings;
+			std::vector<MergeRename> mergeRenameMap;
+		};
+
+		std::optional<ReusableArmorMergeState> FindReusablePendingArmorMergeState(
+			RE::Actor* a_actor,
+			bool a_firstPerson,
+			RE::BIPED_OBJECT a_bipedObject,
+			std::string_view a_physicsXmlPath);
 
 		RE::BSEventNotifyControl ProcessEvent(const LifecycleEvent& a_event, RE::BSTEventSource<LifecycleEvent>* a_source) override;
 		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent& a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>* a_source) override;

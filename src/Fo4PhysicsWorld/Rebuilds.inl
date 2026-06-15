@@ -530,6 +530,50 @@ namespace Smp
 		return found != pendingActorRebuilds_.end() ? std::addressof(*found) : nullptr;
 	}
 
+	std::optional<Fo4PhysicsWorld::ReusableArmorMergeState> Fo4PhysicsWorld::FindReusablePendingArmorMergeState(
+		RE::Actor* a_actor,
+		const bool a_firstPerson,
+		const RE::BIPED_OBJECT a_bipedObject,
+		const std::string_view a_physicsXmlPath)
+	{
+		if (!a_actor || a_bipedObject == RE::BIPED_OBJECT::kTotal || a_physicsXmlPath.empty()) {
+			return std::nullopt;
+		}
+
+		std::scoped_lock lock(lock_);
+		const auto* pending = FindPendingActorRebuildLocked(a_actor, a_firstPerson);
+		if (!pending) {
+			return std::nullopt;
+		}
+
+		const auto normalizedXml = ConfigPaths::LowerString(std::string{ a_physicsXmlPath });
+		const auto found = std::ranges::find_if(pending->armorRecords, [&](const PrototypeArmorRecord& a_record) {
+			return a_record.bipedObject == a_bipedObject &&
+				!a_record.physicsXmlPath.empty() &&
+				ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml &&
+				(a_record.mergeSourceSnapshot || !a_record.mergeParentBindings.empty() || !a_record.mergeRenameMap.empty());
+		});
+		if (found == pending->armorRecords.end()) {
+			return std::nullopt;
+		}
+
+		spdlog::trace(
+			"reusing pending armor merge state for repeated apply actor={} firstPerson={} bipedObject={} xml='{}' parentBindings={} renameMap={} hasSnapshot={}",
+			static_cast<void*>(a_actor),
+			a_firstPerson,
+			std::to_underlying(a_bipedObject),
+			a_physicsXmlPath,
+			found->mergeParentBindings.size(),
+			found->mergeRenameMap.size(),
+			found->mergeSourceSnapshot != nullptr);
+
+		return ReusableArmorMergeState{
+			.mergeSourceSnapshot = found->mergeSourceSnapshot,
+			.mergeParentBindings = found->mergeParentBindings,
+			.mergeRenameMap = found->mergeRenameMap,
+		};
+	}
+
 	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event)
 	{
 		std::vector<PrototypeArmorRecord> records;
@@ -563,7 +607,8 @@ namespace Smp
 				if (a_record.bipedObject != detachedBipedObject) {
 					return false;
 				}
-				if (!object) {
+				const auto recordHasRuntimeObject = a_record.attachedObject || a_record.sourceObject;
+				if (!object || !recordHasRuntimeObject) {
 					return true;
 				}
 				const auto matchesAttached =

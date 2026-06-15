@@ -56,6 +56,28 @@ namespace Smp
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
+			if (auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson)) {
+				const auto before = pending->armorRecords.size();
+				auto remainingRecords = CollectQueuedArmorRecordsForDetachLocked(a_event);
+				const auto after = remainingRecords.size();
+				pending->armorRecords = std::move(remainingRecords);
+				if (before != after) {
+					spdlog::debug(
+						"invalidated pending armor rebuild records after detach actor={} firstPerson={} bipedObject={} removed={} remaining={}",
+						static_cast<void*>(a_event.actor),
+						a_event.firstPerson,
+						std::to_underlying(ResolveEventBipedObject(a_event)),
+						before - after,
+						after);
+				}
+				if (pending->armorRecords.empty()) {
+					std::erase_if(pendingActorRebuilds_, [&](const PendingActorRebuild& a_pending) {
+						const auto resolvedActor = a_pending.actorHandle.get();
+						return resolvedActor && resolvedActor.get() == a_event.actor && a_pending.firstPerson == a_event.firstPerson;
+					});
+				}
+			}
+
 			auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState) {
 				spdlog::trace(
