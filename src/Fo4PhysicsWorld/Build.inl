@@ -1234,6 +1234,7 @@ namespace Smp
 				}
 			}
 
+			bool missingResolvedSkinBone = false;
 			for (const auto& matchedMesh : matchedMeshes) {
 				const auto& decodedMesh = *matchedMesh.mesh;
 				for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size(); ++boneIndex) {
@@ -1258,6 +1259,8 @@ namespace Smp
 									decodedMesh.name,
 									decodedBone.name,
 									static_cast<void*>(decodedBone.node));
+								missingResolvedSkinBone = true;
+								break;
 							}
 						}
 						if (!matchedBody || !matchedBody->bone) {
@@ -1274,6 +1277,12 @@ namespace Smp
 						CalculateBoneSphere(decodedMesh, boneIndex).value_or(hdt::BoundingSphere(btVector3(0.0F, 0.0F, 0.0F), 0.0F));
 					meshBody->addBone(matchedBody->bone.get(), decodedBone.hasSkinToBone ? decodedBone.skinToBone : hdt::btQsTransform::getIdentity(), sphere);
 				}
+				if (missingResolvedSkinBone) {
+					break;
+				}
+			}
+			if (missingResolvedSkinBone) {
+				continue;
 			}
 
 			switch (meshDescriptor->shared) {
@@ -1315,7 +1324,7 @@ namespace Smp
 						resolvedBody = std::addressof(*stagedBody);
 					}
 				}
-				if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
+				if (resolvedBody && resolvedBody->bone) {
 					meshBody->canCollideWithBones_.push_back(resolvedBody->bone.get());
 				} else {
 					++unresolvedCanCollideBones;
@@ -1335,7 +1344,7 @@ namespace Smp
 						resolvedBody = std::addressof(*stagedBody);
 					}
 				}
-				if (resolvedBody && resolvedBody->bone && !resolvedBody->meshOnlySkinBone) {
+				if (resolvedBody && resolvedBody->bone) {
 					meshBody->noCollideWithBones_.push_back(resolvedBody->bone.get());
 				} else {
 					++unresolvedNoCollideBones;

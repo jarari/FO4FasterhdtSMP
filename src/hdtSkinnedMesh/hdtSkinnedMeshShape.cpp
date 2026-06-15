@@ -24,8 +24,13 @@ namespace hdt
 					continue;
 				}
 
+				const auto& skinnedBone = owner_->skinnedBones_[boneIndex];
+				if (!skinnedBone.ptr) {
+					continue;
+				}
+
 				const auto weight = getColliderBoneWeight(std::addressof(a_collider), index);
-				active = weight > FLT_EPSILON && weight > owner_->skinnedBones_[boneIndex].weightThreshold;
+				active = weight > FLT_EPSILON && weight > skinnedBone.weightThreshold;
 			}
 			return !active;
 		});
