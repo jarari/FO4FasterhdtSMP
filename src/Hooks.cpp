@@ -1,6 +1,7 @@
 #include "Hooks.h"
 
 #include "ActorSkeletonBinding.h"
+#include "BSBoneMap.h"
 #include "BSSkin.h"
 #include "Fo4NiObjectUtils.h"
 #include "Fo4PhysicsWorld.h"
@@ -47,8 +48,6 @@ namespace Hooks
 		REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ REL::ID{ 913780, 0 } };
 		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 0 } };
-		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataGetBoneName{ REL::ID{ 190712, 0 } };
-		REL::Relocation<std::uintptr_t> BSFaceGenNiNodeFixSkinInstances{ REL::ID{ 399655, 0 } };
 		REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu{ REL::ID{ 411372, 2223366 } };
 	}
 
@@ -97,8 +96,6 @@ namespace Hooks
 	inline constexpr std::uintptr_t kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE = 0x6E4;
 	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetOG = 0x6EC;
 	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetAE = 0x6EC;
-	inline constexpr std::uintptr_t kGetBoneNameLimitImmediateOffsetOG = 0x6;
-	inline constexpr std::uintptr_t kFixSkinInstancesLimitImmediateOffsetOG = 0x91A;
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
 	inline constexpr std::uintptr_t kAddHeadPartSkinSingleCallOffsetOG = 0xFD;
 	inline constexpr std::size_t kFaceGenSkinAllGeometryVFuncSlot = 0x43;
@@ -478,6 +475,7 @@ namespace Hooks
 		context.mergeSourceObject = CloneNodeExact(a_sourceRoot);
 		if (auto* mergeRoot = GetSkeletonMergeRoot(actor, a_firstPerson)) {
 			DoSkeletonMerge(mergeRoot, a_sourceRoot, context.mergeRenamePrefix, context.mergeRenameMap, context.trustedActorSkeletonNodes, false);
+			Smp::RefreshBoneScatterTable(mergeRoot);
 			spdlog::debug(
 				"merged pre-attach armor skeleton source={} name='{}' into actor merge root={} name='{}' prefix='{}' renamedBones={}",
 				static_cast<void*>(a_sourceRoot),
@@ -674,52 +672,6 @@ namespace Hooks
 		const auto base = module.GetBaseAddress();
 		const auto offset = base != 0 && a_address >= base ? a_address - base : 0;
 		spdlog::info("{} resolved at {:x} moduleOffset={:x}", a_name, a_address, offset);
-	}
-
-	bool ValidateUInt32Immediate(
-		const char* a_name,
-		REL::Relocation<std::uintptr_t>& a_target,
-		const std::uintptr_t a_offset,
-		const std::uint32_t a_expected)
-	{
-		const auto address = a_target.address() + a_offset;
-		std::uint32_t current = 0;
-		std::memcpy(std::addressof(current), reinterpret_cast<const void*>(address), sizeof(current));
-		if (current != a_expected) {
-			spdlog::error(
-				"{} validation failed at {:x}: expected immediate {:#x}, found {:#x}",
-				a_name,
-				address,
-				a_expected,
-				current);
-			return false;
-		}
-
-		spdlog::info("{} validated at {:x}: {:#x}", a_name, address, a_expected);
-		return true;
-	}
-
-	bool ValidateFaceGenBoneNameLimit()
-	{
-		if (!REX::FModule::IsRuntimeOG()) {
-			spdlog::warn("FaceGen bone-name limit validation skipped: AE relocation IDs are not verified");
-			return true;
-		}
-
-		LogRelocationTarget("BSFaceGenModelExtraData::GetBoneName", Addresses::BSFaceGenModelExtraDataGetBoneName.address());
-		LogRelocationTarget("BSFaceGenNiNode::FixSkinInstances", Addresses::BSFaceGenNiNodeFixSkinInstances.address());
-
-		const auto getBoneNameValid = ValidateUInt32Immediate(
-			"BSFaceGenModelExtraData::GetBoneName bone-name limit",
-			Addresses::BSFaceGenModelExtraDataGetBoneName,
-			kGetBoneNameLimitImmediateOffsetOG,
-			kFaceGenModelExtraDataBoneNameLimit);
-		const auto fixSkinInstancesValid = ValidateUInt32Immediate(
-			"BSFaceGenNiNode::FixSkinInstances bone-name limit",
-			Addresses::BSFaceGenNiNodeFixSkinInstances,
-			kFixSkinInstancesLimitImmediateOffsetOG,
-			kFaceGenModelExtraDataBoneNameLimit);
-		return getBoneNameValid && fixSkinInstancesValid;
 	}
 
 	void LogHookTargets()
@@ -1169,7 +1121,6 @@ namespace Hooks
 	{
 		LogHookTargets();
 		const auto isOG = REX::FModule::IsRuntimeOG();
-		const auto faceGenBoneNameLimitsValid = ValidateFaceGenBoneNameLimit();
 		const auto mainFrameCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleUpdateHighActorsArraySortedCallOffsetOG : kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE);
 		const auto mainSyncCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleSwapCallOffsetOG : kMainOnIdleSwapCallOffsetAE);
 		LogRelocationTarget("Main::OnIdle frame update callsite", mainFrameCallsite);
@@ -1295,7 +1246,6 @@ namespace Hooks
 			OriginalUpdate3DModel &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
-			faceGenBoneNameLimitsValid &&
 			(!isOG || OriginalSetFaceGenBoneName) &&
 			(!isOG || OriginalFaceGenSkinSingleGeometry);
 

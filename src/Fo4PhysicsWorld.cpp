@@ -1,5 +1,6 @@
 #include "Fo4PhysicsWorld.h"
 
+#include "BSBoneMap.h"
 #include "BSSkin.h"
 #include "ConfigPaths.h"
 #include "DefaultBBP.h"
@@ -2847,6 +2848,7 @@ namespace
 							node->parent->DetachChild(node);
 						}
 						expectedParent->AttachChild(node, false);
+						Smp::RefreshBoneScatterTable(a_actorRoot);
 					}
 					if (hasRecordLocal) {
 						node->local = parentBinding->localToParent;
@@ -3001,10 +3003,15 @@ namespace
 
 	void DetachMergedRootNodes(std::vector<MergedRootNode>& a_roots)
 	{
+		std::vector<RE::NiAVObject*> refreshRoots;
 		for (auto& root : a_roots) {
 			if (root.parent && root.node) {
 				root.parent->DetachChild(root.node.get());
+				refreshRoots.push_back(root.parent);
 			}
+		}
+		for (auto* refreshRoot : refreshRoots) {
+			Smp::RefreshBoneScatterTable(refreshRoot);
 		}
 		a_roots.clear();
 	}

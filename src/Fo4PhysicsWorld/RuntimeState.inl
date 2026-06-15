@@ -567,6 +567,7 @@ namespace Smp
 			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
 			if (mergedNode.parent && node && node->parent == mergedNode.parent) {
 				mergedNode.parent->DetachChild(mergedNode.node.get());
+				RefreshBoneScatterTable(mergedNode.parent);
 			}
 		}
 		a_state.mergedNodes.clear();
@@ -1082,6 +1083,7 @@ namespace Smp
 				if (!childName.empty() && StartsWithInsensitive(childName, "hdtSSEPhysics_AutoRename_Head_")) {
 					RE::NiPointer<RE::NiAVObject> keepAlive{ child };
 					a_node->DetachChild(child);
+					RefreshBoneScatterTable(a_node);
 					++detachedNodeCount;
 					continue;
 				}
@@ -1114,6 +1116,7 @@ namespace Smp
 			if (!name.empty() && StartsWithInsensitive(name, "hdtSSEPhysics_AutoRename_Head_")) {
 				if (a_node.parent && node->parent == a_node.parent) {
 					a_node.parent->DetachChild(a_node.node.get());
+					RefreshBoneScatterTable(a_node.parent);
 				}
 				a_node.node = nullptr;
 				a_node.parent = nullptr;
@@ -1295,6 +1298,7 @@ namespace Smp
 			});
 			if (a_detachMergedNodes && !nodeStillReferencedByKeptGroup && a_node.parent && node && node->parent == a_node.parent) {
 				a_node.parent->DetachChild(a_node.node.get());
+				RefreshBoneScatterTable(a_node.parent);
 			}
 			return true;
 		});

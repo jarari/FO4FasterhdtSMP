@@ -205,6 +205,9 @@ namespace Smp
 				a_event.mergeParentBindings,
 				mergedSkeletonNodes,
 				mergedRootNodes);
+			if (!mergedRootNodes.empty()) {
+				RefreshBoneScatterTable(actorRoot);
+			}
 		}
 		if (actorRootNode) {
 			UpdateTransformUpDown(actorRootNode, true);
