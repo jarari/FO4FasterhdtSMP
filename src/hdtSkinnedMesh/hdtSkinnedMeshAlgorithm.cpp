@@ -11,10 +11,6 @@
 namespace
 {
 	constexpr std::size_t ParallelCollisionPairThreshold = 32;
-	constexpr float kMeshContactMaxDepth = 0.04F;
-	constexpr float kMeshKinematicContactDepthScale = 0.25F;
-	constexpr int kMeshContactMaxVertexInfluences = 4;
-	constexpr int kMeshContactMaxTriangleInfluences = 12;
 
 	__m128 CrossProduct(const __m128 a_lhs, const __m128 a_rhs)
 	{
@@ -24,64 +20,6 @@ namespace
 		const auto tmp3 = _mm_mul_ps(tmp0, tmp1);
 		const auto tmp4 = _mm_shuffle_ps(tmp2, tmp2, _MM_SHUFFLE(3, 0, 2, 1));
 		return _mm_sub_ps(tmp3, tmp4);
-	}
-
-	struct ContactInfluence
-	{
-		int boneIndex{ -1 };
-		float weight{ 0.0F };
-	};
-
-	template <class T>
-	std::vector<ContactInfluence> CompactInfluences(T* a_shape, const hdt::Collider* a_collider, const int a_maxInfluences)
-	{
-		std::vector<ContactInfluence> compacted;
-		if (!a_shape || !a_shape->owner_) {
-			return compacted;
-		}
-
-		for (int slot = 0; slot < a_shape->getBonePerCollider(); ++slot) {
-			const auto boneIndex = a_shape->getColliderBoneIndex(a_collider, slot);
-			if (boneIndex < 0 || static_cast<std::size_t>(boneIndex) >= a_shape->owner_->skinnedBones_.size()) {
-				continue;
-			}
-
-			const auto weight = a_shape->getColliderBoneWeight(a_collider, slot);
-			if (weight <= a_shape->owner_->skinnedBones_[boneIndex].weightThreshold) {
-				continue;
-			}
-
-			const auto found = std::ranges::find_if(compacted, [boneIndex](const ContactInfluence& a_influence) {
-				return a_influence.boneIndex == boneIndex;
-			});
-			if (found == compacted.end()) {
-				compacted.push_back({ boneIndex, weight });
-			} else {
-				found->weight += weight;
-			}
-		}
-
-		std::ranges::sort(compacted, [](const ContactInfluence& a_lhs, const ContactInfluence& a_rhs) {
-			if (a_lhs.weight != a_rhs.weight) {
-				return a_lhs.weight > a_rhs.weight;
-			}
-			return a_lhs.boneIndex < a_rhs.boneIndex;
-		});
-
-		if (a_maxInfluences > 0 && compacted.size() > static_cast<std::size_t>(a_maxInfluences)) {
-			compacted.resize(static_cast<std::size_t>(a_maxInfluences));
-		}
-		return compacted;
-	}
-
-	int MeshContactMaxInfluences(hdt::PerVertexShape*)
-	{
-		return kMeshContactMaxVertexInfluences;
-	}
-
-	int MeshContactMaxInfluences(hdt::PerTriangleShape*)
-	{
-		return kMeshContactMaxTriangleInfluences;
 	}
 }
 
@@ -440,12 +378,20 @@ namespace hdt
 			const auto posAScaled = result.posA * weightSquared;
 			const auto posBScaled = result.posB * weightSquared;
 
-			const auto influencesA = CompactInfluences(a_shape0, result.colliderA, MeshContactMaxInfluences(a_shape0));
-			const auto influencesB = CompactInfluences(a_shape1, result.colliderB, MeshContactMaxInfluences(a_shape1));
-			for (const auto& influenceA : influencesA) {
-				for (const auto& influenceB : influencesB) {
-					const auto boneIndexA = influenceA.boneIndex;
-					const auto boneIndexB = influenceB.boneIndex;
+			for (int indexA = 0; indexA < a_shape0->getBonePerCollider(); ++indexA) {
+				const auto weightA = a_shape0->getColliderBoneWeight(result.colliderA, indexA);
+				const auto boneIndexA = a_shape0->getColliderBoneIndex(result.colliderA, indexA);
+				if (weightA <= a_shape0->owner_->skinnedBones_[boneIndexA].weightThreshold) {
+					continue;
+				}
+
+				for (int indexB = 0; indexB < a_shape1->getBonePerCollider(); ++indexB) {
+					const auto weightB = a_shape1->getColliderBoneWeight(result.colliderB, indexB);
+					const auto boneIndexB = a_shape1->getColliderBoneIndex(result.colliderB, indexB);
+					if (weightB <= a_shape1->owner_->skinnedBones_[boneIndexB].weightThreshold) {
+						continue;
+					}
+
 					if (a_shape0->owner_->skinnedBones_[boneIndexA].isKinematic && a_shape1->owner_->skinnedBones_[boneIndexB].isKinematic) {
 						continue;
 					}
@@ -493,14 +439,11 @@ namespace hdt
 				continue;
 			}
 
-			const auto rawDepth = -normal.length();
+			const auto depth = -normal.length();
 			normal = -normal.normalized();
-			if (rawDepth >= -FLT_EPSILON) {
+			if (depth >= -FLT_EPSILON) {
 				continue;
 			}
-			const bool hasKinematicBody = bone0->m_rig.isStaticOrKinematicObject() || bone1->m_rig.isStaticOrKinematicObject();
-			const auto maxDepth = kMeshContactMaxDepth * (hasKinematicBody ? kMeshKinematicContactDepthScale : 1.0F);
-			const auto depth = std::max(rawDepth, -maxDepth);
 
 			btManifoldPoint point(localA, localB, normal, depth);
 			point.m_positionWorldOnA = worldA;
