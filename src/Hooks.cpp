@@ -439,7 +439,6 @@ namespace Hooks
 		RE::BipedAnim* a_biped,
 		RE::NiNode* a_sourceRoot,
 		RE::NiAVObject* a_sourceObject,
-		const RE::BIPED_OBJECT a_bipedObject,
 		const bool a_firstPerson,
 		const char* a_sourceLabel)
 	{
@@ -450,20 +449,6 @@ namespace Hooks
 		}
 
 		auto* actor = ResolveActor(a_biped);
-		if (auto reusable = Smp::Fo4PhysicsWorld::GetSingleton()->FindReusablePendingArmorMergeState(actor, a_firstPerson, a_bipedObject, *context.selectedXml)) {
-			context.mergeSourceObject = std::move(reusable->mergeSourceSnapshot);
-			context.mergeParentBindings = std::move(reusable->mergeParentBindings);
-			context.mergeRenameMap = std::move(reusable->mergeRenameMap);
-			spdlog::trace(
-				"reused pending pre-attach armor merge state actor={} bipedObject={} xml='{}' parentBindings={} renameMap={} mergeSource={}",
-				static_cast<void*>(actor),
-				std::to_underlying(a_bipedObject),
-				*context.selectedXml,
-				context.mergeParentBindings.size(),
-				context.mergeRenameMap.size(),
-				static_cast<void*>(context.mergeSourceObject.get()));
-			return context;
-		}
 		context.trustedActorSkeletonNodes = Smp::ActorSkeletonBinding::CaptureTrustedActorSkeletonNodesBeforeAttach(
 			actor,
 			a_biped,
@@ -804,7 +789,6 @@ namespace Hooks
 			a_biped,
 			a_originalModelRoot,
 			originalModelObject,
-			a_bipedObject,
 			a_firstPerson,
 			"original model root");
 
@@ -847,7 +831,6 @@ namespace Hooks
 			a_biped,
 			a_sourceRoot,
 			sourceObject,
-			a_bipedObject,
 			a_firstPerson,
 			"source root");
 		const auto backupNodeNames = GetBackupNodeNames();

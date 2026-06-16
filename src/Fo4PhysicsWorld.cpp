@@ -2765,6 +2765,165 @@ namespace
 		}
 	}
 
+	void SynthesizeMergedArmorNodesFromParentBindings(
+		RE::NiAVObject* a_actorRoot,
+		RE::NiAVObject* a_sourceRoot,
+		const ActorSkeletonLookup& a_actorSkeletonLookup,
+		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
+		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
+		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
+		const ActorSkeletonLookupMode a_mode,
+		const std::unordered_set<std::string>& a_reservedMergedSourceNames,
+		const std::string& a_prefix,
+		const Smp::PhysicsXmlSummary& a_summary,
+		const std::vector<Smp::MergeParentBinding>& a_mergeParentBindings,
+		const std::vector<Smp::MergeRename>& a_mergeRenameMap,
+		std::vector<MergedSkeletonNode>& a_renamedNodes,
+		std::vector<MergedRootNode>& a_mergedRoots)
+	{
+		if (!a_actorRoot || a_mergeParentBindings.empty()) {
+			return;
+		}
+
+		auto hasMergedNode = [&](const std::string_view a_sourceName) {
+			return std::ranges::any_of(a_renamedNodes, [a_sourceName](const MergedSkeletonNode& a_node) {
+				return Smp::PhysicsNamesEqual(a_node.originalName, a_sourceName);
+			});
+		};
+		auto findMergedNode = [&](const std::string_view a_sourceName) -> RE::NiNode* {
+			const auto found = std::ranges::find_if(a_renamedNodes, [a_sourceName](const MergedSkeletonNode& a_node) {
+				return Smp::PhysicsNamesEqual(a_node.originalName, a_sourceName);
+			});
+			return found != a_renamedNodes.end() ? found->node : nullptr;
+		};
+		auto shouldSynthesize = [&](const Smp::MergeParentBinding& a_binding) {
+			if (a_binding.sourceName.empty() || hasMergedNode(a_binding.sourceName)) {
+				return false;
+			}
+			if (IsReferencedXmlSourceBone(a_summary, a_binding.sourceName)) {
+				return true;
+			}
+			return std::ranges::any_of(a_mergeRenameMap, [&](const Smp::MergeRename& a_rename) {
+				return Smp::PhysicsNamesEqual(a_rename.sourceName, a_binding.sourceName);
+			});
+		};
+		auto findBinding = [&](const std::string_view a_sourceName) -> const Smp::MergeParentBinding* {
+			return FindMergeParentBinding(a_mergeParentBindings, a_sourceName);
+		};
+		auto findSourceParentBinding = [&](const std::string_view a_sourceName) -> const Smp::MergeParentBinding* {
+			if (!a_sourceRoot || a_sourceName.empty()) {
+				return nullptr;
+			}
+
+			auto* sourceNode = Smp::NiObject::GetObjectNodeByName(a_sourceRoot, a_sourceName);
+			if (!sourceNode || !sourceNode->parent) {
+				return nullptr;
+			}
+
+			const auto parentName = sourceNode->parent->GetName();
+			if (parentName.empty() || Smp::PhysicsNamesEqual(parentName, a_sourceName)) {
+				return nullptr;
+			}
+
+			return findBinding(parentName);
+		};
+		auto findAttachParent = [&](const Smp::MergeParentBinding& a_binding) -> RE::NiNode* {
+			if (const auto* sourceParentBinding = findSourceParentBinding(a_binding.sourceName);
+				sourceParentBinding && shouldSynthesize(*sourceParentBinding)) {
+				if (auto* clonedSourceParent = findMergedNode(sourceParentBinding->sourceName)) {
+					return clonedSourceParent;
+				}
+			}
+			if (a_binding.parentName.empty()) {
+				return nullptr;
+			}
+			if (auto* clonedParent = findMergedNode(a_binding.parentName)) {
+				return clonedParent;
+			}
+			return FindTrustedBoundActorParent(
+				a_actorRoot,
+				a_actorSkeletonLookup,
+				a_actorSkeletonSearchExclusions,
+				a_knownArmorNodes,
+				a_trustedActorSkeletonNodes,
+				a_mode,
+				a_reservedMergedSourceNames,
+				a_binding);
+		};
+
+		std::uint32_t created = 0;
+		bool progressed = true;
+		while (progressed) {
+			progressed = false;
+			for (const auto& binding : a_mergeParentBindings) {
+				if (!shouldSynthesize(binding)) {
+					continue;
+				}
+
+				auto* attachParent = findAttachParent(binding);
+				if (!attachParent) {
+					if (const auto* parentBinding = findSourceParentBinding(binding.sourceName);
+						parentBinding && shouldSynthesize(*parentBinding)) {
+						continue;
+					}
+					if (const auto* parentBinding = findBinding(binding.parentName);
+						parentBinding && shouldSynthesize(*parentBinding)) {
+						continue;
+					}
+					continue;
+				}
+
+				auto* node = new RE::NiNode();
+				const auto renamedName = a_prefix + binding.sourceName;
+				node->name = renamedName;
+				if (const auto* sourceParentBinding = findSourceParentBinding(binding.sourceName);
+					sourceParentBinding &&
+					shouldSynthesize(*sourceParentBinding) &&
+					findMergedNode(sourceParentBinding->sourceName) == attachParent &&
+					sourceParentBinding->hasLocalToParent &&
+					binding.hasLocalToParent &&
+					Smp::PhysicsNamesEqual(sourceParentBinding->parentName, binding.parentName)) {
+					node->local = sourceParentBinding->localToParent.Invert() * binding.localToParent;
+				} else {
+					node->local = binding.hasLocalToParent ? binding.localToParent : RE::NiTransform::IDENTITY;
+				}
+				attachParent->AttachChild(node, false);
+				UpdateNodeWorldFromLocal(node);
+				a_renamedNodes.push_back({
+					.originalName = binding.sourceName,
+					.renamedName = renamedName,
+					.node = node,
+				});
+				a_mergedRoots.push_back({
+					.parent = attachParent,
+					.node = node,
+					.sourceNode = nullptr,
+					.originalName = binding.sourceName,
+					.recordParentName = binding.parentName,
+					.localToParent = node->local,
+					.recordLocalToParent = node->local,
+					.hasLocalToParent = true,
+					.hasRecordLocalToParent = true,
+					.recordMergeParentBinding = !binding.parentName.empty(),
+				});
+				++created;
+				progressed = true;
+				spdlog::debug(
+					"synthesized plugin-owned armor skeleton node '{}' as '{}' node={} under parent={} parentName='{}' from recorded merge binding prefix='{}'",
+					binding.sourceName,
+					renamedName,
+					static_cast<void*>(node),
+					static_cast<void*>(attachParent),
+					std::string_view(attachParent->GetName()),
+					a_prefix);
+			}
+		}
+
+		if (created > 0) {
+			spdlog::debug("synthesized {} plugin-owned armor skeleton nodes from recorded merge parent bindings", created);
+		}
+	}
+
 	void RegisterMergedRenameMapNodes(
 		RE::NiAVObject* a_actorRoot,
 		const std::unordered_set<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
@@ -2894,18 +3053,31 @@ namespace
 					}
 				}
 			}
-			const auto recordLocal = hasRecordLocal ? parentBinding->localToParent : node->local;
+			const auto parentOriginalName = node->parent ? findOriginalNameFromRenamedName(node->parent->GetName()) : std::string_view{};
+			std::string recordParentName;
+			auto recordLocal = node->local;
+			bool recordMergeParentBinding = false;
+			if (!parentOriginalName.empty() && !Smp::PhysicsNamesEqual(parentOriginalName, entry.sourceName)) {
+				recordParentName = std::string(parentOriginalName);
+				recordMergeParentBinding = true;
+			} else if (hasRecordBinding) {
+				recordParentName = parentBinding->parentName;
+				recordLocal = hasRecordLocal ? parentBinding->localToParent : node->local;
+				recordMergeParentBinding = true;
+			} else if (node->parent) {
+				recordParentName = node->parent->GetName();
+			}
 			a_mergedRoots.push_back({
 				.parent = node->parent,
 				.node = node,
 				.sourceNode = nullptr,
 				.originalName = entry.sourceName,
-				.recordParentName = hasRecordBinding ? parentBinding->parentName : (node->parent ? std::string(node->parent->GetName()) : std::string{}),
+				.recordParentName = recordParentName,
 				.localToParent = node->local,
 				.recordLocalToParent = recordLocal,
 				.hasLocalToParent = true,
 				.hasRecordLocalToParent = true,
-				.recordMergeParentBinding = hasRecordBinding,
+				.recordMergeParentBinding = recordMergeParentBinding,
 			});
 			registeredNames.insert(sourceKey);
 
@@ -2917,8 +3089,8 @@ namespace
 					static_cast<void*>(node),
 					static_cast<void*>(node->parent),
 					node->parent ? std::string_view(node->parent->GetName()) : std::string_view{},
-					hasRecordBinding,
-					hasRecordBinding ? std::string_view(parentBinding->parentName) : std::string_view{},
+					recordMergeParentBinding,
+					std::string_view(recordParentName),
 					node->local.translate.x,
 					node->local.translate.y,
 					node->local.translate.z,

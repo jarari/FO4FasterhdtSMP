@@ -233,6 +233,26 @@ namespace Smp
 
 	void Fo4PhysicsWorld::SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state)
 	{
+		std::vector<std::uint64_t> buildGroups;
+		for (const auto& runtime : a_state.runtimes) {
+			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(runtime.buildGroup);
+			}
+		}
+		if (buildGroups.empty()) {
+			for (const auto& body : a_state.bodies) {
+				for (const auto buildGroup : body.buildGroups) {
+					if (buildGroup != 0 && std::ranges::find(buildGroups, buildGroup) == buildGroups.end()) {
+						buildGroups.push_back(buildGroup);
+					}
+				}
+				if (body.buildGroup != 0 && std::ranges::find(buildGroups, body.buildGroup) == buildGroups.end()) {
+					buildGroups.push_back(body.buildGroup);
+				}
+			}
+		}
+		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "suspend");
+
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
@@ -281,8 +301,9 @@ namespace Smp
 		a_state.runtimeSuspended = true;
 		a_state.runtimeSoftSuspended = false;
 		spdlog::debug(
-			"suspended prototype runtime for actor={} bodies={} meshes={} constraints={} capturedSkinSlots={} preservedMergedNodes={} armorRecords={}",
+			"suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={} capturedSkinSlots={} preservedMergedNodes={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
+			buildGroups.size(),
 			bodyCount,
 			meshCount,
 			constraintCount,
@@ -583,6 +604,7 @@ namespace Smp
 		a_state.runtimeSuspended = false;
 		a_state.runtimeSoftSuspended = false;
 		a_state.faceNode = nullptr;
+		a_state.armorRecords.clear();
 		a_state.attachmentRecords.clear();
 		a_state.headPartRecords.clear();
 		a_state.runtimes.clear();
@@ -675,12 +697,42 @@ namespace Smp
 			}
 		};
 
+		const auto groupStillOwnedByBiped = [&a_state, a_bipedObject](const std::uint64_t a_buildGroup) {
+			if (a_buildGroup == 0) {
+				return false;
+			}
+
+			bool foundCurrentOwner = false;
+			for (const auto& runtime : a_state.runtimes) {
+				if (runtime.buildGroup != a_buildGroup || runtime.domain != PrototypeBuildDomain::kArmor) {
+					continue;
+				}
+				foundCurrentOwner = true;
+				if (runtime.bipedObject == a_bipedObject) {
+					return true;
+				}
+			}
+			for (const auto& prototypeMesh : a_state.meshes) {
+				if (prototypeMesh.buildGroup != a_buildGroup || prototypeMesh.domain != PrototypeBuildDomain::kArmor) {
+					continue;
+				}
+				foundCurrentOwner = true;
+				if (prototypeMesh.bipedObject == a_bipedObject) {
+					return true;
+				}
+			}
+
+			return !foundCurrentOwner;
+		};
+
 		for (const auto& record : a_state.armorRecords) {
 			if (record.bipedObject != a_bipedObject) {
 				continue;
 			}
 			for (const auto buildGroup : record.buildGroups) {
-				appendGroup(buildGroup);
+				if (groupStillOwnedByBiped(buildGroup)) {
+					appendGroup(buildGroup);
+				}
 			}
 		}
 
@@ -689,7 +741,9 @@ namespace Smp
 				continue;
 			}
 			for (const auto buildGroup : record.buildGroups) {
-				appendGroup(buildGroup);
+				if (groupStillOwnedByBiped(buildGroup)) {
+					appendGroup(buildGroup);
+				}
 			}
 		}
 
@@ -702,44 +756,6 @@ namespace Smp
 		for (const auto& prototypeMesh : a_state.meshes) {
 			if (prototypeMesh.domain == PrototypeBuildDomain::kArmor && prototypeMesh.bipedObject == a_bipedObject) {
 				appendGroup(prototypeMesh.buildGroup);
-			}
-		}
-
-		for (const auto& prototypeBody : a_state.bodies) {
-			const auto visitBodyBuildGroup = [&](const std::uint64_t a_buildGroup) {
-				if (a_buildGroup == 0) {
-					return;
-				}
-
-				auto domain = PrototypeBuildDomain::kArmor;
-				if (const auto domainEntry = std::ranges::find_if(prototypeBody.buildGroupDomains, [a_buildGroup](const auto& a_entry) {
-						return a_entry.first == a_buildGroup;
-					});
-					domainEntry != prototypeBody.buildGroupDomains.end()) {
-					domain = domainEntry->second;
-				}
-				if (domain != PrototypeBuildDomain::kArmor) {
-					return;
-				}
-
-				auto bipedObject = prototypeBody.bipedObject;
-				if (const auto bipedEntry = std::ranges::find_if(prototypeBody.buildGroupBipedObjects, [a_buildGroup](const auto& a_entry) {
-						return a_entry.first == a_buildGroup;
-					});
-					bipedEntry != prototypeBody.buildGroupBipedObjects.end()) {
-					bipedObject = bipedEntry->second;
-				}
-				if (bipedObject == a_bipedObject) {
-					appendGroup(a_buildGroup);
-				}
-			};
-
-			if (!prototypeBody.buildGroups.empty()) {
-				for (const auto buildGroup : prototypeBody.buildGroups) {
-					visitBodyBuildGroup(buildGroup);
-				}
-			} else {
-				visitBodyBuildGroup(prototypeBody.buildGroup);
 			}
 		}
 

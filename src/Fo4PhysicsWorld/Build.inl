@@ -205,6 +205,23 @@ namespace Smp
 				a_event.mergeParentBindings,
 				mergedSkeletonNodes,
 				mergedRootNodes);
+			if (usePreMergedRenameMap && mergedSkeletonNodes.size() < a_event.mergeRenameMap.size() && !a_event.mergeParentBindings.empty()) {
+				SynthesizeMergedArmorNodesFromParentBindings(
+					actorRoot,
+					sourceRoot,
+					actorSkeletonLookup,
+					actorSkeletonSearchExclusions,
+					knownArmorNodes,
+					trustedActorSkeletonNodes,
+					actorSkeletonLookupMode,
+					reservedMergedSourceNames,
+					smpClonedPrefix,
+					a_summary,
+					a_event.mergeParentBindings,
+					a_event.mergeRenameMap,
+					mergedSkeletonNodes,
+					mergedRootNodes);
+			}
 			if (!mergedRootNodes.empty()) {
 				RefreshBoneScatterTable(actorRoot);
 			}

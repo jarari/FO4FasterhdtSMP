@@ -415,6 +415,11 @@ namespace Smp
 				}
 			}
 		};
+		auto runtimeObjectsCompatible = [](const PrototypeArmorRecord& a_lhs, const PrototypeArmorRecord& a_rhs) {
+			return (!a_lhs.attachedObject || !a_rhs.attachedObject || a_lhs.attachedObject.get() == a_rhs.attachedObject.get()) &&
+				(!a_lhs.sourceObject || !a_rhs.sourceObject || a_lhs.sourceObject.get() == a_rhs.sourceObject.get()) &&
+				(!a_lhs.mergeSourceObject || !a_rhs.mergeSourceObject || a_lhs.mergeSourceObject.get() == a_rhs.mergeSourceObject.get());
+		};
 		const auto normalizedXml = ConfigPaths::LowerString(a_record.physicsXmlPath);
 		auto existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const PrototypeArmorRecord& a_existing) {
 			return a_existing.bipedObject == a_record.bipedObject &&
@@ -423,18 +428,15 @@ namespace Smp
 				ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
 		});
 		if (existing == a_records.end()) {
-			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const PrototypeArmorRecord& a_existing) {
+			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml, &runtimeObjectsCompatible](const PrototypeArmorRecord& a_existing) {
 				return a_existing.bipedObject == a_record.bipedObject &&
-					ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
+					ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
+					runtimeObjectsCompatible(a_record, a_existing);
 			});
 		}
 		if (existing != a_records.end()) {
 			const auto recordHasRuntimeObject = a_record.attachedObject || a_record.sourceObject || a_record.mergeSourceObject;
-			const auto sameRuntimeObjects =
-				a_record.attachedObject.get() == existing->attachedObject.get() &&
-				a_record.sourceObject.get() == existing->sourceObject.get() &&
-				a_record.mergeSourceObject.get() == existing->mergeSourceObject.get();
-			const auto mayInheritRecordedMergeState = !recordHasRuntimeObject || sameRuntimeObjects;
+			const auto mayInheritRecordedMergeState = !recordHasRuntimeObject || runtimeObjectsCompatible(a_record, *existing);
 			if (!a_record.attachedObject && existing->attachedObject) {
 				a_record.attachedObject = existing->attachedObject;
 			}
@@ -444,7 +446,7 @@ namespace Smp
 			if (!a_record.mergeSourceObject && existing->mergeSourceObject) {
 				a_record.mergeSourceObject = existing->mergeSourceObject;
 			}
-			if (!a_record.mergeSourceSnapshot && existing->mergeSourceSnapshot) {
+			if (mayInheritRecordedMergeState && !a_record.mergeSourceSnapshot && existing->mergeSourceSnapshot) {
 				a_record.mergeSourceSnapshot = existing->mergeSourceSnapshot;
 			}
 			if (mayInheritRecordedMergeState && a_record.mergeParentBindings.empty() && !existing->mergeParentBindings.empty()) {
@@ -463,7 +465,9 @@ namespace Smp
 					static_cast<void*>(existing->attachedObject.get()),
 					static_cast<void*>(existing->sourceObject.get()));
 			}
-			appendBuildGroups(a_record.buildGroups, existing->buildGroups);
+			if (mayInheritRecordedMergeState) {
+				appendBuildGroups(a_record.buildGroups, existing->buildGroups);
+			}
 			const auto moveMergedHairSlotOwnerToBack = IsHairBipedObject(a_record.bipedObject);
 			*existing = std::move(a_record);
 			if (moveMergedHairSlotOwnerToBack && std::next(existing) != a_records.end()) {
@@ -528,50 +532,6 @@ namespace Smp
 			return resolvedActor && resolvedActor.get() == a_actor && a_pending.firstPerson == a_firstPerson;
 		});
 		return found != pendingActorRebuilds_.end() ? std::addressof(*found) : nullptr;
-	}
-
-	std::optional<Fo4PhysicsWorld::ReusableArmorMergeState> Fo4PhysicsWorld::FindReusablePendingArmorMergeState(
-		RE::Actor* a_actor,
-		const bool a_firstPerson,
-		const RE::BIPED_OBJECT a_bipedObject,
-		const std::string_view a_physicsXmlPath)
-	{
-		if (!a_actor || a_bipedObject == RE::BIPED_OBJECT::kTotal || a_physicsXmlPath.empty()) {
-			return std::nullopt;
-		}
-
-		std::scoped_lock lock(lock_);
-		const auto* pending = FindPendingActorRebuildLocked(a_actor, a_firstPerson);
-		if (!pending) {
-			return std::nullopt;
-		}
-
-		const auto normalizedXml = ConfigPaths::LowerString(std::string{ a_physicsXmlPath });
-		const auto found = std::ranges::find_if(pending->armorRecords, [&](const PrototypeArmorRecord& a_record) {
-			return a_record.bipedObject == a_bipedObject &&
-				!a_record.physicsXmlPath.empty() &&
-				ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml &&
-				(a_record.mergeSourceSnapshot || !a_record.mergeParentBindings.empty() || !a_record.mergeRenameMap.empty());
-		});
-		if (found == pending->armorRecords.end()) {
-			return std::nullopt;
-		}
-
-		spdlog::trace(
-			"reusing pending armor merge state for repeated apply actor={} firstPerson={} bipedObject={} xml='{}' parentBindings={} renameMap={} hasSnapshot={}",
-			static_cast<void*>(a_actor),
-			a_firstPerson,
-			std::to_underlying(a_bipedObject),
-			a_physicsXmlPath,
-			found->mergeParentBindings.size(),
-			found->mergeRenameMap.size(),
-			found->mergeSourceSnapshot != nullptr);
-
-		return ReusableArmorMergeState{
-			.mergeSourceSnapshot = found->mergeSourceSnapshot,
-			.mergeParentBindings = found->mergeParentBindings,
-			.mergeRenameMap = found->mergeRenameMap,
-		};
 	}
 
 	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event)
@@ -917,6 +877,11 @@ namespace Smp
 				a_buildGroups.push_back(a_buildGroup);
 			}
 		};
+		const auto runtimeObjectsCompatible = [&](const PrototypeArmorRecord& a_record) {
+			return (!a_attachedObject || !a_record.attachedObject || a_record.attachedObject.get() == a_attachedObject) &&
+				(!a_sourceObject || !a_record.sourceObject || a_record.sourceObject.get() == a_sourceObject) &&
+				(!a_mergeSourceObject || !a_record.mergeSourceObject || a_record.mergeSourceObject.get() == a_mergeSourceObject);
+		};
 		auto existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject &&
 				a_record.attachedObject.get() == a_attachedObject &&
@@ -926,7 +891,8 @@ namespace Smp
 		if (existing == a_state.armorRecords.end()) {
 			existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
 				return a_record.bipedObject == a_bipedObject &&
-					ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml;
+					ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml &&
+					runtimeObjectsCompatible(a_record);
 			});
 		}
 		if (existing != a_state.armorRecords.end()) {
@@ -1113,11 +1079,11 @@ namespace Smp
 			};
 			auto fillMissingRecordState = [](PrototypeArmorRecord& a_target, const PrototypeArmorRecord& a_source) {
 				const auto targetHasRuntimeObject = a_target.attachedObject || a_target.sourceObject || a_target.mergeSourceObject;
-				const auto sameRuntimeObjects =
-					a_target.attachedObject.get() == a_source.attachedObject.get() &&
-					a_target.sourceObject.get() == a_source.sourceObject.get() &&
-					a_target.mergeSourceObject.get() == a_source.mergeSourceObject.get();
-				const auto mayInheritRecordedMergeState = !targetHasRuntimeObject || sameRuntimeObjects;
+				const auto runtimeObjectsCompatible =
+					(!a_target.attachedObject || !a_source.attachedObject || a_target.attachedObject.get() == a_source.attachedObject.get()) &&
+					(!a_target.sourceObject || !a_source.sourceObject || a_target.sourceObject.get() == a_source.sourceObject.get()) &&
+					(!a_target.mergeSourceObject || !a_source.mergeSourceObject || a_target.mergeSourceObject.get() == a_source.mergeSourceObject.get());
+				const auto mayInheritRecordedMergeState = !targetHasRuntimeObject || runtimeObjectsCompatible;
 				if (!a_target.attachedObject && a_source.attachedObject) {
 					a_target.attachedObject = a_source.attachedObject;
 				}
@@ -1127,7 +1093,7 @@ namespace Smp
 				if (!a_target.mergeSourceObject && a_source.mergeSourceObject) {
 					a_target.mergeSourceObject = a_source.mergeSourceObject;
 				}
-				if (!a_target.mergeSourceSnapshot && a_source.mergeSourceSnapshot) {
+				if (mayInheritRecordedMergeState && !a_target.mergeSourceSnapshot && a_source.mergeSourceSnapshot) {
 					a_target.mergeSourceSnapshot = a_source.mergeSourceSnapshot;
 				}
 				if (a_target.meshNameMap.empty() && !a_source.meshNameMap.empty()) {
@@ -1149,11 +1115,18 @@ namespace Smp
 						static_cast<void*>(a_source.attachedObject.get()),
 						static_cast<void*>(a_source.sourceObject.get()));
 				}
-				for (const auto buildGroup : a_source.buildGroups) {
-					if (buildGroup != 0 && std::ranges::find(a_target.buildGroups, buildGroup) == a_target.buildGroups.end()) {
-						a_target.buildGroups.push_back(buildGroup);
+				if (mayInheritRecordedMergeState) {
+					for (const auto buildGroup : a_source.buildGroups) {
+						if (buildGroup != 0 && std::ranges::find(a_target.buildGroups, buildGroup) == a_target.buildGroups.end()) {
+							a_target.buildGroups.push_back(buildGroup);
+						}
 					}
 				}
+			};
+			auto runtimeObjectsCompatible = [](const PrototypeArmorRecord& a_lhs, const PrototypeArmorRecord& a_rhs) {
+				return (!a_lhs.attachedObject || !a_rhs.attachedObject || a_lhs.attachedObject.get() == a_rhs.attachedObject.get()) &&
+					(!a_lhs.sourceObject || !a_rhs.sourceObject || a_lhs.sourceObject.get() == a_rhs.sourceObject.get()) &&
+					(!a_lhs.mergeSourceObject || !a_rhs.mergeSourceObject || a_lhs.mergeSourceObject.get() == a_rhs.mergeSourceObject.get());
 			};
 
 			std::vector<PrototypeArmorRecord> mergedRecords;
@@ -1165,7 +1138,8 @@ namespace Smp
 				const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
 				auto existing = std::ranges::find_if(mergedRecords, [&](const PrototypeArmorRecord& a_existing) {
 					return a_existing.bipedObject == record.bipedObject &&
-						ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
+						ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
+						runtimeObjectsCompatible(record, a_existing);
 				});
 				if (existing == mergedRecords.end()) {
 					mergedRecords.push_back(std::move(record));
