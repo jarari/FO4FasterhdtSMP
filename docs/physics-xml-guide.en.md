@@ -301,7 +301,7 @@ The parser also accepts `<constraint-group>` as a wrapper. It has no special phy
 `<generic-constraint>` is the most flexible constraint type and the one to use for most cloth strips, hair chains, and simple articulated armor pieces.
 
 ```xml
-<generic-constraint name="Hair01 To Hair02" bodyA="Hair01" bodyB="Hair02">
+<generic-constraint name="Hair02 To Hair01" bodyA="Hair02" bodyB="Hair01">
   <frameInLerp>
     <translationLerp>0.5</translationLerp>
     <rotationLerp>0.5</rotationLerp>
@@ -369,7 +369,7 @@ When to use it:
 `<conetwist-constraint>` is the right choice for shoulder-like, elbow-like, or tail-joint motion where one axis can twist and two axes can swing.
 
 ```xml
-<conetwist-constraint name="Root To Tip" bodyA="Root" bodyB="Tip">
+<conetwist-constraint name="Tip To Root" bodyA="Tip" bodyB="Root">
   <frameInLerp />
   <swingSpan1>0.4</swingSpan1>
   <swingSpan2>0.4</swingSpan2>

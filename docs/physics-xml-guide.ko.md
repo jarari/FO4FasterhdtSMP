@@ -301,7 +301,7 @@ Constraint는 파싱된 두 bone body를 연결합니다. `bodyA`, `bodyB`는 �
 `<generic-constraint>`는 가장 유연한 constraint 타입이며, 대부분의 cloth strip, hair chain, 단순 articulated armor에 쓰기 좋습니다.
 
 ```xml
-<generic-constraint name="Hair01 To Hair02" bodyA="Hair01" bodyB="Hair02">
+<generic-constraint name="Hair02 To Hair01" bodyA="Hair02" bodyB="Hair01">
   <frameInLerp>
     <translationLerp>0.5</translationLerp>
     <rotationLerp>0.5</rotationLerp>
@@ -369,7 +369,7 @@ frame mode:
 `<conetwist-constraint>`는 shoulder, elbow, tail joint처럼 한 축은 twist하고 두 축은 swing하는 모션에 적합합니다.
 
 ```xml
-<conetwist-constraint name="Root To Tip" bodyA="Root" bodyB="Tip">
+<conetwist-constraint name="Tip To Root" bodyA="Tip" bodyB="Root">
   <frameInLerp />
   <swingSpan1>0.4</swingSpan1>
   <swingSpan2>0.4</swingSpan2>
