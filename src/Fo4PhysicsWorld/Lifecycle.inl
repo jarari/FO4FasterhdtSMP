@@ -305,8 +305,7 @@ namespace Smp
 					a_selection.meshNameMap,
 					a_object,
 					scopedEvent.sourceObject,
-					scopedEvent.mergeSourceObject,
-					scopedEvent.mergeRenameMap,
+					scopedEvent.armorBoneReferences,
 					buildResult.buildGroup);
 				if (hairSlotArmorBuild) {
 					const auto remainingHairSlotArmorGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, scopedEvent.bipedObject).size();
@@ -338,9 +337,7 @@ namespace Smp
 						.meshNameMap = a_selection.meshNameMap,
 						.attachedObject = a_object,
 						.sourceObject = scopedEvent.sourceObject,
-						.mergeSourceObject = scopedEvent.mergeSourceObject,
-						.mergeParentBindings = scopedEvent.mergeParentBindings,
-						.mergeRenameMap = scopedEvent.mergeRenameMap,
+						.armorBoneReferences = scopedEvent.armorBoneReferences,
 						.cpuCopyRetryCount = 1,
 					},
 				});

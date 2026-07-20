@@ -51,7 +51,6 @@ namespace
 		if (!Smp::PhysicsXmlLoader::GetSingleton()->LoadPrototype(settings.smp.prototypePhysicsXml) && !settings.smp.prototypePhysicsXml.empty()) {
 			Smp::PhysicsXmlLoader::GetSingleton()->LoadPrototype({});
 		}
-		Hooks::ApplyConfig(settings);
 		Smp::Fo4PhysicsWorld::GetSingleton()->ApplyConfig(settings);
 		Smp::ImguiLayer::SetEnabled(settings.smp.enableBulletVisualization);
 		Smp::ImguiLayer::SetDrawCallback(settings.smp.enableBulletVisualization ? &DrawBulletVisualization : nullptr);

@@ -182,7 +182,6 @@ namespace Smp
 			settings_.smp.enableBulletVisualization = ReadBool(smp, "enableBulletVisualization", settings_.smp.enableBulletVisualization);
 			settings_.smp.disableSMPHairWhenWigEquipped = ReadBool(smp, "disableSMPHairWhenWigEquipped", settings_.smp.disableSMPHairWhenWigEquipped);
 			settings_.smp.prototypePhysicsXml = ReadText(smp, "prototypePhysicsXml");
-			settings_.smp.backupNodeByName = SplitCommaList(ReadText(smp, "backupNodeByName"));
 		}
 
 		if (const auto wind = configs->FirstChildElement("wind")) {
@@ -229,9 +228,6 @@ namespace Smp
 		spdlog::debug("config: smp.enableBulletVisualization = {}", settings_.smp.enableBulletVisualization);
 		spdlog::debug("config: smp.disableSMPHairWhenWigEquipped = {}", settings_.smp.disableSMPHairWhenWigEquipped);
 		spdlog::debug("config: smp.prototypePhysicsXml = {}", settings_.smp.prototypePhysicsXml);
-		for (const auto& item : settings_.smp.backupNodeByName) {
-			spdlog::debug("config: smp.backupNodeByName += {}", item);
-		}
 		spdlog::debug("config: wind.enabled = {}", settings_.wind.enabled);
 		spdlog::debug("config: wind.useWeather = {}", settings_.wind.useWeather);
 		spdlog::debug("config: wind.windStrength = {}", settings_.wind.windStrength);

@@ -350,21 +350,6 @@ namespace
 		return Smp::FindMatchingPhysicsName(a_meshNames, name).has_value();
 	}
 
-	std::uint32_t CountNullSkinBones(RE::BSSkin::Instance* a_skin)
-	{
-		if (!a_skin) {
-			return 0;
-		}
-
-		std::uint32_t count = 0;
-		for (auto* bone : a_skin->bones) {
-			if (!bone) {
-				++count;
-			}
-		}
-		return count;
-	}
-
 	RE::NiAVObject* GetTopRoot(RE::NiAVObject* a_object)
 	{
 		auto* current = a_object;
@@ -396,14 +381,15 @@ namespace
 		return nullptr;
 	}
 
-	const RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByWorldTransform(RE::BSFlattenedBoneTree* a_tree, const RE::NiTransform* a_worldTransform)
+	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByWorldTransform(RE::BSFlattenedBoneTree* a_tree, const RE::NiTransform* a_worldTransform)
 	{
-		if (!a_tree || !a_tree->bone || !a_worldTransform || a_tree->boneCount <= 0 || a_tree->boneCount > static_cast<std::int32_t>(RE::BSSkin::kMaxExpectedBones)) {
+		const auto boneCount = a_tree ? a_tree->boneCountExpanded : 0;
+		if (!a_tree || !a_tree->bone || !a_worldTransform || boneCount <= 0 || boneCount > static_cast<std::int32_t>(RE::BSSkin::kMaxExpectedBones)) {
 			return nullptr;
 		}
 
-		for (std::int32_t index = 0; index < a_tree->boneCount; ++index) {
-			const auto& entry = a_tree->bone[index];
+		for (std::int32_t index = 0; index < boneCount; ++index) {
+			auto& entry = a_tree->bone[index];
 			if (std::addressof(entry.world) == a_worldTransform) {
 				return std::addressof(entry);
 			}
@@ -411,102 +397,11 @@ namespace
 		return nullptr;
 	}
 
-	RE::NiNode* FindExistingNodeForFlattenedBone(
-		const RE::BSFlattenedBoneTree::FlattenedBone& a_entry,
-		std::span<RE::NiAVObject* const> a_searchRoots)
-	{
-		if (auto* existing = a_entry.node.get()) {
-			return existing;
-		}
-
-		const std::string_view name(a_entry.name);
-		if (name.empty()) {
-			return nullptr;
-		}
-
-		std::unordered_set<RE::NiAVObject*> visitedRoots;
-		for (auto* root : a_searchRoots) {
-			if (!root || visitedRoots.contains(root)) {
-				continue;
-			}
-			visitedRoots.insert(root);
-
-			if (auto* found = Smp::NiObject::GetObjectNodeByName(root, name)) {
-				return found;
-			}
-		}
-		return nullptr;
-	}
-
-	void ResolveNullSkinBonesFromExistingNodes(RE::BSSkin::Instance* a_skin, RE::NiAVObject* a_extractionRoot, const std::string& a_meshName)
-	{
-		if (!a_skin || a_skin->bones.empty()) {
-			return;
-		}
-		if (!a_skin->worldTransforms.empty() && a_skin->worldTransforms.size() != a_skin->bones.size()) {
-			return;
-		}
-
-		const auto beforeNullBones = CountNullSkinBones(a_skin);
-		if (beforeNullBones == 0) {
-			return;
-		}
-
-		auto* flattened = FindFlattenedBoneTree(a_skin->rootNode);
-		if (!flattened && a_extractionRoot) {
-			flattened = FindFlattenedBoneTree(GetTopRoot(a_extractionRoot));
-		}
-		if (!flattened) {
-			spdlog::debug("mesh '{}' has {} null BSSkin bones but no flattened bone tree was found for local resolution", a_meshName, beforeNullBones);
-			return;
-		}
-
-		std::array<RE::NiAVObject*, 4> searchRoots{
-			a_skin->rootNode,
-			a_extractionRoot,
-			GetTopRoot(a_skin->rootNode),
-			GetTopRoot(a_extractionRoot),
-		};
-
-		std::uint32_t resolved = 0;
-		std::uint32_t missingEntry = 0;
-		std::uint32_t missingNode = 0;
-		for (std::uint32_t index = 0; index < a_skin->bones.size(); ++index) {
-			if (a_skin->bones[index]) {
-				continue;
-			}
-			auto* worldTransform = a_skin->worldTransforms.empty() ? nullptr : a_skin->worldTransforms[index];
-			const auto* entry = FindFlattenedBoneByWorldTransform(flattened, worldTransform);
-			if (!entry) {
-				++missingEntry;
-				continue;
-			}
-
-			auto* node = FindExistingNodeForFlattenedBone(*entry, searchRoots);
-			if (!node) {
-				++missingNode;
-				continue;
-			}
-
-			a_skin->bones[index] = node;
-			a_skin->worldTransforms[index] = std::addressof(node->world);
-			++resolved;
-		}
-
-		const auto afterNullBones = CountNullSkinBones(a_skin);
-		if (resolved > 0 || missingEntry > 0 || missingNode > 0) {
-			spdlog::debug(
-				"mesh '{}' locally resolved BSSkin bones nullBefore={} nullAfter={} resolved={} missingFlattenedEntry={} missingExistingNode={}",
-				a_meshName,
-				beforeNullBones,
-				afterNullBones,
-				resolved,
-				missingEntry,
-				missingNode);
-		}
-	}
-
-	bool DecodeSkinBones(RE::BSSkin::Instance* a_skin, std::vector<Smp::Fo4DecodedSkinBone>& a_bones, Smp::Fo4MeshExtractionStats& a_stats)
+	bool DecodeSkinBones(
+		RE::BSSkin::Instance* a_skin,
+		RE::NiAVObject* a_extractionRoot,
+		std::vector<Smp::Fo4DecodedSkinBone>& a_bones,
+		Smp::Fo4MeshExtractionStats& a_stats)
 	{
 		if (!a_skin) {
 			return false;
@@ -525,24 +420,37 @@ namespace
 			spdlog::warn("ignoring suspicious FO4 skin bone data with {} transforms", a_skin->boneData->transforms.size());
 		}
 
+		auto* flattened = FindFlattenedBoneTree(a_skin->rootNode);
+		if (!flattened) {
+			flattened = FindFlattenedBoneTree(GetTopRoot(a_extractionRoot));
+		}
+
 		a_bones.reserve(a_skin->bones.size());
 		for (std::uint32_t index = 0; index < a_skin->bones.size(); ++index) {
 			auto* boneObject = a_skin->bones[index];
 			Smp::Fo4DecodedSkinBone decoded;
 			if (!boneObject) {
 				++a_stats.nullBones;
-				return false;
-			}
+				auto* worldTransform = a_skin->worldTransforms.empty() ? nullptr : a_skin->worldTransforms[index];
+				auto* entry = FindFlattenedBoneByWorldTransform(flattened, worldTransform);
+				if (!entry || entry->name.empty()) {
+					return false;
+				}
+				decoded.node = entry->node.get();
+				decoded.worldTransform = std::addressof(entry->world);
+				decoded.name = std::string(std::string_view(entry->name));
+			} else {
+				auto* bone = boneObject->IsNode();
+				if (!bone) {
+					++a_stats.nonNodeBones;
+					return false;
+				}
 
-			auto* bone = boneObject->IsNode();
-			if (!bone) {
-				++a_stats.nonNodeBones;
-				return false;
+				const auto name = boneObject->GetName();
+				decoded.node = bone;
+				decoded.worldTransform = std::addressof(bone->world);
+				decoded.name = name.empty() ? std::string{} : std::string(name);
 			}
-
-			const auto name = boneObject->GetName();
-			decoded.node = bone;
-			decoded.name = name.empty() ? std::string{} : std::string(name);
 
 			if (useBoneData && index < a_skin->boneData->transforms.size()) {
 				const auto& transform = a_skin->boneData->transforms[index];
@@ -688,8 +596,7 @@ namespace
 		mesh.geometry = a_geometry;
 		mesh.skinRootNode = skin->rootNode;
 		mesh.name = ResolveGeometryName(a_geometry);
-		ResolveNullSkinBonesFromExistingNodes(skin, a_extractionRoot, mesh.name);
-		if (!DecodeSkinBones(skin, mesh.bones, a_result.stats)) {
+		if (!DecodeSkinBones(skin, a_extractionRoot, mesh.bones, a_result.stats)) {
 			spdlog::warn("skipping mesh '{}' because its FO4 skin bone array is not coherent", mesh.name);
 			return false;
 		}

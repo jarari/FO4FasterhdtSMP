@@ -19,6 +19,7 @@
 #include "RE/B/BipedAnim.h"
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/bhkPickData.h"
+#include "RE/B/BSFlattenedBoneTree.h"
 #include "RE/B/BSUtilities.h"
 #include "RE/B/BSTimer.h"
 #include "RE/C/CFilter.h"
@@ -76,7 +77,6 @@ namespace
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
-	std::atomic<std::uint32_t> PrototypeArmorRenameId{ 0 };
 	std::atomic<std::uint32_t> PrototypeHeadRenameId{ 0 };
 	using Clock = std::chrono::steady_clock;
 
@@ -1248,6 +1248,7 @@ namespace
 		};
 
 		RE::NiNode* node{ nullptr };
+		RE::NiTransform* transform{ nullptr };
 		RE::NiNode* sourceNode{ nullptr };
 		std::string name;
 		bool resolvedFromSkeleton{ false };
@@ -1289,13 +1290,6 @@ namespace
 		kActorSkeleton,
 		kArmorOwned
 	};
-
-	std::string MakeReferenceArmorRenamePrefix(const std::uint32_t a_id)
-	{
-		char buffer[48]{};
-		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Armor_%08X ", a_id);
-		return buffer;
-	}
 
 	std::string MakeReferenceHeadRenamePrefix(const std::uint32_t a_id)
 	{
@@ -1816,79 +1810,6 @@ namespace
 			_memicmp(a_value.data(), a_prefix.data(), a_prefix.size()) == 0;
 	}
 
-	bool IsArmorAutoRenameNode(RE::NiAVObject* a_object)
-	{
-		if (!a_object) {
-			return false;
-		}
-
-		const auto name = std::string_view(a_object->GetName());
-		constexpr std::string_view prefix = "hdtSSEPhysics_AutoRename_Armor_";
-		return StartsWithInsensitive(name, prefix);
-	}
-
-	bool IsTrackedMergedObject(const std::vector<RE::NiAVObject*>& a_trackedObjects, RE::NiAVObject* a_object)
-	{
-		return std::ranges::find(a_trackedObjects, a_object) != a_trackedObjects.end();
-	}
-
-	void CollectStaleArmorMergedNodes(
-		RE::NiNode* a_parent,
-		const std::vector<RE::NiAVObject*>& a_trackedObjects,
-		std::vector<std::pair<RE::NiNode*, RE::NiAVObject*>>& a_result)
-	{
-		if (!a_parent) {
-			return;
-		}
-
-		for (auto& child : a_parent->children) {
-			auto* object = child.get();
-			if (!object) {
-				continue;
-			}
-
-			if (IsArmorAutoRenameNode(object)) {
-				if (!IsTrackedMergedObject(a_trackedObjects, object)) {
-					a_result.push_back({ a_parent, object });
-				}
-				continue;
-			}
-
-			if (auto* node = object->IsNode()) {
-				CollectStaleArmorMergedNodes(node, a_trackedObjects, a_result);
-			}
-		}
-	}
-
-	std::uint32_t DetachStaleArmorMergedNodes(
-		RE::NiAVObject* a_actorRoot,
-		const std::vector<RE::NiAVObject*>& a_trackedObjects,
-		RE::Actor* a_actor,
-		const std::string_view a_reason)
-	{
-		auto* rootNode = a_actorRoot ? a_actorRoot->IsNode() : nullptr;
-		if (!rootNode) {
-			return 0;
-		}
-
-		std::vector<std::pair<RE::NiNode*, RE::NiAVObject*>> staleMergedNodes;
-		CollectStaleArmorMergedNodes(rootNode, a_trackedObjects, staleMergedNodes);
-		for (const auto& [parent, object] : staleMergedNodes) {
-			if (!parent || !object) {
-				continue;
-			}
-			spdlog::debug(
-				"pruning stale armor merge node '{}'={} parent={} reason={} actor={}",
-				std::string_view(object->GetName()),
-				static_cast<void*>(object),
-				static_cast<void*>(parent),
-				a_reason,
-				static_cast<void*>(a_actor));
-			parent->DetachChild(object);
-		}
-		return static_cast<std::uint32_t>(staleMergedNodes.size());
-	}
-
 	const Smp::PhysicsBoneDescriptor* FindBoneDescriptor(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
 	{
 		const auto found = std::ranges::find_if(a_summary.boneDescriptors, [a_name](const Smp::PhysicsBoneDescriptor& a_descriptor) {
@@ -2040,6 +1961,7 @@ namespace
 
 					auto& matchedBone = a_result.emplace_back(MatchedSkinBone{
 						.node = bone,
+						.transform = std::addressof(bone->world),
 						.sourceNode = bone,
 						.name = matchedName ? std::string(*matchedName) : std::string(name),
 						.meshOnlySkinBoneCandidate = !matchedName && includeAllSkinBones,
@@ -3230,6 +3152,96 @@ namespace
 		return MakeArmorModelCacheKey(a_bipedObject, a_bipObject->part->GetModel());
 	}
 
+	RE::BSFlattenedBoneTree* FindFlattenedBoneTreeInScene(RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return nullptr;
+		}
+		if (auto* flattened = netimmerse_cast<RE::BSFlattenedBoneTree*>(a_object)) {
+			return flattened;
+		}
+
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+		for (auto& child : node->children) {
+			if (auto* flattened = FindFlattenedBoneTreeInScene(child.get())) {
+				return flattened;
+			}
+		}
+		return nullptr;
+	}
+
+	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
+		RE::BSFlattenedBoneTree* a_tree,
+		const std::string_view a_name)
+	{
+		if (!a_tree || !a_tree->bone || a_name.empty()) {
+			return nullptr;
+		}
+
+		const auto found = a_tree->boneMap.find(RE::BSFixedString(std::string(a_name)));
+		if (found == a_tree->boneMap.end()) {
+			return nullptr;
+		}
+		const auto index = found->second;
+		if (index < 0 || index >= a_tree->boneCountExpanded) {
+			return nullptr;
+		}
+		return std::addressof(a_tree->bone[index]);
+	}
+
+	void ResolveVanillaArmorBones(
+		std::vector<MatchedSkinBone>& a_matchedBones,
+		const std::vector<std::string>& a_boneNames,
+		RE::NiAVObject* a_actorRoot,
+		RE::NiNode* a_skeletonRoot)
+	{
+		auto* flattened = FindFlattenedBoneTreeInScene(a_skeletonRoot);
+		if (!flattened) {
+			flattened = FindFlattenedBoneTreeInScene(a_actorRoot);
+		}
+
+		for (auto& matchedBone : a_matchedBones) {
+			matchedBone.transform = matchedBone.node ? std::addressof(matchedBone.node->world) : matchedBone.transform;
+			if (auto* flattenedBone = FindFlattenedBoneByName(flattened, matchedBone.name)) {
+				matchedBone.node = flattenedBone->node.get();
+				matchedBone.transform = matchedBone.node ? std::addressof(matchedBone.node->world) : std::addressof(flattenedBone->world);
+				matchedBone.resolvedFromSkeleton = true;
+				matchedBone.useActorKinematicBody = true;
+				matchedBone.meshOnlySkinBoneCandidate = false;
+			} else if (matchedBone.node) {
+				matchedBone.resolvedFromSkeleton = true;
+				matchedBone.useActorKinematicBody = false;
+			}
+		}
+
+		for (const auto& boneName : a_boneNames) {
+			if (boneName.empty() || FindMatchedSkinBoneByName(a_matchedBones, boneName)) {
+				continue;
+			}
+			auto* flattenedBone = FindFlattenedBoneByName(flattened, boneName);
+			if (!flattenedBone) {
+				continue;
+			}
+
+			auto* node = flattenedBone->node.get();
+			a_matchedBones.push_back({
+				.node = node,
+				.transform = node ? std::addressof(node->world) : std::addressof(flattenedBone->world),
+				.name = boneName,
+				.resolvedFromSkeleton = true,
+				.useActorKinematicBody = true,
+			});
+			spdlog::debug(
+				"resolved armor XML anchor '{}' directly from BSFlattenedBoneTree node={} transform={}",
+				boneName,
+				static_cast<void*>(node),
+				static_cast<void*>(a_matchedBones.back().transform));
+		}
+	}
+
 	void ResolveExplicitXmlBonesFromMergedSkeleton(
 		std::vector<MatchedSkinBone>& a_matchedBones,
 		const Smp::PhysicsXmlSummary& a_summary,
@@ -3394,45 +3406,6 @@ namespace
 			matchedBone.resolvedFromSkeleton = true;
 			matchedBone.useActorKinematicBody = !resolvedFromMergedNode;
 		}
-	}
-
-	bool IsUnresolvedArmorOwnedMatchedBone(
-		const MatchedSkinBone& a_matchedBone,
-		RE::NiAVObject* a_actorRoot,
-		RE::NiNode* a_sourceRoot,
-		RE::NiAVObject* a_attachedObject,
-		RE::NiAVObject* a_sourceObject,
-		RE::NiAVObject* a_mergeSourceObject,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		if (!a_matchedBone.node || a_matchedBone.resolvedFromSkeleton) {
-			return false;
-		}
-
-		auto* object = static_cast<RE::NiAVObject*>(a_matchedBone.node);
-		if (a_knownArmorNodes.contains(object)) {
-			return true;
-		}
-
-		if (IsObjectInTree(a_attachedObject, object) ||
-			IsObjectInTree(a_sourceObject, object) ||
-			IsObjectInTree(a_mergeSourceObject, object) ||
-			IsObjectInTree(a_sourceRoot, object)) {
-			return true;
-		}
-
-		for (auto* excluded : a_excludedObjects) {
-			if (IsObjectInTree(excluded, object)) {
-				return true;
-			}
-		}
-
-		if (a_actorRoot && IsObjectInTree(a_actorRoot, object)) {
-			return true;
-		}
-
-		return true;
 	}
 
 	btTransform ToBulletTransform(const Smp::XmlTransform& a_transform)

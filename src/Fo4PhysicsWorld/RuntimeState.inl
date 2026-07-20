@@ -1350,7 +1350,6 @@ namespace Smp
 			}
 			a_record.attachedObject = nullptr;
 			a_record.sourceObject = nullptr;
-			a_record.mergeSourceObject = nullptr;
 			return true;
 		});
 		if (!a_state.HasRuntime()) {

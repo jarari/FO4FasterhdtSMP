@@ -32,7 +32,6 @@ namespace Smp
 		bool enableBulletVisualization{ false };
 		bool disableSMPHairWhenWigEquipped{ true };
 		std::string prototypePhysicsXml;
-		std::vector<std::string> backupNodeByName;
 	};
 
 	struct WindSettings

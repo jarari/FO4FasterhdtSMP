@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ArmorBoneReference.h"
 #include "RE/B/BSPointerHandle.h"
 #include "RE/N/NiPointer.h"
 
@@ -52,6 +53,7 @@ namespace Smp
 		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
 		std::vector<MergeParentBinding> mergeParentBindings;
 		std::vector<MergeRename> mergeRenameMap;
+		std::vector<ArmorBoneReference> armorBoneReferences;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
 		std::string        mergeRenamePrefix;

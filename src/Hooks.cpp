@@ -1,24 +1,17 @@
 #include "Hooks.h"
 
-#include "ActorSkeletonBinding.h"
-#include "BSBoneMap.h"
-#include "BSSkin.h"
-#include "Fo4NiObjectUtils.h"
+#include "ArmorBoneReference.h"
 #include "Fo4PhysicsWorld.h"
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
-#include "PhysicsName.h"
 #include "PhysicsXmlSelection.h"
-#include "SmpConfig.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
 #include "RE/M/Main.h"
-#include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiNode.h"
-#include "RE/N/NiPointer.h"
 #include "RE/P/PlayerCharacter.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
@@ -29,7 +22,6 @@
 #include <Windows.h>
 #include <detours.h>
 
-#include <atomic>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -100,15 +92,10 @@ namespace Hooks
 	inline constexpr std::uintptr_t kAddHeadPartSkinSingleCallOffsetOG = 0xFD;
 	inline constexpr std::size_t kFaceGenSkinAllGeometryVFuncSlot = 0x43;
 
-	std::mutex               BackupNodeLock;
-	std::vector<std::string> BackupNodeNames;
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
+	thread_local RE::NiNode* ApplySkinnedObjectsSkeletonRoot{ nullptr };
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
-	std::atomic<std::uint32_t> ArmorMergeId{ 1 };
-
-	using BackupBoneMap = std::unordered_map<std::string, std::vector<RE::NiPointer<RE::NiAVObject>>>;
-
 	RE::Actor* ResolveActor(RE::BipedAnim* a_biped);
 
 	RE::Actor* AsActor(RE::TESObjectREFR* a_ref)
@@ -149,297 +136,13 @@ namespace Hooks
 	struct PreAttachPhysicsContext
 	{
 		std::optional<std::string> selectedXml;
-		RE::NiPointer<RE::NiAVObject> mergeSourceObject;
-		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
-		std::vector<Smp::MergeParentBinding> mergeParentBindings;
-		std::vector<Smp::MergeRename> mergeRenameMap;
-		std::string mergeRenamePrefix;
+		std::vector<Smp::ArmorBoneReference> armorBoneReferences;
 	};
 
-	RE::NiNode* FindNode(RE::NiAVObject* a_object, const std::string_view a_name)
-	{
-		if (!a_object || a_name.empty()) {
-			return nullptr;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		const auto nodeName = node->GetName();
-		if (!nodeName.empty() && Smp::PhysicsNamesEqual(nodeName, a_name)) {
-			return node;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindNode(child.get(), a_name)) {
-				return found;
-			}
-		}
-		return nullptr;
-	}
-
-	RE::NiNode* GetSkeletonMergeRoot(RE::Actor* a_actor, const bool a_firstPerson)
-	{
-		auto* actorRoot = a_actor ? a_actor->Get3D(a_firstPerson) : nullptr;
-		if (!actorRoot && a_actor) {
-			actorRoot = a_actor->Get3D();
-		}
-		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
-		if (!actorRootNode) {
-			return nullptr;
-		}
-
-		if (auto* rootNode = FindNode(actorRootNode, "Root")) {
-			return rootNode;
-		}
-		return actorRootNode;
-	}
-
-	RE::NiNode* FindTrustedActorSkeletonNode(
-		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
-		const std::string_view a_name)
-	{
-		if (a_name.empty()) {
-			return nullptr;
-		}
-
-		for (auto* object : a_trustedActorSkeletonNodes) {
-			if (!object) {
-				continue;
-			}
-
-			auto* node = object->IsNode();
-			if (!node) {
-				continue;
-			}
-
-			const auto nodeName = node->GetName();
-			if (!nodeName.empty() && Smp::PhysicsNamesEqual(nodeName, a_name)) {
-				return node;
-			}
-		}
-		return nullptr;
-	}
-
-	RE::NiNode* FindActorSkeletonDescendantNode(RE::NiNode* a_expectedParent, const std::string_view a_name)
-	{
-		if (!a_expectedParent || a_name.empty()) {
-			return nullptr;
-		}
-
-		for (auto& child : a_expectedParent->children) {
-			auto* object = child.get();
-			if (!object) {
-				continue;
-			}
-
-			const auto name = object->GetName();
-			if (!name.empty() && !Smp::IsAutoRenamedPhysicsName(name) && Smp::PhysicsNamesEqual(name, a_name)) {
-				return object->IsNode();
-			}
-
-			auto* node = object->IsNode();
-			if (!node || (!name.empty() && Smp::IsAutoRenamedPhysicsName(name))) {
-				continue;
-			}
-
-			if (auto* found = FindActorSkeletonDescendantNode(node, a_name)) {
-				return found;
-			}
-		}
-		return nullptr;
-	}
-
-	std::string MakeArmorMergePrefix()
-	{
-		char buffer[48]{};
-		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Armor_%08X ", ArmorMergeId.fetch_add(1, std::memory_order_relaxed));
-		return buffer;
-	}
-
-	RE::NiPointer<RE::NiAVObject> CloneNodeExact(RE::NiNode* a_source)
-	{
-		if (!a_source) {
-			return nullptr;
-		}
-
-		RE::NiCloningProcess cloneProcess;
-		cloneProcess.appendChar = '$';
-		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
-		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
-
-		auto* cloneObject = a_source->CreateClone(cloneProcess);
-		a_source->ProcessClone(cloneProcess);
-		return cloneObject ? static_cast<RE::NiAVObject*>(cloneObject->IsNode()) : nullptr;
-	}
-
-	void SetNodeName(RE::NiNode* a_node, const std::string& a_name)
-	{
-		if (a_node) {
-			a_node->name = a_name.c_str();
-		}
-	}
-
-	bool IsClassicHolsteredWeaponBoneName(const std::string_view a_name)
-	{
-		return a_name.size() >= 3 &&
-			a_name[0] == 'V' &&
-			a_name[1] == 'H' &&
-			a_name[2] == 'W';
-	}
-
-	void RenameTree(RE::NiNode* a_root, const std::string_view a_prefix, std::vector<Smp::MergeRename>& a_map)
-	{
-		if (!a_root) {
-			return;
-		}
-
-		const auto name = a_root->GetName();
-		if (!name.empty()) {
-			std::string renamed{ a_prefix };
-			renamed += std::string_view(name);
-			if (!std::ranges::any_of(a_map, [name](const Smp::MergeRename& a_entry) {
-					return Smp::PhysicsNamesEqual(a_entry.sourceName, name);
-				})) {
-				a_map.push_back({
-					.sourceName = std::string(name),
-					.renamedName = renamed,
-				});
-				spdlog::debug("Rename Bone {} -> {}.", std::string_view(name), renamed);
-			}
-			SetNodeName(a_root, renamed);
-		}
-
-		for (auto& child : a_root->children) {
-			if (auto* childNode = child ? child->IsNode() : nullptr) {
-				RenameTree(childNode, a_prefix, a_map);
-			}
-		}
-	}
-
-	void StripNonNodeChildren(RE::NiNode* a_root)
-	{
-		if (!a_root) {
-			return;
-		}
-
-		std::vector<RE::NiAVObject*> detachedChildren;
-		for (auto& child : a_root->children) {
-			auto* object = child.get();
-			if (!object) {
-				continue;
-			}
-
-			if (auto* node = object->IsNode()) {
-				StripNonNodeChildren(node);
-			} else {
-				detachedChildren.push_back(object);
-			}
-		}
-
-		for (auto* child : detachedChildren) {
-			a_root->DetachChild(child);
-		}
-	}
-
-	RE::NiNode* CloneNodeTree(RE::NiNode* a_source, const std::string_view a_prefix, std::vector<Smp::MergeRename>& a_map, const bool a_renameSource)
-	{
-		if (!a_source) {
-			return nullptr;
-		}
-
-		RE::NiCloningProcess cloneProcess;
-		cloneProcess.appendChar = '$';
-		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
-		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
-
-		auto* clone = a_source->CreateClone(cloneProcess);
-		a_source->ProcessClone(cloneProcess);
-		auto* cloneNode = clone ? clone->IsNode() : nullptr;
-		if (!cloneNode) {
-			return nullptr;
-		}
-
-		if (a_renameSource) {
-			RenameTree(a_source, a_prefix, a_map);
-		}
-		RenameTree(cloneNode, a_prefix, a_map);
-		StripNonNodeChildren(cloneNode);
-		return cloneNode;
-	}
-
-	void DoSkeletonMerge(
-		RE::NiNode* a_destination,
-		RE::NiNode* a_source,
-		const std::string_view a_prefix,
-		std::vector<Smp::MergeRename>& a_map,
-		RE::NiNode* a_destinationRoot,
-		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
-		const bool a_renameSource)
-	{
-		if (!a_destination || !a_source || !a_destinationRoot) {
-			return;
-		}
-
-		for (auto& child : a_source->children) {
-			auto* sourceChild = child ? child->IsNode() : nullptr;
-			if (!sourceChild) {
-				continue;
-			}
-
-			const auto childName = sourceChild->GetName();
-			if (childName.empty()) {
-				DoSkeletonMerge(a_destination, sourceChild, a_prefix, a_map, a_destinationRoot, a_trustedActorSkeletonNodes, a_renameSource);
-				continue;
-			}
-
-			if (Smp::PhysicsNamesEqual(childName, "BSFaceGenNiNodeSkinned")) {
-				spdlog::debug("Skipping facegen ninode in skeleton merge.");
-				continue;
-			}
-			if (IsClassicHolsteredWeaponBoneName(childName)) {
-				spdlog::debug("Skipping Classic Holstered Weapon helper bone '{}' in skeleton merge.", std::string_view(childName));
-				continue;
-			}
-
-			auto* destinationChild = FindTrustedActorSkeletonNode(a_trustedActorSkeletonNodes, childName);
-			if (!destinationChild) {
-				destinationChild = FindActorSkeletonDescendantNode(a_destination, childName);
-				if (destinationChild) {
-					spdlog::debug(
-						"using actor skeleton descendant '{}' node={} under expected parent={} parentName='{}' during armor skeleton merge",
-						childName,
-						static_cast<void*>(destinationChild),
-						static_cast<void*>(a_destination),
-						std::string_view(a_destination->GetName()));
-				}
-			}
-			if (destinationChild) {
-				DoSkeletonMerge(destinationChild, sourceChild, a_prefix, a_map, a_destinationRoot, a_trustedActorSkeletonNodes, a_renameSource);
-			} else if (auto* clone = CloneNodeTree(sourceChild, a_prefix, a_map, a_renameSource)) {
-				a_destination->AttachChild(clone, false);
-			}
-		}
-	}
-
-	void DoSkeletonMerge(
-		RE::NiNode* a_destination,
-		RE::NiNode* a_source,
-		const std::string_view a_prefix,
-		std::vector<Smp::MergeRename>& a_map,
-		const std::vector<RE::NiAVObject*>& a_trustedActorSkeletonNodes,
-		const bool a_renameSource = true)
-	{
-		DoSkeletonMerge(a_destination, a_source, a_prefix, a_map, a_destination, a_trustedActorSkeletonNodes, a_renameSource);
-	}
-
 	PreAttachPhysicsContext PreparePreAttachPhysicsContext(
-		RE::BipedAnim* a_biped,
-		RE::NiNode* a_sourceRoot,
 		RE::NiAVObject* a_sourceObject,
-		const bool a_firstPerson,
+		RE::NiAVObject* a_skeletonRoot,
+		const std::string_view a_nifPath,
 		const char* a_sourceLabel)
 	{
 		PreAttachPhysicsContext context;
@@ -448,104 +151,16 @@ namespace Hooks
 			return context;
 		}
 
-		auto* actor = ResolveActor(a_biped);
-		context.trustedActorSkeletonNodes = Smp::ActorSkeletonBinding::CaptureTrustedActorSkeletonNodesBeforeAttach(
-			actor,
-			a_biped,
-			a_sourceObject,
-			a_firstPerson);
-		Smp::ActorSkeletonBinding::PruneTrustedActorSkeletonNodesBySourceParents(a_sourceObject, context.trustedActorSkeletonNodes);
-		context.mergeParentBindings = Smp::ActorSkeletonBinding::BuildPreAttachMergeParentBindings(a_sourceObject, context.trustedActorSkeletonNodes);
-		context.mergeRenamePrefix = MakeArmorMergePrefix();
-		context.mergeSourceObject = CloneNodeExact(a_sourceRoot);
-		if (auto* mergeRoot = GetSkeletonMergeRoot(actor, a_firstPerson)) {
-			DoSkeletonMerge(mergeRoot, a_sourceRoot, context.mergeRenamePrefix, context.mergeRenameMap, context.trustedActorSkeletonNodes, false);
-			Smp::RefreshBoneScatterTable(mergeRoot);
-			spdlog::debug(
-				"merged pre-attach armor skeleton source={} name='{}' into actor merge root={} name='{}' prefix='{}' renamedBones={}",
-				static_cast<void*>(a_sourceRoot),
-				a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{},
-				static_cast<void*>(mergeRoot),
-				std::string_view(mergeRoot->GetName()),
-				context.mergeRenamePrefix,
-				context.mergeRenameMap.size());
-		}
+		context.armorBoneReferences = Smp::CaptureArmorBoneReferences(a_sourceObject, a_skeletonRoot, a_nifPath);
 		spdlog::debug(
-			"pre-scanned armor physics XML {} from {}={} name='{}'",
+			"pre-scanned armor physics XML {} from {}={} name='{}' nif='{}'",
 			*context.selectedXml,
 			a_sourceLabel,
-			static_cast<void*>(a_sourceRoot),
-			a_sourceRoot ? std::string_view(a_sourceRoot->GetName()) : std::string_view{});
+			static_cast<void*>(a_sourceObject),
+			a_sourceObject ? std::string_view(a_sourceObject->GetName()) : std::string_view{},
+			a_nifPath);
 
 		return context;
-	}
-
-	std::vector<std::string> GetBackupNodeNames()
-	{
-		std::scoped_lock lock(BackupNodeLock);
-		return BackupNodeNames;
-	}
-
-	RE::BSSkin::Instance* GetBackupSkinInstance(RE::NiAVObject* a_root, const std::string& a_nodeName)
-	{
-		if (!a_root || a_nodeName.empty()) {
-			return nullptr;
-		}
-
-		auto* object = a_root->GetObjectByName(RE::BSFixedString(a_nodeName));
-		auto* geometry = object ? object->IsGeometry() : nullptr;
-		return geometry && geometry->skinInstance ? geometry->skinInstance.get() : nullptr;
-	}
-
-	BackupBoneMap CaptureBackupBones(RE::NiAVObject* a_root, const std::vector<std::string>& a_nodeNames)
-	{
-		BackupBoneMap result;
-		for (const auto& nodeName : a_nodeNames) {
-			auto* skin = GetBackupSkinInstance(a_root, nodeName);
-			if (!skin || skin->bones.empty() || skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
-				continue;
-			}
-
-			std::vector<RE::NiPointer<RE::NiAVObject>> bones;
-			bones.reserve(skin->bones.size());
-			for (std::uint32_t index = 0; index < skin->bones.size(); ++index) {
-				bones.emplace_back(skin->bones[index]);
-			}
-
-			if (!bones.empty()) {
-				result.emplace(nodeName, std::move(bones));
-			}
-		}
-		return result;
-	}
-
-	void RestoreBackupBones(RE::NiAVObject* a_root, const BackupBoneMap& a_backupBones)
-	{
-		for (const auto& [nodeName, bones] : a_backupBones) {
-			auto* skin = GetBackupSkinInstance(a_root, nodeName);
-			if (!skin || skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
-				continue;
-			}
-
-			const auto restoreCount = std::min<std::uint32_t>(skin->bones.size(), static_cast<std::uint32_t>(std::min<std::size_t>(bones.size(), RE::BSSkin::kMaxExpectedBones)));
-			std::size_t restored = 0;
-			for (std::uint32_t index = 0; index < restoreCount; ++index) {
-				if (!skin->bones[index] && bones[index]) {
-					skin->bones[index] = bones[index].get();
-					++restored;
-				}
-			}
-
-			if (restored > 0) {
-				spdlog::debug("restored {} missing skin bones for backup node '{}'", restored, nodeName);
-			}
-		}
-	}
-
-	void ApplyConfig(const Smp::RuntimeSettings& a_settings)
-	{
-		std::scoped_lock lock(BackupNodeLock);
-		BackupNodeNames = a_settings.smp.backupNodeByName;
 	}
 
 	RE::Actor* ResolveActor(RE::BipedAnim* a_biped)
@@ -784,81 +399,69 @@ namespace Hooks
 
 	RE::NiAVObject* HookedBipedAnimApplySkinnedObjects(RE::BipedAnim* a_biped, RE::NiNode* a_originalModelRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
+		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
+		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
 		auto preAttach = PreparePreAttachPhysicsContext(
-			a_biped,
-			a_originalModelRoot,
 			originalModelObject,
-			a_firstPerson,
+			a_biped ? static_cast<RE::NiAVObject*>(a_biped->GetRoot()) : nullptr,
+			nifPath,
 			"original model root");
 
-		const auto backupNodeNames = GetBackupNodeNames();
-		const auto backupBones = backupNodeNames.empty() ? BackupBoneMap{} : CaptureBackupBones(a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr, backupNodeNames);
-
 		RE::NiAVObject* attachedObject = nullptr;
+		ApplySkinnedObjectsSkeletonRoot = nullptr;
 		{
 			ScopedApplySkinnedObjectsDepth scopedDepth;
 			attachedObject = OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
 		}
-		if (!backupBones.empty()) {
-			RestoreBackupBones(attachedObject, backupBones);
-		}
-
-		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
+		auto* actor = ResolveActor(a_biped);
+		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_firstPerson, preAttach.armorBoneReferences);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorApplySkinnedObjects,
-			.actor = ResolveActor(a_biped),
+			.actor = actor,
 			.biped = a_biped,
 			.bipObject = bipObject,
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
 			.sourceObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr,
-			.mergeSourceObject = preAttach.mergeSourceObject.get(),
-			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
-			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
-			.mergeRenameMap = std::move(preAttach.mergeRenameMap),
-			.mergeRenamePrefix = std::move(preAttach.mergeRenamePrefix),
+			.armorBoneReferences = std::move(preAttach.armorBoneReferences),
+			.destinationRoot = ApplySkinnedObjectsSkeletonRoot,
+			.sourceRoot = a_originalModelRoot,
 			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});
 		return attachedObject;
 	}
 
-	RE::NiAVObject* HookedBipedAnimAttachSkinnedObject(RE::BipedAnim* a_biped, RE::NiNode* a_destinationRoot, RE::NiNode* a_sourceRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
+	RE::NiAVObject* HookedBipedAnimAttachSkinnedObject(RE::BipedAnim* a_biped, RE::NiNode* a_modelRoot, RE::NiNode* a_skeletonRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
-		auto* sourceObject = a_sourceRoot ? static_cast<RE::NiAVObject*>(a_sourceRoot) : nullptr;
-		auto preAttach = PreparePreAttachPhysicsContext(
-			a_biped,
-			a_sourceRoot,
-			sourceObject,
-			a_firstPerson,
-			"source root");
-		const auto backupNodeNames = GetBackupNodeNames();
-		const auto backupBones = backupNodeNames.empty() ? BackupBoneMap{} : CaptureBackupBones(a_sourceRoot ? static_cast<RE::NiAVObject*>(a_sourceRoot) : static_cast<RE::NiAVObject*>(a_destinationRoot), backupNodeNames);
-
-		auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_destinationRoot, a_sourceRoot, a_bipedObject, a_firstPerson);
-		if (!backupBones.empty()) {
-			RestoreBackupBones(attachedObject, backupBones);
+		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
+		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
+		auto* modelObject = a_modelRoot ? static_cast<RE::NiAVObject*>(a_modelRoot) : nullptr;
+		const bool nestedApply = ApplySkinnedObjectsDepth > 0;
+		PreAttachPhysicsContext preAttach;
+		if (!nestedApply) {
+			preAttach = PreparePreAttachPhysicsContext(modelObject, a_skeletonRoot, nifPath, "model root");
 		}
-		if (ApplySkinnedObjectsDepth > 0) {
+
+		auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_modelRoot, a_skeletonRoot, a_bipedObject, a_firstPerson);
+		if (nestedApply) {
+			ApplySkinnedObjectsSkeletonRoot = a_skeletonRoot;
 			return attachedObject;
 		}
-		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
+		auto* actor = ResolveActor(a_biped);
+		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_firstPerson, preAttach.armorBoneReferences);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorAttachSkinnedObject,
-			.actor = ResolveActor(a_biped),
+			.actor = actor,
 			.biped = a_biped,
 			.bipObject = bipObject,
 			.bipedObject = a_bipedObject,
 			.object = attachedObject,
-			.sourceObject = bipObject ? bipObject->partClone.get() : nullptr,
-			.mergeSourceObject = preAttach.mergeSourceObject.get(),
-			.trustedActorSkeletonNodes = std::move(preAttach.trustedActorSkeletonNodes),
-			.mergeParentBindings = std::move(preAttach.mergeParentBindings),
-			.mergeRenameMap = std::move(preAttach.mergeRenameMap),
-			.destinationRoot = a_destinationRoot,
-			.sourceRoot = a_sourceRoot,
-			.mergeRenamePrefix = std::move(preAttach.mergeRenamePrefix),
+			.sourceObject = modelObject,
+			.armorBoneReferences = std::move(preAttach.armorBoneReferences),
+			.destinationRoot = a_skeletonRoot,
+			.sourceRoot = a_modelRoot,
 			.physicsXmlPath = preAttach.selectedXml.value_or(std::string{}),
 			.firstPerson = a_firstPerson,
 		});

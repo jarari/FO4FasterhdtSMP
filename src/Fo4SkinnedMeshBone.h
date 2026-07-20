@@ -12,7 +12,11 @@ namespace Smp
 		public hdt::SkinnedMeshBone
 	{
 	public:
-		Fo4SkinnedMeshBone(const RE::BSFixedString& a_name, RE::NiNode* a_node, btRigidBody::btRigidBodyConstructionInfo& a_constructionInfo);
+		Fo4SkinnedMeshBone(
+			const RE::BSFixedString& a_name,
+			RE::NiNode* a_node,
+			RE::NiTransform* a_worldTransform,
+			btRigidBody::btRigidBodyConstructionInfo& a_constructionInfo);
 
 		struct ActiveSkinSlot
 		{
@@ -66,6 +70,7 @@ namespace Smp
 		RE::NiTransform* ResolveSkinWorldTransform(SkinWorldTransformSlot& a_slot);
 
 		RE::NiPointer<RE::NiNode> node_;
+		RE::NiTransform* transform_{ nullptr };
 		std::vector<SkinWorldTransformSlot> skinWorldTransforms_;
 		int depth_{ 0 };
 	};

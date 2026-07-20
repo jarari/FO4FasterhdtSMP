@@ -12,6 +12,7 @@ namespace Smp
 	struct Fo4DecodedSkinBone
 	{
 		RE::NiNode* node{ nullptr };
+		RE::NiTransform* worldTransform{ nullptr };
 		std::string name;
 		hdt::btQsTransform skinToBone{ hdt::btQsTransform::getIdentity() };
 		hdt::BoundingSphere boundingSphere;

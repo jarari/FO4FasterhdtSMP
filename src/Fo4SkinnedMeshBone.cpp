@@ -46,9 +46,14 @@ namespace
 
 namespace Smp
 {
-	Fo4SkinnedMeshBone::Fo4SkinnedMeshBone(const RE::BSFixedString& a_name, RE::NiNode* a_node, btRigidBody::btRigidBodyConstructionInfo& a_constructionInfo) :
+	Fo4SkinnedMeshBone::Fo4SkinnedMeshBone(
+		const RE::BSFixedString& a_name,
+		RE::NiNode* a_node,
+		RE::NiTransform* a_worldTransform,
+		btRigidBody::btRigidBodyConstructionInfo& a_constructionInfo) :
 		SkinnedMeshBone(a_name, a_constructionInfo),
-		node_(a_node)
+		node_(a_node),
+		transform_(a_node ? std::addressof(a_node->world) : a_worldTransform)
 	{
 		if (a_constructionInfo.m_mass > 0.0F) {
 			m_rig.setCollisionFlags(0);
@@ -290,13 +295,13 @@ namespace Smp
 
 	void Fo4SkinnedMeshBone::readTransform(const float a_timeStep)
 	{
-		if (!node_) {
+		if (!transform_) {
 			return;
 		}
 
 		const auto oldScale = m_currentTransform.getScale();
 		const auto isStaticOrKinematic = m_rig.isStaticOrKinematicObject();
-		m_currentTransform = Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(node_->world);
+		m_currentTransform = Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(*transform_);
 		const auto newScale = m_currentTransform.getScale();
 		const auto current = m_rig.getWorldTransform();
 

@@ -30,8 +30,7 @@
 			const DefaultBBP::NameMap& a_meshNameMap,
 			RE::NiAVObject* a_attachedObject = nullptr,
 			RE::NiAVObject* a_sourceObject = nullptr,
-			RE::NiAVObject* a_mergeSourceObject = nullptr,
-			std::vector<MergeRename> a_mergeRenameMap = {},
+			std::vector<ArmorBoneReference> a_armorBoneReferences = {},
 			std::uint64_t a_buildGroup = 0);
 		PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
 		const PrototypeAttachmentRecord* FindPrototypeAttachmentLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, RE::NiAVObject* a_object = nullptr, RE::NiAVObject* a_sourceObject = nullptr, std::string_view a_physicsXmlPath = {});
