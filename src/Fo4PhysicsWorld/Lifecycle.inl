@@ -282,7 +282,7 @@ namespace Smp
 						std::to_underlying(scopedEvent.bipedObject),
 						static_cast<void*>(a_object),
 						staleArmorBuildGroups.size());
-					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, scopedEvent.mergeRenameMap.empty());
+					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
 					staleArmorBuildGroups.clear();
 				}
 				if (hairSlotArmorBuild) {
@@ -602,9 +602,7 @@ namespace Smp
 			scopedEvent.object = candidate.object;
 			scopedEvent.sourceObject = candidate.sourceObject.get();
 			scopedEvent.sourceRoot = candidate.sourceRoot ? candidate.sourceRoot->IsNode() : nullptr;
-			scopedEvent.mergeSourceObject = candidate.sourceObject.get();
-			scopedEvent.preserveMergeSourceNames = candidate.preserveMergeSourceNames;
-			scopedEvent.mergeRenamePrefix = MakeReferenceHeadRenamePrefix(PrototypeHeadRenameId.fetch_add(1, std::memory_order_relaxed));
+			scopedEvent.cloneSourceBeforeTraversal = candidate.cloneSourceBeforeTraversal;
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			if (buildResult.succeeded) {
 				actorState.headPartRecords.push_back({

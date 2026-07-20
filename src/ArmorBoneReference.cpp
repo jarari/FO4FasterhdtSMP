@@ -158,13 +158,6 @@ namespace Smp
 						continue;
 					}
 					if (!bone->parent || NormalizeBoneCacheName(bone->parent->GetName()) != normalizedParentName) {
-						spdlog::warn(
-							"could not restore armor-only bone '{}' local pose because its bound parent is '{}' instead of '{}' bone={} parent={}",
-							reference.name,
-							bone->parent ? std::string_view(bone->parent->GetName()) : std::string_view{},
-							reference.parentBoneName,
-							static_cast<void*>(bone),
-							static_cast<void*>(bone->parent));
 						continue;
 					}
 
@@ -317,12 +310,6 @@ namespace Smp
 			if (!expectedParent ||
 				!actorRoot ||
 				!NiObject::IsDescendantOf(expectedParent, actorRoot)) {
-				spdlog::warn(
-					"could not resolve source actor parent '{}' for armor-only bone '{}' actor={} parent={}",
-					reference.parentBoneName,
-					reference.name,
-					static_cast<void*>(a_actor),
-					static_cast<void*>(expectedParent));
 				continue;
 			}
 

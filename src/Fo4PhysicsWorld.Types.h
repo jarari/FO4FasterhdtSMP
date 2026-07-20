@@ -50,14 +50,8 @@
 			std::uint64_t buildGroup{ 0 };
 			RE::NiNode* parent{ nullptr };
 			RE::NiPointer<RE::NiAVObject> node;
-			std::string sourceName;
-			std::string recordParentName;
 			RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
-			RE::NiTransform recordLocalToParent{ RE::NiTransform::IDENTITY };
 			bool hasLocalToParent{ false };
-			bool hasRecordLocalToParent{ false };
-			bool recordMergeParentBinding{ false };
-			std::vector<MergeRename> subtreeRenameMap;
 		};
 
 		struct PrototypeArmorRecord

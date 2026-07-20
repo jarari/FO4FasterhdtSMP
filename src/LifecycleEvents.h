@@ -25,20 +25,6 @@ namespace Smp
 		kActorReset3D
 	};
 
-	struct MergeParentBinding
-	{
-		std::string sourceName;
-		std::string parentName;
-		RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
-		bool hasLocalToParent{ false };
-	};
-
-	struct MergeRename
-	{
-		std::string sourceName;
-		std::string renamedName;
-	};
-
 	struct LifecycleEvent
 	{
 		LifecycleEventType type;
@@ -48,26 +34,19 @@ namespace Smp
 		RE::BIPED_OBJECT   bipedObject{ RE::BIPED_OBJECT::kTotal };
 		RE::NiAVObject*    object{ nullptr };
 		RE::NiAVObject*    sourceObject{ nullptr };
-		RE::NiAVObject*    mergeSourceObject{ nullptr };
 		RE::BGSHeadPart*   headPart{ nullptr };
-		std::vector<RE::NiAVObject*> trustedActorSkeletonNodes;
-		std::vector<MergeParentBinding> mergeParentBindings;
-		std::vector<MergeRename> mergeRenameMap;
 		std::vector<ArmorBoneReference> armorBoneReferences;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };
-		std::string        mergeRenamePrefix;
 		std::string        physicsXmlPath;
 		bool               firstPerson{ false };
 		bool               queue3DTasks{ false };
 		bool               queueDetach{ false };
-		bool               preserveMergeSourceNames{ false };
+		bool               cloneSourceBeforeTraversal{ false };
 		RE::NiPointer<RE::NiAVObject> retainedObject;
 		RE::NiPointer<RE::NiAVObject> retainedSourceObject;
-		RE::NiPointer<RE::NiAVObject> retainedMergeSourceObject;
 		RE::NiPointer<RE::NiNode>     retainedDestinationRoot;
 		RE::NiPointer<RE::NiNode>     retainedSourceRoot;
-		std::vector<RE::NiPointer<RE::NiAVObject>> retainedTrustedActorSkeletonNodes;
 		RE::ActorHandle               retainedActor;
 	};
 
