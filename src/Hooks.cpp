@@ -1,5 +1,6 @@
 #include "Hooks.h"
 
+#include "Address.h"
 #include "ArmorBoneReference.h"
 #include "Fo4PhysicsWorld.h"
 #include "ImguiLayer.h"
@@ -16,12 +17,7 @@
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
 
-#if defined(_M_X64) && !defined(_AMD64_)
-#	define _AMD64_ 1
-#endif
-#include <Windows.h>
-#include <detours.h>
-
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -29,21 +25,8 @@
 
 namespace Hooks
 {
-	namespace Addresses
-	{
-		REL::Relocation<std::uintptr_t> MainOnIdle{ REL::ID{ 633524, 0 } };
-		REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects{ REL::ID{ 224320, 0 } };
-		REL::Relocation<std::uintptr_t> BipedAnimAttachSkinnedObject{ REL::ID{ 1575810, 2194388 } };
-		REL::Relocation<std::uintptr_t> BipedAnimAttachToParent{ REL::ID{ 1370428, 2194378 } };
-		REL::Relocation<std::uintptr_t> BipedAnimRemovePart{ REL::ID{ 575576, 2194342 } };
-		REL::Relocation<std::uintptr_t> Update3DModel{ REL::ID{ 986782, 2231882 } };
-		REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
-		REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ REL::ID{ 913780, 0 } };
-		REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 0 } };
-		REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu{ REL::ID{ 411372, 2223366 } };
-	}
+	namespace Address = Smp::Address;
 
-	using MainOnIdleUpdateHighActorsArraySorted_t = void (*)(RE::Main*, float);
 	using MainSwap_t = void (*)(RE::Main*);
 	using BipedAnimApplySkinnedObjects_t = RE::NiAVObject* (*)(RE::BipedAnim*, RE::NiNode*, RE::BIPED_OBJECT, bool);
 	using BipedAnimAttachSkinnedObject_t = RE::NiAVObject* (*)(RE::BipedAnim*, RE::NiNode*, RE::NiNode*, RE::BIPED_OBJECT, bool);
@@ -59,7 +42,6 @@ namespace Hooks
 	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
 	using LooksMenuUtilsShowLooksMenu_t = void (*)(RE::TESObjectREFR*, std::uint32_t, RE::TESObjectREFR*, RE::TESObjectREFR*, RE::TESObjectREFR*);
 
-	MainOnIdleUpdateHighActorsArraySorted_t OriginalMainOnIdleUpdateHighActorsArraySorted{ nullptr };
 	MainSwap_t                     OriginalMainSwap{ nullptr };
 	BipedAnimApplySkinnedObjects_t OriginalBipedAnimApplySkinnedObjects{ nullptr };
 	BipedAnimAttachSkinnedObject_t OriginalBipedAnimAttachSkinnedObject{ nullptr };
@@ -78,19 +60,7 @@ namespace Hooks
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
 	LooksMenuUtilsShowLooksMenu_t  OriginalLooksMenuUtilsShowLooksMenu{ nullptr };
 
-	inline constexpr std::size_t kApplySkinnedObjectsPrologueSize = 14;
-	inline constexpr std::size_t kAttachSkinnedObjectPrologueSize = 15;
-	inline constexpr std::size_t kAttachToParentPrologueSize = 15;
-	inline constexpr std::size_t kRemovePartPrologueSize = 15;
-	inline constexpr std::size_t kUpdate3DModelPrologueSize = 5;
-	inline constexpr std::size_t kReset3DPrologueSize = 5;
-	inline constexpr std::uintptr_t kMainOnIdleUpdateHighActorsArraySortedCallOffsetOG = 0x6E4;
-	inline constexpr std::uintptr_t kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE = 0x6E4;
-	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetOG = 0x6EC;
-	inline constexpr std::uintptr_t kMainOnIdleSwapCallOffsetAE = 0x6EC;
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
-	inline constexpr std::uintptr_t kAddHeadPartSkinSingleCallOffsetOG = 0xFD;
-	inline constexpr std::size_t kFaceGenSkinAllGeometryVFuncSlot = 0x43;
 
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
 	thread_local RE::NiNode* ApplySkinnedObjectsSkeletonRoot{ nullptr };
@@ -196,52 +166,87 @@ namespace Hooks
 		return player && a_biped && player->firstPersonBipedAnim.get() == a_biped;
 	}
 
+	struct RipRel32Patch
+	{
+		std::size_t instructionOffset;
+		std::size_t displacementOffset;
+		std::size_t instructionSize;
+	};
+
+	std::int32_t MakeRel32Displacement(const std::uintptr_t a_sourceNext, const std::uintptr_t a_destination)
+	{
+		const auto displacement = static_cast<std::int64_t>(a_destination) - static_cast<std::int64_t>(a_sourceNext);
+		if (displacement < (std::numeric_limits<std::int32_t>::min)() ||
+			displacement > (std::numeric_limits<std::int32_t>::max)()) {
+			REX::FAIL("rel32 displacement out of range sourceNext={:x} destination={:x}", a_sourceNext, a_destination);
+		}
+
+		return static_cast<std::int32_t>(displacement);
+	}
+
+	void WriteBranch5(const std::uintptr_t a_source, const std::uintptr_t a_destination)
+	{
+		auto& trampoline = REL::GetTrampoline();
+		const auto branch = trampoline.allocate_branch5(a_destination);
+		const REL::ASM::JMP5 assembly{ MakeRel32Displacement(a_source + sizeof(REL::ASM::JMP5), branch) };
+		REL::WriteSafeData(a_source, assembly);
+	}
+
+	bool ReadExistingBranchTarget(const std::uintptr_t a_targetAddress, const std::byte* a_targetBytes, std::uintptr_t& a_branchTarget)
+	{
+		if (a_targetBytes[0] == std::byte{ 0xE9 }) {
+			std::int32_t oldDisp = 0;
+			std::memcpy(std::addressof(oldDisp), a_targetBytes + 1, sizeof(oldDisp));
+			a_branchTarget = a_targetAddress + sizeof(REL::ASM::JMP5) + oldDisp;
+			return a_branchTarget != 0;
+		}
+
+		if (a_targetBytes[0] == std::byte{ 0xFF } && a_targetBytes[1] == std::byte{ 0x25 }) {
+			std::int32_t oldDisp = 0;
+			std::memcpy(std::addressof(oldDisp), a_targetBytes + 2, sizeof(oldDisp));
+			const auto indirectAddress = a_targetAddress + sizeof(REL::ASM::JMP6) + oldDisp;
+			std::memcpy(std::addressof(a_branchTarget), reinterpret_cast<const void*>(indirectAddress), sizeof(a_branchTarget));
+			return a_branchTarget != 0;
+		}
+
+		return false;
+	}
+
 	template <class T>
-	T CreateBranchGateway5(const char* a_name, REL::Relocation<std::uintptr_t>& a_target, const std::size_t a_prologueSize, void* a_hook)
+	T CreateBranchGateway5(
+		const char* a_name,
+		REL::Relocation<std::uintptr_t>& a_target,
+		const std::size_t a_prologueSize,
+		void* a_hook,
+		std::initializer_list<RipRel32Patch> a_ripPatches = {})
 	{
 		const auto targetAddress = a_target.address();
-		const auto* targetBytes = reinterpret_cast<const std::byte*>(targetAddress);
-		auto&      trampoline = REL::GetTrampoline();
-		const auto prologueSize = a_prologueSize;
+		auto* targetBytes = reinterpret_cast<const std::byte*>(targetAddress);
+		auto& trampoline = REL::GetTrampoline();
 
-		if (prologueSize >= 5 && targetBytes[0] == std::byte{ 0xFF } && targetBytes[1] == std::byte{ 0x25 }) {
-			std::int32_t oldDisp32 = 0;
-			std::memcpy(std::addressof(oldDisp32), targetBytes + 2, sizeof(oldDisp32));
-			const auto indirectAddress = targetAddress + sizeof(REL::ASM::JMP6) + oldDisp32;
-			std::uintptr_t absoluteDest = 0;
-			std::memcpy(std::addressof(absoluteDest), reinterpret_cast<const void*>(indirectAddress), sizeof(absoluteDest));
-
-			auto* gateway = static_cast<std::byte*>(trampoline.allocate(sizeof(REL::ASM::JMP14)));
-			const REL::ASM::JMP14 chainedJump{ absoluteDest };
-			std::memcpy(gateway, std::addressof(chainedJump), sizeof(chainedJump));
-
-			trampoline.write_jmp6(targetAddress, reinterpret_cast<std::uintptr_t>(a_hook));
-			spdlog::info("{} found pre-existing 14-byte jmp at {:x}; chaining through {:x}", a_name, targetAddress, absoluteDest);
-			spdlog::info("{} branch hook installed at {:x}", a_name, targetAddress);
+		std::uintptr_t existingBranchTarget = 0;
+		if (ReadExistingBranchTarget(targetAddress, targetBytes, existingBranchTarget)) {
+			auto* gateway = trampoline.allocate<REL::ASM::JMP14>(existingBranchTarget);
+			WriteBranch5(targetAddress, reinterpret_cast<std::uintptr_t>(a_hook));
+			spdlog::info("{} found existing branch at {:x}; chaining through {:x}", a_name, targetAddress, existingBranchTarget);
 			return reinterpret_cast<T>(gateway);
 		}
 
-		if (prologueSize >= 5 && targetBytes[0] == std::byte{ 0xE9 }) {
-			std::int32_t oldRel32 = 0;
-			std::memcpy(std::addressof(oldRel32), targetBytes + 1, sizeof(oldRel32));
-			const auto absoluteDest = static_cast<std::uintptr_t>(static_cast<std::int64_t>(targetAddress) + 5 + oldRel32);
+		auto* gateway = static_cast<std::byte*>(trampoline.allocate(a_prologueSize + sizeof(REL::ASM::JMP14)));
+		std::memcpy(gateway, targetBytes, a_prologueSize);
 
-			auto* gateway = static_cast<std::byte*>(trampoline.allocate(sizeof(REL::ASM::JMP14)));
-			const REL::ASM::JMP14 chainedJump{ absoluteDest };
-			std::memcpy(gateway, std::addressof(chainedJump), sizeof(chainedJump));
-
-			trampoline.write_jmp5(targetAddress, reinterpret_cast<std::uintptr_t>(a_hook));
-			spdlog::info("{} found pre-existing 5-byte jmp at {:x}; chaining through {:x}", a_name, targetAddress, absoluteDest);
-			spdlog::info("{} branch hook installed at {:x}", a_name, targetAddress);
-			return reinterpret_cast<T>(gateway);
+		for (const auto& patch : a_ripPatches) {
+			std::int32_t oldDisp = 0;
+			std::memcpy(std::addressof(oldDisp), targetBytes + patch.displacementOffset, sizeof(oldDisp));
+			const auto originalTarget = targetAddress + patch.instructionOffset + patch.instructionSize + oldDisp;
+			const auto gatewayNext = reinterpret_cast<std::uintptr_t>(gateway) + patch.instructionOffset + patch.instructionSize;
+			const auto newDisp = MakeRel32Displacement(gatewayNext, originalTarget);
+			std::memcpy(gateway + patch.displacementOffset, std::addressof(newDisp), sizeof(newDisp));
 		}
 
-		auto*      gateway = static_cast<std::byte*>(trampoline.allocate(prologueSize + sizeof(REL::ASM::JMP14)));
-		std::memcpy(gateway, targetBytes, prologueSize);
-
-		const REL::ASM::JMP14 jumpBack{ targetAddress + prologueSize };
-		std::memcpy(gateway + prologueSize, std::addressof(jumpBack), sizeof(jumpBack));
-		trampoline.write_jmp5(targetAddress, reinterpret_cast<std::uintptr_t>(a_hook));
+		const REL::ASM::JMP14 jumpBack{ targetAddress + a_prologueSize };
+		std::memcpy(gateway + a_prologueSize, std::addressof(jumpBack), sizeof(jumpBack));
+		WriteBranch5(targetAddress, reinterpret_cast<std::uintptr_t>(a_hook));
 		spdlog::info("{} branch hook installed at {:x}", a_name, targetAddress);
 		return reinterpret_cast<T>(gateway);
 	}
@@ -276,24 +281,16 @@ namespace Hooks
 
 	void LogHookTargets()
 	{
-		LogRelocationTarget("Main::OnIdle", Addresses::MainOnIdle.address());
-		LogRelocationTarget("BipedAnim::ApplySkinnedObjects", Addresses::BipedAnimApplySkinnedObjects.address());
-		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Addresses::BipedAnimAttachSkinnedObject.address());
-		LogRelocationTarget("BipedAnim::AttachToParent", Addresses::BipedAnimAttachToParent.address());
-		LogRelocationTarget("BipedAnim::RemovePart", Addresses::BipedAnimRemovePart.address());
-		LogRelocationTarget("AIProcess::Update3DModel", Addresses::Update3DModel.address());
-		LogRelocationTarget("Actor::Reset3D", Addresses::Reset3D.address());
-		LogRelocationTarget("LooksMenuUtils::ShowLooksMenu", Addresses::LooksMenuUtilsShowLooksMenu.address());
-		if (REX::FModule::IsRuntimeOG()) {
-			LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Addresses::BSFaceGenAddHeadPartOnActor.address());
-		} else {
-			spdlog::warn("BSFaceGenUtils::AddHeadPartOnActor hook skipped: AE relocation ID is not verified");
-		}
-		if (REX::FModule::IsRuntimeOG()) {
-			LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
-		} else {
-			spdlog::warn("BSFaceGenModelExtraData::SetBoneName hook skipped: AE relocation ID is not verified");
-		}
+		LogRelocationTarget("Main::OnIdle", Address::MainOnIdle.address());
+		LogRelocationTarget("BipedAnim::ApplySkinnedObjects", Address::BipedAnimApplySkinnedObjects.address());
+		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
+		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
+		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
+		LogRelocationTarget("AIProcess::Update3DModel", Address::Update3DModel.address());
+		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
+		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
+		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
+		LogRelocationTarget("LooksMenuUtils::ShowLooksMenu", Address::LooksMenuUtilsShowLooksMenu.address());
 	}
 
 	void EmitEvent(const Smp::LifecycleEvent& a_event)
@@ -669,14 +666,9 @@ namespace Hooks
 		OriginalLooksMenuUtilsShowLooksMenu(a_target, a_editMode, a_target2, a_swapTarget, a_vendor);
 	}
 
-	void HookedMainOnIdleUpdateHighActorsArraySorted(RE::Main* a_main, float a_distance)
-	{
-		OriginalMainOnIdleUpdateHighActorsArraySorted(a_main, a_distance);
-		Smp::Fo4PhysicsWorld::GetSingleton()->StepFrame();
-	}
-
 	void HookedMainSwap(RE::Main* a_main)
 	{
+		Smp::Fo4PhysicsWorld::GetSingleton()->StepFrame();
 		Smp::Fo4PhysicsWorld::GetSingleton()->WriteBackPrototypeBodies(Smp::WritebackSource::kMainSync);
 		Smp::ImguiLayer::RenderFrame();
 		OriginalMainSwap(a_main);
@@ -706,33 +698,25 @@ namespace Hooks
 	bool InstallLifecycleHooks()
 	{
 		LogHookTargets();
-		const auto isOG = REX::FModule::IsRuntimeOG();
-		const auto mainFrameCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleUpdateHighActorsArraySortedCallOffsetOG : kMainOnIdleUpdateHighActorsArraySortedCallOffsetAE);
-		const auto mainSyncCallsite = Addresses::MainOnIdle.address() + (isOG ? kMainOnIdleSwapCallOffsetOG : kMainOnIdleSwapCallOffsetAE);
-		LogRelocationTarget("Main::OnIdle frame update callsite", mainFrameCallsite);
+		const auto mainSyncCallsite = Address::MainOnIdleSwapCall.address();
 		LogRelocationTarget("Main::OnIdle frame sync callsite", mainSyncCallsite);
 
-		if (isOG && !OriginalMainOnIdleUpdateHighActorsArraySorted) {
-			OriginalMainOnIdleUpdateHighActorsArraySorted = reinterpret_cast<MainOnIdleUpdateHighActorsArraySorted_t>(
-				REL::GetTrampoline().write_call<5>(mainFrameCallsite, reinterpret_cast<std::uintptr_t>(&HookedMainOnIdleUpdateHighActorsArraySorted)));
-			spdlog::info("Main::OnIdle frame update call hook installed at {:x}", mainFrameCallsite);
-		}
-		if (isOG && !OriginalMainSwap) {
+		if (!OriginalMainSwap) {
 			OriginalMainSwap = reinterpret_cast<MainSwap_t>(
 				REL::GetTrampoline().write_call<5>(mainSyncCallsite, reinterpret_cast<std::uintptr_t>(&HookedMainSwap)));
 			spdlog::info("Main::OnIdle frame sync call hook installed at {:x}", mainSyncCallsite);
 		}
-		if (isOG && !OriginalBipedAnimApplySkinnedObjects) {
-			OriginalBipedAnimApplySkinnedObjects = CreateBranchGateway5<BipedAnimApplySkinnedObjects_t>("BipedAnim::ApplySkinnedObjects", Addresses::BipedAnimApplySkinnedObjects, kApplySkinnedObjectsPrologueSize, reinterpret_cast<void*>(&HookedBipedAnimApplySkinnedObjects));
+		if (!OriginalBipedAnimApplySkinnedObjects) {
+			OriginalBipedAnimApplySkinnedObjects = CreateBranchGateway5<BipedAnimApplySkinnedObjects_t>("BipedAnim::ApplySkinnedObjects", Address::BipedAnimApplySkinnedObjects, Address::BipedAnimApplySkinnedObjectsPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimApplySkinnedObjects));
 		}
 		if (!OriginalBipedAnimAttachSkinnedObject) {
-			OriginalBipedAnimAttachSkinnedObject = CreateBranchGateway5<BipedAnimAttachSkinnedObject_t>("BipedAnim::AttachSkinnedObject", Addresses::BipedAnimAttachSkinnedObject, kAttachSkinnedObjectPrologueSize, reinterpret_cast<void*>(&HookedBipedAnimAttachSkinnedObject));
+			OriginalBipedAnimAttachSkinnedObject = CreateBranchGateway5<BipedAnimAttachSkinnedObject_t>("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject, Address::BipedAnimAttachSkinnedObjectPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimAttachSkinnedObject));
 		}
 		if (!OriginalBipedAnimAttachToParent) {
-			OriginalBipedAnimAttachToParent = CreateBranchGateway5<BipedAnimAttachToParent_t>("BipedAnim::AttachToParent", Addresses::BipedAnimAttachToParent, kAttachToParentPrologueSize, reinterpret_cast<void*>(&HookedBipedAnimAttachToParent));
+			OriginalBipedAnimAttachToParent = CreateBranchGateway5<BipedAnimAttachToParent_t>("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent, Address::BipedAnimAttachToParentPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimAttachToParent));
 		}
 		if (!OriginalBipedAnimRemovePart) {
-			OriginalBipedAnimRemovePart = CreateBranchGateway5<BipedAnimRemovePart_t>("BipedAnim::RemovePart", Addresses::BipedAnimRemovePart, kRemovePartPrologueSize, reinterpret_cast<void*>(&HookedBipedAnimRemovePart));
+			OriginalBipedAnimRemovePart = CreateBranchGateway5<BipedAnimRemovePart_t>("BipedAnim::RemovePart", Address::BipedAnimRemovePart, Address::BipedAnimRemovePartPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimRemovePart));
 		}
 
 		REL::Relocation<std::uintptr_t> actorVTable{ RE::VTABLE::Actor[0] };
@@ -740,85 +724,61 @@ namespace Hooks
 		REL::Relocation<std::uintptr_t> faceGenVTable{ RE::VTABLE::BSFaceGenNiNode[0] };
 
 		if (!OriginalActorLoad3D) {
-			OriginalActorLoad3D = InstallVFuncHook<ActorLoad3D_t>("Actor::Load3D", actorVTable, 0x86, reinterpret_cast<void*>(&HookedActorLoad3D));
+			OriginalActorLoad3D = InstallVFuncHook<ActorLoad3D_t>("Actor::Load3D", actorVTable, Address::ActorLoad3DVFuncSlot, reinterpret_cast<void*>(&HookedActorLoad3D));
 		}
 		if (!OriginalPlayerCharacterLoad3D) {
-			OriginalPlayerCharacterLoad3D = InstallVFuncHook<ActorLoad3D_t>("PlayerCharacter::Load3D", playerVTable, 0x86, reinterpret_cast<void*>(&HookedPlayerCharacterLoad3D));
+			OriginalPlayerCharacterLoad3D = InstallVFuncHook<ActorLoad3D_t>("PlayerCharacter::Load3D", playerVTable, Address::ActorLoad3DVFuncSlot, reinterpret_cast<void*>(&HookedPlayerCharacterLoad3D));
 		}
 		if (!OriginalActorSet3D) {
-			OriginalActorSet3D = InstallVFuncHook<Set3D_t>("Actor::Set3D", actorVTable, 0x88, reinterpret_cast<void*>(&HookedActorSet3D));
+			OriginalActorSet3D = InstallVFuncHook<Set3D_t>("Actor::Set3D", actorVTable, Address::ActorSet3DVFuncSlot, reinterpret_cast<void*>(&HookedActorSet3D));
 		}
 		if (!OriginalPlayerCharacterSet3D) {
-			OriginalPlayerCharacterSet3D = InstallVFuncHook<Set3D_t>("PlayerCharacter::Set3D", playerVTable, 0x88, reinterpret_cast<void*>(&HookedPlayerCharacterSet3D));
+			OriginalPlayerCharacterSet3D = InstallVFuncHook<Set3D_t>("PlayerCharacter::Set3D", playerVTable, Address::ActorSet3DVFuncSlot, reinterpret_cast<void*>(&HookedPlayerCharacterSet3D));
 		}
 		if (!OriginalActorOnHeadInitialized) {
-			OriginalActorOnHeadInitialized = InstallVFuncHook<OnHeadInitialized_t>("Actor::OnHeadInitialized", actorVTable, 0x98, reinterpret_cast<void*>(&HookedActorOnHeadInitialized));
+			OriginalActorOnHeadInitialized = InstallVFuncHook<OnHeadInitialized_t>("Actor::OnHeadInitialized", actorVTable, Address::ActorOnHeadInitializedVFuncSlot, reinterpret_cast<void*>(&HookedActorOnHeadInitialized));
 		}
 		if (!OriginalPlayerCharacterOnHeadInitialized) {
-			OriginalPlayerCharacterOnHeadInitialized = InstallVFuncHook<OnHeadInitialized_t>("PlayerCharacter::OnHeadInitialized", playerVTable, 0x98, reinterpret_cast<void*>(&HookedPlayerCharacterOnHeadInitialized));
+			OriginalPlayerCharacterOnHeadInitialized = InstallVFuncHook<OnHeadInitialized_t>("PlayerCharacter::OnHeadInitialized", playerVTable, Address::ActorOnHeadInitializedVFuncSlot, reinterpret_cast<void*>(&HookedPlayerCharacterOnHeadInitialized));
 		}
 		if (!OriginalFaceGenSkinAllGeometry) {
 			OriginalFaceGenSkinAllGeometry = InstallVFuncHook<FaceGenSkinAllGeometry_t>(
 				"BSFaceGenNiNode::SkinAllGeometry",
 				faceGenVTable,
-				kFaceGenSkinAllGeometryVFuncSlot,
+				Address::BSFaceGenSkinAllGeometryVFuncSlot,
 				reinterpret_cast<void*>(&HookedFaceGenSkinAllGeometry));
 		}
 
 		if (!OriginalUpdate3DModel) {
-			OriginalUpdate3DModel = CreateBranchGateway5<Update3DModel_t>("AIProcess::Update3DModel", Addresses::Update3DModel, kUpdate3DModelPrologueSize, reinterpret_cast<void*>(&HookedUpdate3DModel));
+			OriginalUpdate3DModel = CreateBranchGateway5<Update3DModel_t>("AIProcess::Update3DModel", Address::Update3DModel, Address::Update3DModelPrologueSize.value(), reinterpret_cast<void*>(&HookedUpdate3DModel));
 		}
 		if (!OriginalReset3D) {
-			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Addresses::Reset3D, kReset3DPrologueSize, reinterpret_cast<void*>(&HookedReset3D));
+			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Address::Reset3D, Address::Reset3DPrologueSize.value(), reinterpret_cast<void*>(&HookedReset3D));
 		}
-		if (isOG && !OriginalSetFaceGenBoneName) {
-			OriginalSetFaceGenBoneName = reinterpret_cast<SetFaceGenBoneName_t>(Addresses::BSFaceGenModelExtraDataSetBoneName.address());
-			DetourTransactionBegin();
-			DetourUpdateThread(GetCurrentThread());
-			const auto detourError = DetourAttach(
-				reinterpret_cast<PVOID*>(std::addressof(OriginalSetFaceGenBoneName)),
-				reinterpret_cast<PVOID>(&HookedSetFaceGenBoneName));
-			const auto commitError = DetourTransactionCommit();
-			if (detourError != NO_ERROR || commitError != NO_ERROR) {
-				spdlog::error(
-					"BSFaceGenModelExtraData::SetBoneName detour failed attachError={} commitError={} target={}",
-					detourError,
-					commitError,
-					reinterpret_cast<void*>(Addresses::BSFaceGenModelExtraDataSetBoneName.address()));
-				OriginalSetFaceGenBoneName = nullptr;
-			} else {
-				spdlog::info("BSFaceGenModelExtraData::SetBoneName detour installed at {:x}", Addresses::BSFaceGenModelExtraDataSetBoneName.address());
-			}
+		if (!OriginalSetFaceGenBoneName) {
+			OriginalSetFaceGenBoneName = CreateBranchGateway5<SetFaceGenBoneName_t>(
+				"BSFaceGenModelExtraData::SetBoneName",
+				Address::BSFaceGenModelExtraDataSetBoneName,
+				Address::BSFaceGenModelExtraDataSetBoneNamePrologueSize.value(),
+				reinterpret_cast<void*>(&HookedSetFaceGenBoneName));
 		}
 		if (!OriginalLooksMenuUtilsShowLooksMenu) {
-			OriginalLooksMenuUtilsShowLooksMenu = reinterpret_cast<LooksMenuUtilsShowLooksMenu_t>(Addresses::LooksMenuUtilsShowLooksMenu.address());
-			DetourTransactionBegin();
-			DetourUpdateThread(GetCurrentThread());
-			const auto detourError = DetourAttach(
-				reinterpret_cast<PVOID*>(std::addressof(OriginalLooksMenuUtilsShowLooksMenu)),
-				reinterpret_cast<PVOID>(&HookedLooksMenuUtilsShowLooksMenu));
-			const auto commitError = DetourTransactionCommit();
-			if (detourError != NO_ERROR || commitError != NO_ERROR) {
-				spdlog::error(
-					"LooksMenuUtils::ShowLooksMenu detour failed attachError={} commitError={} target={}",
-					detourError,
-					commitError,
-					reinterpret_cast<void*>(Addresses::LooksMenuUtilsShowLooksMenu.address()));
-				OriginalLooksMenuUtilsShowLooksMenu = nullptr;
-			} else {
-				spdlog::info("LooksMenuUtils::ShowLooksMenu detour installed at {:x}", Addresses::LooksMenuUtilsShowLooksMenu.address());
-			}
+			OriginalLooksMenuUtilsShowLooksMenu = CreateBranchGateway5<LooksMenuUtilsShowLooksMenu_t>(
+				"LooksMenuUtils::ShowLooksMenu",
+				Address::LooksMenuUtilsShowLooksMenu,
+				Address::LooksMenuUtilsShowLooksMenuPrologueSize.value(),
+				reinterpret_cast<void*>(&HookedLooksMenuUtilsShowLooksMenu));
 		}
-		if (isOG && !OriginalFaceGenSkinSingleGeometry) {
-			const auto skinSingleCallsite = Addresses::BSFaceGenAddHeadPartOnActor.address() + (isOG ? kAddHeadPartSkinSingleCallOffsetOG : kAddHeadPartSkinSingleCallOffsetOG);
+		if (!OriginalFaceGenSkinSingleGeometry) {
+			const auto skinSingleCallsite = Address::BSFaceGenAddHeadPartOnActorSkinSingleCall.address();
 			OriginalFaceGenSkinSingleGeometry = reinterpret_cast<FaceGenSkinSingleGeometry_t>(
 				REL::GetTrampoline().write_call<5>(skinSingleCallsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenSkinSingleGeometry)));
 			spdlog::info("BSFaceGenUtils::AddHeadPartOnActor skin-single call hook installed at {:x}", skinSingleCallsite);
 		}
 
 		const bool installed =
-			(!isOG || (OriginalMainOnIdleUpdateHighActorsArraySorted && OriginalMainSwap)) &&
-			(!isOG || OriginalBipedAnimApplySkinnedObjects) &&
+			OriginalMainSwap &&
+			OriginalBipedAnimApplySkinnedObjects &&
 			OriginalBipedAnimAttachSkinnedObject &&
 			OriginalBipedAnimAttachToParent &&
 			OriginalBipedAnimRemovePart &&
@@ -832,8 +792,8 @@ namespace Hooks
 			OriginalUpdate3DModel &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
-			(!isOG || OriginalSetFaceGenBoneName) &&
-			(!isOG || OriginalFaceGenSkinSingleGeometry);
+			OriginalSetFaceGenBoneName &&
+			OriginalFaceGenSkinSingleGeometry;
 
 		spdlog::info("FO4 Faster HDT-SMP lifecycle hooks {}", installed ? "installed" : "failed");
 		return installed;

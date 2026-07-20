@@ -1,5 +1,6 @@
 #include "Fo4PhysicsWorld.h"
 
+#include "Address.h"
 #include "BSBoneMap.h"
 #include "BSSkin.h"
 #include "ConfigPaths.h"
@@ -365,9 +366,7 @@ namespace
 
 	RE::NiAVObject* CalculateActorLOS(RE::Actor* a_actor, const RE::NiPoint3& a_targetPosition, RE::NiPoint3& a_hitPosition)
 	{
-		using ActorCalculateLOSFn = RE::NiAVObject* (*)(RE::Actor*, const RE::NiPoint3&, RE::NiPoint3&, float);
-		static REL::Relocation<ActorCalculateLOSFn> actorCalculateLOS{ REL::ID{ 1324305, 0 } };
-		return actorCalculateLOS(a_actor, a_targetPosition, a_hitPosition, 6.28F);
+		return Smp::Address::ActorCalculateLOS(a_actor, a_targetPosition, a_hitPosition, 6.28F);
 	}
 
 	RE::NiPoint3 ResolveActorCullPosition(RE::Actor* a_actor, RE::NiAVObject* a_root)
