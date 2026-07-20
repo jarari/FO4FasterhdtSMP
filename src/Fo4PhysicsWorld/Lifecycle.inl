@@ -272,7 +272,7 @@ namespace Smp
 							staleHeadBuildGroups.size());
 					}
 					if (!staleHeadBuildGroups.empty()) {
-						ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
+						ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups);
 					}
 				}
 				if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
@@ -602,7 +602,6 @@ namespace Smp
 			scopedEvent.object = candidate.object;
 			scopedEvent.sourceObject = candidate.sourceObject.get();
 			scopedEvent.sourceRoot = candidate.sourceRoot ? candidate.sourceRoot->IsNode() : nullptr;
-			scopedEvent.cloneSourceBeforeTraversal = candidate.cloneSourceBeforeTraversal;
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			if (buildResult.succeeded) {
 				actorState.headPartRecords.push_back({

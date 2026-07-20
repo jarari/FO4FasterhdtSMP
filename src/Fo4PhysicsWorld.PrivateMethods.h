@@ -64,7 +64,7 @@
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
 		void ClearHeadPrototypeTrackingLocked(PrototypeActorState& a_state, std::string_view a_reason);
-		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, bool a_detachMergedNodes = true);
+		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
 		PrototypeReadPreparation PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);

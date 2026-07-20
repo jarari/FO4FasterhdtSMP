@@ -14,7 +14,6 @@ namespace Smp
 		struct BuildTiming
 		{
 			float actorTreePrepMs{ 0.0F };
-			float attachmentSkeletonMs{ 0.0F };
 			float referencePoseMs{ 0.0F };
 			float xmlSkinResolveMs{ 0.0F };
 			float bulletBodyMs{ 0.0F };
@@ -26,7 +25,7 @@ namespace Smp
 		BuildTiming timing;
 		auto logBuildTiming = [&](const char* a_reason, const std::uint64_t a_buildGroup = 0) {
 			spdlog::debug(
-				"prototype build timing actor={} domain={} bipedObject={} buildGroup={} reason={} totalMs={:.3f} actorTreePrepMs={:.3f} attachmentSkeletonMs={:.3f} referencePoseMs={:.3f} xmlSkinResolveMs={:.3f} bulletBodyMs={:.3f} meshBuildMs={:.3f} bindCommitConstraintMs={:.3f}",
+				"prototype build timing actor={} domain={} bipedObject={} buildGroup={} reason={} totalMs={:.3f} actorTreePrepMs={:.3f} referencePoseMs={:.3f} xmlSkinResolveMs={:.3f} bulletBodyMs={:.3f} meshBuildMs={:.3f} bindCommitConstraintMs={:.3f}",
 				static_cast<void*>(a_state.actor),
 				PrototypeDomainName(a_domain),
 				std::to_underlying(a_event.bipedObject),
@@ -34,7 +33,6 @@ namespace Smp
 				a_reason,
 				ElapsedMs(buildTimingStart, Clock::now()),
 				timing.actorTreePrepMs,
-				timing.attachmentSkeletonMs,
 				timing.referencePoseMs,
 				timing.xmlSkinResolveMs,
 				timing.bulletBodyMs,
@@ -53,9 +51,8 @@ namespace Smp
 
 		std::vector<MatchedSkinBone> matchedBones;
 		auto phaseStart = Clock::now();
-		auto* skeletonSearchRoot = ResolveSkeletonSearchRoot(a_event);
-		const auto actorSkeletonSearchExclusions = BuildBipedPartCloneExclusions(a_event);
-		const auto knownArmorNodes = BuildKnownArmorNodeSet(a_event);
+		const auto actorSkeletonSearchExclusions = BuildBipedPartExclusions(a_event);
+		const auto knownAttachmentNodes = BuildKnownAttachmentNodeSet(a_event);
 		auto* actorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
 		if (!actorRoot && a_event.actor) {
 			actorRoot = a_event.actor->Get3D();
@@ -85,87 +82,14 @@ namespace Smp
 				return result;
 			}
 		}
-		std::vector<MergedSkeletonNode> mergedSkeletonNodes;
-		std::vector<MergedRootNode> mergedRootNodes;
 		std::vector<SavedNodeLocalPose> savedBuildPoses;
-		RE::NiPointer<RE::NiAVObject> preservedSourceClone;
-		const auto cloneAttachmentSkeleton = a_domain != PrototypeBuildDomain::kArmor;
-		ActorSkeletonLookup actorSkeletonLookup;
-		if (cloneAttachmentSkeleton) {
-			phaseStart = Clock::now();
-			actorSkeletonLookup = BuildActorSkeletonLookup(actorRoot, actorSkeletonSearchExclusions, knownArmorNodes);
-			const auto attachmentPrefix = MakeReferenceHeadRenamePrefix(PrototypeHeadRenameId.fetch_add(1, std::memory_order_relaxed));
-			auto* sourceRoot = a_event.sourceObject ? a_event.sourceObject->IsNode() : a_event.sourceRoot;
-			const auto smpClonedPrefix = MakeReferenceSmpClonedPrefix(attachmentPrefix);
-			if (sourceRoot && a_event.cloneSourceBeforeTraversal) {
-				preservedSourceClone = CloneNodeExact(sourceRoot);
-				if (auto* clonedRoot = preservedSourceClone ? preservedSourceClone->IsNode() : nullptr) {
-					sourceRoot = clonedRoot;
-				}
-			}
-			if (sourceRoot) {
-				UpdateNodeWorldFromLocal(sourceRoot);
-				auto* liveCloneParent = actorRootNode;
-				if (!liveCloneParent) {
-					liveCloneParent = a_event.object ? a_event.object->IsNode() : nullptr;
-				}
-				if (!liveCloneParent) {
-					liveCloneParent = sourceRoot->parent ? sourceRoot->parent : sourceRoot;
-				}
-
-				const auto sourceRootName = sourceRoot->GetName();
-				const auto sourceRootIsActorBone = FindActorSkeletonNodeForSource(actorRoot, sourceRoot, actorSkeletonLookup, actorSkeletonSearchExclusions, knownArmorNodes) != nullptr;
-				if (sourceRoot == liveCloneParent && !sourceRootIsActorBone && !sourceRootName.empty() && IsReferencedXmlBoneName(a_summary, sourceRootName) && sourceRoot->parent) {
-					liveCloneParent = sourceRoot->parent;
-				}
-				if (!sourceRootName.empty() && !sourceRootIsActorBone && HasRelevantXmlDescendant(sourceRoot, a_summary)) {
-					spdlog::debug(
-						"selectively cloning relevant attachment bones from source root '{}' node={} under actor-tree parent={} parentName='{}' prefix='{}'",
-						sourceRootName,
-						static_cast<void*>(sourceRoot),
-						static_cast<void*>(liveCloneParent),
-						std::string_view(liveCloneParent->GetName()),
-						smpClonedPrefix);
-				}
-				CloneSourceSkeletonIntoActorTree(
-					liveCloneParent,
-					sourceRoot,
-					actorRoot,
-					actorSkeletonLookup,
-					actorSkeletonSearchExclusions,
-					knownArmorNodes,
-					smpClonedPrefix,
-					a_summary,
-					mergedSkeletonNodes,
-					mergedRootNodes);
-				if (!mergedRootNodes.empty()) {
-					RefreshBoneScatterTable(actorRoot);
-					if (actorRootNode) {
-						UpdateTransformUpDown(actorRootNode, true);
-					}
-				}
-			}
-			timing.attachmentSkeletonMs += ElapsedMs(phaseStart, Clock::now());
-		}
-		auto* skeletonLookupRoot = actorRootNode ? static_cast<RE::NiAVObject*>(actorRootNode) : skeletonSearchRoot;
-		std::vector<RE::NiAVObject*>        mergedSkeletonLookupExclusions;
-		std::unordered_set<RE::NiAVObject*> mergedSkeletonLookupKnownArmorNodes;
-		const auto* skeletonLookupExclusions =
-			std::addressof(actorSkeletonSearchExclusions);
-		const auto* skeletonLookupKnownArmorNodes = std::addressof(knownArmorNodes);
-		if (cloneAttachmentSkeleton) {
-			mergedSkeletonLookupExclusions = BuildSkeletonLookupExclusions(actorSkeletonSearchExclusions, mergedRootNodes);
-			mergedSkeletonLookupKnownArmorNodes = BuildKnownArmorNodeSet(a_event, std::addressof(mergedRootNodes));
-			skeletonLookupExclusions = std::addressof(mergedSkeletonLookupExclusions);
-			skeletonLookupKnownArmorNodes = std::addressof(mergedSkeletonLookupKnownArmorNodes);
-		}
 		if (actorRootNode) {
 			phaseStart = Clock::now();
 			if (!ApplyHavokReferencePose(
 					a_event.actor,
 					actorRootNode,
-					*skeletonLookupExclusions,
-					*skeletonLookupKnownArmorNodes,
+					actorSkeletonSearchExclusions,
+					knownAttachmentNodes,
 					savedBuildPoses)) {
 				spdlog::debug(
 					"prototype physics build used current actor pose because Havok reference pose was unavailable actor={} root={}",
@@ -178,28 +102,12 @@ namespace Smp
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
 		if (a_domain == PrototypeBuildDomain::kArmor) {
 			RestoreArmorBoneLocalPose(a_event.object, a_event.armorBoneReferences);
-			auto* vanillaSkeletonRoot = a_event.destinationRoot;
-			if (!vanillaSkeletonRoot) {
-				vanillaSkeletonRoot = FindFlattenedBoneTreeInScene(actorRoot);
-			}
-			ResolveVanillaArmorBones(matchedBones, a_summary.boneNames, actorRoot, vanillaSkeletonRoot);
-		} else {
-			ResolveExplicitXmlBonesFromMergedSkeleton(
-				matchedBones,
-				a_summary.boneNames,
-				mergedSkeletonNodes,
-				skeletonLookupRoot,
-				actorSkeletonLookup,
-				*skeletonLookupExclusions,
-				*skeletonLookupKnownArmorNodes);
-			ResolveMatchedSkinBonesFromSkeleton(
-				matchedBones,
-				mergedSkeletonNodes,
-				skeletonLookupRoot,
-				actorSkeletonLookup,
-				*skeletonLookupExclusions,
-				*skeletonLookupKnownArmorNodes);
 		}
+		auto* engineSkeletonRoot = a_event.destinationRoot;
+		if (!engineSkeletonRoot) {
+			engineSkeletonRoot = FindFlattenedBoneTreeInScene(actorRoot);
+		}
+		ResolveEnginePreparedBones(matchedBones, a_summary.boneNames, actorRoot, engineSkeletonRoot);
 		timing.xmlSkinResolveMs += ElapsedMs(phaseStart, Clock::now());
 		if (matchedBones.empty()) {
 			spdlog::debug(
@@ -208,7 +116,6 @@ namespace Smp
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
 			RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
-			DetachMergedRootNodes(mergedRootNodes);
 			logBuildTiming("no-matched-bones");
 			return {};
 		}
@@ -278,7 +185,6 @@ namespace Smp
 		{
 			Fo4PhysicsWorld* world{ nullptr };
 			PrototypeActorState* state{ nullptr };
-			std::vector<MergedRootNode>* mergedRoots{ nullptr };
 			std::uint64_t buildGroup{ 0 };
 			bool active{ false };
 
@@ -288,9 +194,6 @@ namespace Smp
 					return;
 				}
 
-				if (mergedRoots) {
-					DetachMergedRootNodes(*mergedRoots);
-				}
 				world->ClearPrototypeGroupsLocked(*state, std::vector<std::uint64_t>{ buildGroup });
 			}
 
@@ -302,7 +205,6 @@ namespace Smp
 		BuildGroupRollbackGuard rollbackGuard{
 			.world = this,
 			.state = std::addressof(a_state),
-			.mergedRoots = std::addressof(mergedRootNodes),
 			.buildGroup = buildGroup,
 			.active = createdBuildGroup,
 		};
@@ -360,7 +262,7 @@ namespace Smp
 			const auto& boneDescriptor = descriptor ? *descriptor : fallbackDescriptor;
 			auto shape = CreateCollisionShape(boneDescriptor);
 			btVector3 localInertia(0.0F, 0.0F, 0.0F);
-			const auto mass = matchedBone.useActorKinematicBody ? 0.0F : std::max(boneDescriptor.mass, 0.0F);
+			const auto mass = matchedBone.isSharedActorBone ? 0.0F : std::max(boneDescriptor.mass, 0.0F);
 			if (boneDescriptor.hasLocalInertia) {
 				localInertia = btVector3(
 					std::max(boneDescriptor.localInertia.x, 0.0F),
@@ -467,16 +369,24 @@ namespace Smp
 		for (auto& stagedMesh : stagedMeshes) {
 			a_state.meshes.push_back(std::move(stagedMesh));
 		}
-		for (auto& mergedRoot : mergedRootNodes) {
-			a_state.mergedNodes.push_back({
-				.buildGroup = buildGroup,
-				.parent = mergedRoot.parent,
-				.node = mergedRoot.node,
-				.localToParent = mergedRoot.localToParent,
-				.hasLocalToParent = mergedRoot.hasLocalToParent,
+		for (const auto& matchedBone : matchedBones) {
+			if (!matchedBone.node || matchedBone.isSharedActorBone) {
+				continue;
+			}
+			const auto cachedNodePose = std::ranges::find_if(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+				return a_pose.node.get() == matchedBone.node;
 			});
+			const auto alreadyCachedForGroup = std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+				return a_pose.buildGroup == buildGroup && a_pose.node.get() == matchedBone.node;
+			});
+			if (!alreadyCachedForGroup) {
+				a_state.attachmentBoneLocalPoses.push_back({
+					.buildGroup = buildGroup,
+					.node = matchedBone.node,
+					.local = cachedNodePose != a_state.attachmentBoneLocalPoses.end() ? cachedNodePose->local : matchedBone.node->local,
+				});
+			}
 		}
-		mergedRootNodes.clear();
 		for (auto& matchedBone : matchedBones) {
 			auto body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
 				return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
@@ -707,20 +617,24 @@ namespace Smp
 			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
 		};
 
-		std::uint32_t restoredMergedNodes = 0;
-		for (auto& mergedNode : a_state.mergedNodes) {
-			if (!containsGroup(mergedNode.buildGroup) || !mergedNode.hasLocalToParent) {
+		std::vector<RE::NiNode*> restoredNodes;
+		for (auto& localPose : a_state.attachmentBoneLocalPoses) {
+			if (!containsGroup(localPose.buildGroup)) {
 				continue;
 			}
 
-			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
-			if (!node) {
+			auto* node = localPose.node ? localPose.node->IsNode() : nullptr;
+			if (!node || std::ranges::find(restoredNodes, node) != restoredNodes.end()) {
 				continue;
 			}
 
-			node->local = mergedNode.localToParent;
-			UpdateTransformUpDown(node, true);
-			++restoredMergedNodes;
+			node->local = localPose.local;
+			restoredNodes.push_back(node);
+		}
+		for (auto* node : restoredNodes) {
+			if (!node->parent || std::ranges::find(restoredNodes, node->parent) == restoredNodes.end()) {
+				UpdateTransformUpDown(node, true);
+			}
 		}
 
 		for (const auto buildGroup : a_buildGroups) {
@@ -728,10 +642,10 @@ namespace Smp
 		}
 
 		spdlog::debug(
-			"reset prototype build groups to stored local pose actor={} groups={} restoredMergedNodes={} reason={}",
+			"reset prototype build groups to cached attachment-bone local pose actor={} groups={} restoredBones={} reason={}",
 			static_cast<void*>(a_state.actor),
 			a_buildGroups.size(),
-			restoredMergedNodes,
+			restoredNodes.size(),
 			a_reason);
 	}
 

@@ -31,7 +31,6 @@
 #include "RE/H/hkRefPtr.h"
 #include "RE/M/Main.h"
 #include "RE/M/MenuOpenCloseEvent.h"
-#include "RE/N/NiCloningProcess.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/N/NiUpdateData.h"
 #include "RE/P/PlayerCamera.h"
@@ -51,9 +50,7 @@
 #include <btBulletDynamicsCommon.h>
 
 #include <array>
-#include <atomic>
 #include <cctype>
-#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -78,7 +75,6 @@ namespace
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
-	std::atomic<std::uint32_t> PrototypeHeadRenameId{ 0 };
 	using Clock = std::chrono::steady_clock;
 
 	bool IsHairBipedObject(const RE::BIPED_OBJECT a_bipedObject)
@@ -343,7 +339,6 @@ namespace
 		Smp::DefaultBBP::NameMap meshNameMap;
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
-		bool cloneSourceBeforeTraversal{ false };
 		Smp::PrototypeBuildDomain domain{ Smp::PrototypeBuildDomain::kHead };
 	};
 
@@ -800,7 +795,6 @@ namespace
 		Smp::DefaultBBP::NameMap a_meshNameMap,
 		RE::NiAVObject* a_sourceObject,
 		RE::NiNode* a_sourceRoot,
-		const bool a_cloneSourceBeforeTraversal,
 		const Smp::PrototypeBuildDomain a_domain)
 	{
 		if (!a_object || a_path.empty()) {
@@ -823,7 +817,6 @@ namespace
 			.meshNameMap = std::move(a_meshNameMap),
 			.sourceObject = a_sourceObject,
 			.sourceRoot = a_sourceRoot,
-			.cloneSourceBeforeTraversal = a_cloneSourceBeforeTraversal,
 			.domain = a_domain,
 		});
 	}
@@ -951,7 +944,7 @@ namespace
 		return RE::BIPED_OBJECT::kTotal;
 	}
 
-	std::vector<RE::NiAVObject*> BuildBipedPartCloneExclusions(const Smp::LifecycleEvent& a_event)
+	std::vector<RE::NiAVObject*> BuildBipedPartExclusions(const Smp::LifecycleEvent& a_event)
 	{
 		std::vector<RE::NiAVObject*> exclusions;
 		auto* primaryActorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
@@ -1125,7 +1118,6 @@ namespace
 				{},
 				sourceObject,
 				originalRoot ? originalRoot : a_object->IsNode(),
-				originalRoot != nullptr,
 				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 			return;
 		}
@@ -1139,7 +1131,6 @@ namespace
 					{},
 					sourceObject,
 					originalRoot,
-					true,
 					isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 				return;
 			}
@@ -1153,7 +1144,6 @@ namespace
 				std::move(defaultBbp->meshNameMap),
 				sourceObject,
 				originalRoot ? originalRoot : sourceObject->IsNode(),
-				originalRoot != nullptr,
 				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 			return;
 		}
@@ -1239,25 +1229,9 @@ namespace
 		RE::NiTransform* transform{ nullptr };
 		RE::NiNode* sourceNode{ nullptr };
 		std::string name;
-		bool resolvedFromSkeleton{ false };
-		bool useActorKinematicBody{ false };
+		bool isSharedActorBone{ false };
 		bool meshOnlySkinBoneCandidate{ false };
 		std::vector<SkinWorldTransformSlot> skinWorldTransforms;
-	};
-
-	struct MergedSkeletonNode
-	{
-		std::string originalName;
-		std::string renamedName;
-		RE::NiNode* node{ nullptr };
-	};
-
-	struct MergedRootNode
-	{
-		RE::NiNode* parent{ nullptr };
-		RE::NiPointer<RE::NiAVObject> node;
-		RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
-		bool hasLocalToParent{ false };
 	};
 
 	struct SavedNodeLocalPose
@@ -1265,20 +1239,6 @@ namespace
 		RE::NiNode* node{ nullptr };
 		RE::NiTransform local;
 	};
-
-	std::string MakeReferenceHeadRenamePrefix(const std::uint32_t a_id)
-	{
-		char buffer[48]{};
-		std::snprintf(buffer, sizeof(buffer), "hdtSSEPhysics_AutoRename_Head_%08X ", a_id);
-		return buffer;
-	}
-
-	std::string MakeReferenceSmpClonedPrefix(const std::string& a_prefix)
-	{
-		auto result = a_prefix;
-		result += "SMPCloned ";
-		return result;
-	}
 
 	MatchedSkinBone* FindMatchedSkinBone(std::vector<MatchedSkinBone>& a_nodes, RE::NiNode* a_node)
 	{
@@ -1318,31 +1278,7 @@ namespace
 		});
 	}
 
-	RE::NiNode* FindExactNodeByName(RE::NiAVObject* a_root, const std::string_view a_name)
-	{
-		if (!a_root || a_name.empty()) {
-			return nullptr;
-		}
-
-		if (const auto name = a_root->GetName(); !name.empty() && std::string_view(name) == a_name) {
-			return a_root->IsNode();
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindExactNodeByName(child.get(), a_name)) {
-				return found;
-			}
-		}
-
-		return nullptr;
-	}
-
-	bool IsExcludedMergeSearchObject(
+	bool IsExcludedSkeletonSearchObject(
 		RE::NiAVObject* a_object,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects)
 	{
@@ -1351,19 +1287,6 @@ namespace
 		}
 
 		return std::ranges::find(a_excludedObjects, a_object) != a_excludedObjects.end();
-	}
-
-	RE::NiAVObject* ResolveSkeletonSearchRoot(const Smp::LifecycleEvent& a_event)
-	{
-		if (a_event.actor) {
-			if (auto* root = a_event.actor->Get3D(a_event.firstPerson)) {
-				return root;
-			}
-			if (auto* root = a_event.actor->Get3D()) {
-				return root;
-			}
-		}
-		return nullptr;
 	}
 
 	bool IsNodeInTree(RE::NiAVObject* a_object, RE::NiNode* a_needle)
@@ -1457,9 +1380,7 @@ namespace
 		}
 	}
 
-	std::unordered_set<RE::NiAVObject*> BuildKnownArmorNodeSet(
-		const Smp::LifecycleEvent& a_event,
-		const std::vector<MergedRootNode>* a_mergedRoots = nullptr)
+	std::unordered_set<RE::NiAVObject*> BuildKnownAttachmentNodeSet(const Smp::LifecycleEvent& a_event)
 	{
 		std::vector<RE::NiAVObject*> roots;
 		auto* primaryActorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
@@ -1470,16 +1391,16 @@ namespace
 				roots.push_back(a_object);
 			}
 		};
-		auto addArmorRoot = [&](RE::NiAVObject* a_object) {
+		auto addAttachmentRoot = [&](RE::NiAVObject* a_object) {
 			if (!a_object || a_object == primaryActorRoot || a_object == thirdPersonActorRoot || a_object == firstPersonActorRoot) {
 				return;
 			}
 			addRoot(a_object);
 		};
 
-		addArmorRoot(a_event.object);
-		addArmorRoot(a_event.sourceObject);
-		addArmorRoot(a_event.sourceRoot);
+		addAttachmentRoot(a_event.object);
+		addAttachmentRoot(a_event.sourceObject);
+		addAttachmentRoot(a_event.sourceRoot);
 		if (auto* biped = ResolveEventBiped(a_event)) {
 			for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
 				const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
@@ -1489,12 +1410,6 @@ namespace
 				}
 			}
 		}
-		if (a_mergedRoots) {
-			for (const auto& mergedRoot : *a_mergedRoots) {
-				addRoot(mergedRoot.node.get());
-			}
-		}
-
 		std::unordered_set<RE::NiAVObject*> result;
 		for (auto* root : roots) {
 			if (IsProbablyValidNiObject(root)) {
@@ -1504,100 +1419,16 @@ namespace
 		return result;
 	}
 
-	std::string NormalizeActorLookupName(const std::string_view a_name)
-	{
-		return Smp::ConfigPaths::LowerString(std::string(a_name));
-	}
-
-	struct ActorSkeletonLookup
-	{
-		std::unordered_map<std::string, RE::NiNode*> nodesByName;
-	};
-
-	void AddActorSkeletonLookupNode(ActorSkeletonLookup& a_lookup, RE::NiAVObject* a_object)
-	{
-		if (!IsProbablyValidNiObject(a_object)) {
-			return;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!IsProbablyValidNiObject(node)) {
-			return;
-		}
-
-		const auto name = node->GetName();
-		if (name.empty()) {
-			return;
-		}
-		if (Smp::IsAutoRenamedPhysicsName(name)) {
-			return;
-		}
-
-		const auto key = NormalizeActorLookupName(name);
-		if (!key.empty() && !a_lookup.nodesByName.contains(key)) {
-			a_lookup.nodesByName.emplace(key, node);
-		}
-	}
-
-	void CollectActorSkeletonLookupNodes(
-		ActorSkeletonLookup& a_lookup,
-		RE::NiAVObject* a_object,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		if (!a_object ||
-			IsExcludedMergeSearchObject(a_object, a_excludedObjects) ||
-			a_knownArmorNodes.contains(a_object)) {
-			return;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!IsProbablyValidNiObject(node)) {
-			return;
-		}
-		const auto name = node->GetName();
-		if (!name.empty() && Smp::IsAutoRenamedPhysicsName(name)) {
-			return;
-		}
-
-		AddActorSkeletonLookupNode(a_lookup, node);
-
-		for (auto& child : node->children) {
-			CollectActorSkeletonLookupNodes(a_lookup, child.get(), a_excludedObjects, a_knownArmorNodes);
-		}
-	}
-
-	ActorSkeletonLookup BuildActorSkeletonLookup(
-		RE::NiAVObject* a_actorRoot,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		ActorSkeletonLookup lookup;
-
-		CollectActorSkeletonLookupNodes(lookup, a_actorRoot, a_excludedObjects, a_knownArmorNodes);
-		return lookup;
-	}
-
-	RE::NiNode* FindActorSkeletonLookupNode(const ActorSkeletonLookup& a_lookup, const std::string_view a_name)
-	{
-		if (a_name.empty()) {
-			return nullptr;
-		}
-
-		const auto found = a_lookup.nodesByName.find(NormalizeActorLookupName(a_name));
-		return found != a_lookup.nodesByName.end() ? found->second : nullptr;
-	}
-
 	RE::NiNode* FindNodeByNameExcludingKnownNodes(
 		RE::NiAVObject* a_root,
 		const std::string_view a_name,
 		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
+		const std::unordered_set<RE::NiAVObject*>& a_knownAttachmentNodes)
 	{
 		if (!a_root ||
 			a_name.empty() ||
-			IsExcludedMergeSearchObject(a_root, a_excludedObjects) ||
-			a_knownArmorNodes.contains(a_root)) {
+			IsExcludedSkeletonSearchObject(a_root, a_excludedObjects) ||
+			a_knownAttachmentNodes.contains(a_root)) {
 			return nullptr;
 		}
 
@@ -1611,18 +1442,12 @@ namespace
 		}
 
 		for (auto& child : node->children) {
-			if (auto* found = FindNodeByNameExcludingKnownNodes(child.get(), a_name, a_excludedObjects, a_knownArmorNodes)) {
+			if (auto* found = FindNodeByNameExcludingKnownNodes(child.get(), a_name, a_excludedObjects, a_knownAttachmentNodes)) {
 				return found;
 			}
 		}
 
 		return nullptr;
-	}
-
-	bool StartsWithInsensitive(const std::string_view a_value, const std::string_view a_prefix)
-	{
-		return a_value.size() >= a_prefix.size() &&
-			_memicmp(a_value.data(), a_prefix.data(), a_prefix.size()) == 0;
 	}
 
 	const Smp::PhysicsBoneDescriptor* FindBoneDescriptor(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
@@ -1797,25 +1622,6 @@ namespace
 		}
 	}
 
-	void UpdateNodeWorldFromLocal(RE::NiNode* a_node)
-	{
-		if (!a_node) {
-			return;
-		}
-
-		if (a_node->parent) {
-			a_node->world = a_node->parent->world * a_node->local;
-		} else {
-			a_node->world = a_node->local;
-		}
-
-		for (auto& child : a_node->children) {
-			if (auto* childNode = child ? child->IsNode() : nullptr) {
-				UpdateNodeWorldFromLocal(childNode);
-			}
-		}
-	}
-
 	void UpdateTransformUpDown(RE::NiAVObject* a_object, const bool a_dirty)
 	{
 		if (!a_object) {
@@ -1940,7 +1746,7 @@ namespace
 		RE::Actor* a_actor,
 		RE::NiNode* a_root,
 		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
+		const std::unordered_set<RE::NiAVObject*>& a_knownAttachmentNodes,
 		std::vector<SavedNodeLocalPose>& a_savedPoses)
 	{
 		const auto* skeleton = GetHavokReferenceSkeleton(a_actor);
@@ -1961,7 +1767,7 @@ namespace
 				a_root,
 				boneName,
 				a_actorSkeletonSearchExclusions,
-				a_knownArmorNodes);
+				a_knownAttachmentNodes);
 			if (!boneNode) {
 				continue;
 			}
@@ -2004,107 +1810,6 @@ namespace
 		UpdateTransformUpDown(a_updateRoot, true);
 	}
 
-	void RestoreClonedNodeTreeLocalPose(RE::NiNode* a_clone, RE::NiNode* a_source)
-	{
-		if (!a_clone || !a_source) {
-			return;
-		}
-
-		a_clone->local = a_source->local;
-		for (decltype(a_clone->children.size()) index = 0; index < a_clone->children.size() && index < a_source->children.size(); ++index) {
-			auto* cloneChild = a_clone->children[index] ? a_clone->children[index]->IsNode() : nullptr;
-			auto* sourceChild = a_source->children[index] ? a_source->children[index]->IsNode() : nullptr;
-			if (cloneChild && sourceChild) {
-				RestoreClonedNodeTreeLocalPose(cloneChild, sourceChild);
-			}
-		}
-	}
-
-	RE::NiPointer<RE::NiAVObject> CloneNodeExact(RE::NiNode* a_source)
-	{
-		if (!a_source) {
-			return nullptr;
-		}
-
-		RE::NiCloningProcess cloneProcess;
-		cloneProcess.appendChar = '$';
-		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
-		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
-
-		auto* cloneObject = a_source->CreateClone(cloneProcess);
-		a_source->ProcessClone(cloneProcess);
-		auto* cloneNode = cloneObject ? cloneObject->IsNode() : nullptr;
-		RestoreClonedNodeTreeLocalPose(cloneNode, a_source);
-		return cloneNode ? static_cast<RE::NiAVObject*>(cloneNode) : nullptr;
-	}
-
-	void RenameMergedNodeTree(
-		RE::NiNode* a_clone,
-		RE::NiNode* a_source,
-		const std::string& a_prefix,
-		std::vector<MergedSkeletonNode>& a_renamedNodes)
-	{
-		if (!a_clone || !a_source) {
-			return;
-		}
-
-		const auto originalName = a_source->GetName();
-		if (!originalName.empty()) {
-			auto renamed = a_prefix;
-			renamed += std::string_view(originalName);
-			a_renamedNodes.push_back({
-				.originalName = std::string(originalName),
-				.renamedName = renamed,
-				.node = a_clone,
-			});
-			a_clone->name = renamed.c_str();
-		}
-
-		for (decltype(a_clone->children.size()) index = 0; index < a_clone->children.size() && index < a_source->children.size(); ++index) {
-			auto* cloneChild = a_clone->children[index] ? a_clone->children[index]->IsNode() : nullptr;
-			auto* sourceChild = a_source->children[index] ? a_source->children[index]->IsNode() : nullptr;
-			if (cloneChild && sourceChild) {
-				RenameMergedNodeTree(cloneChild, sourceChild, a_prefix, a_renamedNodes);
-			}
-		}
-	}
-
-	RE::NiNode* CloneMergedNodeTree(RE::NiNode* a_source, const std::string& a_prefix, std::vector<MergedSkeletonNode>& a_renamedNodes)
-	{
-		if (!a_source) {
-			return nullptr;
-		}
-
-		RE::NiCloningProcess cloneProcess;
-		cloneProcess.appendChar = '$';
-		cloneProcess.copyType = RE::NiCloningProcess::CopyType::kCopyExact;
-		cloneProcess.scale = { 1.0F, 1.0F, 1.0F };
-
-		auto* cloneObject = a_source->CreateClone(cloneProcess);
-		a_source->ProcessClone(cloneProcess);
-		auto* cloneNode = cloneObject ? cloneObject->IsNode() : nullptr;
-		if (!cloneNode) {
-			return nullptr;
-		}
-
-		RestoreClonedNodeTreeLocalPose(cloneNode, a_source);
-		RenameMergedNodeTree(cloneNode, a_source, a_prefix, a_renamedNodes);
-		return cloneNode;
-	}
-
-	bool IsExplicitXmlBone(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
-	{
-		return FindBoneDescriptor(a_summary, a_name) != nullptr;
-	}
-
-	bool IsReferencedXmlBoneName(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
-	{
-		return !a_name.empty() &&
-			std::ranges::find_if(a_summary.boneNames, [a_name](const std::string& a_boneName) {
-				return Smp::PhysicsNamesEqual(a_boneName, a_name);
-			}) != a_summary.boneNames.end();
-	}
-
 	bool IsDynamicXmlBone(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
 	{
 		if (a_name.empty()) {
@@ -2132,261 +1837,6 @@ namespace
 			}
 		}
 		return count;
-	}
-
-	bool HasDynamicXmlDescendant(RE::NiNode* a_node, const Smp::PhysicsXmlSummary& a_summary)
-	{
-		if (!a_node) {
-			return false;
-		}
-
-		for (auto& child : a_node->children) {
-			auto* childNode = child ? child->IsNode() : nullptr;
-			if (!childNode) {
-				continue;
-			}
-
-			const auto childName = childNode->GetName();
-			if (!childName.empty()) {
-				if (IsDynamicXmlBone(a_summary, childName)) {
-					return true;
-				}
-			}
-
-			if (HasDynamicXmlDescendant(childNode, a_summary)) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	bool HasExplicitXmlDescendant(RE::NiNode* a_node, const Smp::PhysicsXmlSummary& a_summary)
-	{
-		if (!a_node) {
-			return false;
-		}
-
-		for (auto& child : a_node->children) {
-			auto* childNode = child ? child->IsNode() : nullptr;
-			if (!childNode) {
-				continue;
-			}
-
-			const auto childName = childNode->GetName();
-			if (!childName.empty() && IsExplicitXmlBone(a_summary, childName)) {
-				return true;
-			}
-			if (HasExplicitXmlDescendant(childNode, a_summary)) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	bool HasRelevantXmlDescendant(RE::NiNode* a_node, const Smp::PhysicsXmlSummary& a_summary)
-	{
-		if (!a_node) {
-			return false;
-		}
-
-		for (auto& child : a_node->children) {
-			auto* childNode = child ? child->IsNode() : nullptr;
-			if (!childNode) {
-				continue;
-			}
-
-			const auto childName = childNode->GetName();
-			if (!childName.empty() && IsReferencedXmlBoneName(a_summary, childName)) {
-				return true;
-			}
-			if (HasRelevantXmlDescendant(childNode, a_summary)) {
-				return true;
-			}
-		}
-
-		return HasDynamicXmlDescendant(a_node, a_summary) || HasExplicitXmlDescendant(a_node, a_summary);
-	}
-
-	bool IsReferencedXmlSourceBone(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
-	{
-		return IsReferencedXmlBoneName(a_summary, a_name) ||
-			IsExplicitXmlBone(a_summary, a_name) ||
-			IsDynamicXmlBone(a_summary, a_name);
-	}
-
-	RE::NiNode* FindActorSkeletonNodeForSource(
-		RE::NiAVObject* a_actorRoot,
-		RE::NiNode* a_sourceNode,
-		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		if (!a_actorRoot || !a_sourceNode) {
-			return nullptr;
-		}
-
-		const auto sourceName = a_sourceNode->GetName();
-		auto* actorNode = FindActorSkeletonLookupNode(a_actorSkeletonLookup, sourceName);
-		if (!actorNode) {
-			actorNode = FindNodeByNameExcludingKnownNodes(
-				a_actorRoot,
-				sourceName,
-				a_excludedObjects,
-				a_knownArmorNodes);
-		}
-		return actorNode;
-	}
-
-	RE::NiNode* FindActorSkeletonNodeForSourceName(
-		RE::NiAVObject* a_actorRoot,
-		const std::string_view a_name,
-		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		auto* actorNode = FindActorSkeletonLookupNode(a_actorSkeletonLookup, a_name);
-		if (!actorNode) {
-			actorNode = FindNodeByNameExcludingKnownNodes(
-				a_actorRoot,
-				a_name,
-				a_excludedObjects,
-				a_knownArmorNodes);
-		}
-		return actorNode;
-	}
-
-	void CloneSourceSkeletonIntoActorTree(
-		RE::NiNode* a_cloneParent,
-		RE::NiNode* a_source,
-		RE::NiAVObject* a_actorRoot,
-		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes,
-		const std::string& a_prefix,
-		const Smp::PhysicsXmlSummary& a_summary,
-		std::vector<MergedSkeletonNode>& a_renamedNodes,
-		std::vector<MergedRootNode>& a_mergedRoots)
-	{
-		if (!a_cloneParent || !a_source) {
-			return;
-		}
-
-		for (auto& child : a_source->children) {
-			auto* sourceChild = child ? child->IsNode() : nullptr;
-			if (!sourceChild) {
-				continue;
-			}
-
-			const auto childName = sourceChild->GetName();
-			if (Smp::PhysicsNamesEqual(childName, "BSFaceGenNiNodeSkinned")) {
-				continue;
-			}
-			if (childName.empty()) {
-				CloneSourceSkeletonIntoActorTree(a_cloneParent, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_prefix, a_summary, a_renamedNodes, a_mergedRoots);
-				continue;
-			}
-
-			if (auto* actorNode = FindActorSkeletonNodeForSource(
-					a_actorRoot,
-					sourceChild,
-					a_actorSkeletonLookup,
-					a_actorSkeletonSearchExclusions,
-					a_knownArmorNodes)) {
-				if (IsReferencedXmlSourceBone(a_summary, childName) || HasRelevantXmlDescendant(sourceChild, a_summary)) {
-					spdlog::debug(
-						"attachment skeleton traversal recursing into actor node '{}' "
-						"sourceNode={} actorNode={} parent={} parentName='{}'",
-						childName,
-						static_cast<void*>(sourceChild),
-						static_cast<void*>(actorNode),
-						static_cast<void*>(actorNode->parent),
-						actorNode->parent ? std::string_view(actorNode->parent->GetName()) : std::string_view{});
-				}
-				CloneSourceSkeletonIntoActorTree(actorNode, sourceChild, a_actorRoot, a_actorSkeletonLookup, a_actorSkeletonSearchExclusions, a_knownArmorNodes, a_prefix, a_summary, a_renamedNodes, a_mergedRoots);
-				continue;
-			}
-
-			if (!IsReferencedXmlSourceBone(a_summary, childName) && !HasRelevantXmlDescendant(sourceChild, a_summary)) {
-				continue;
-			}
-
-			auto* clonedNode = CloneMergedNodeTree(sourceChild, a_prefix, a_renamedNodes);
-			if (!clonedNode) {
-				continue;
-			}
-
-			a_cloneParent->AttachChild(clonedNode, false);
-			UpdateNodeWorldFromLocal(clonedNode);
-			a_mergedRoots.push_back({
-				.parent = a_cloneParent,
-				.node = clonedNode,
-				.localToParent = clonedNode->local,
-				.hasLocalToParent = true,
-			});
-			spdlog::debug(
-				"cloned attachment skeleton subtree '{}' as plugin-owned prefixed "
-				"node='{}' node={} under actor-tree parent={} parentName='{}' prefix='{}'",
-				childName,
-				std::string_view(clonedNode->GetName()),
-				static_cast<void*>(clonedNode),
-				static_cast<void*>(a_cloneParent),
-				std::string_view(a_cloneParent->GetName()),
-				a_prefix);
-		}
-	}
-
-	RE::NiNode* FindCurrentMergedSkeletonNode(
-		const std::vector<MergedSkeletonNode>& a_renamedNodes,
-		const std::string_view a_name,
-		RE::NiAVObject* a_skeletonRoot)
-	{
-		const auto found = std::ranges::find_if(a_renamedNodes, [a_name](const MergedSkeletonNode& a_entry) {
-			return Smp::PhysicsNamesEqual(a_entry.originalName, a_name);
-		});
-		if (found == a_renamedNodes.end()) {
-			return nullptr;
-		}
-
-		if (!a_skeletonRoot) {
-			return found->node;
-		}
-
-		if (auto* currentNode = FindExactNodeByName(a_skeletonRoot, found->renamedName)) {
-			return currentNode;
-		}
-
-		return nullptr;
-	}
-
-	void DetachMergedRootNodes(std::vector<MergedRootNode>& a_roots)
-	{
-		std::vector<RE::NiAVObject*> refreshRoots;
-		for (auto& root : a_roots) {
-			if (root.parent && root.node) {
-				root.parent->DetachChild(root.node.get());
-				refreshRoots.push_back(root.parent);
-			}
-		}
-		for (auto* refreshRoot : refreshRoots) {
-			Smp::RefreshBoneScatterTable(refreshRoot);
-		}
-		a_roots.clear();
-	}
-
-	std::vector<RE::NiAVObject*> BuildSkeletonLookupExclusions(
-		const std::vector<RE::NiAVObject*>& a_baseExclusions,
-		const std::vector<MergedRootNode>& a_mergedRoots)
-	{
-		auto exclusions = a_baseExclusions;
-		exclusions.reserve(exclusions.size() + a_mergedRoots.size());
-		for (const auto& root : a_mergedRoots) {
-			if (root.node) {
-				exclusions.push_back(root.node.get());
-			}
-		}
-		return exclusions;
 	}
 
 	std::string MakeArmorModelCacheKey(const RE::BIPED_OBJECT a_bipedObject, const std::string_view a_model)
@@ -2452,7 +1902,7 @@ namespace
 		return std::addressof(a_tree->bone[index]);
 	}
 
-	void ResolveVanillaArmorBones(
+	void ResolveEnginePreparedBones(
 		std::vector<MatchedSkinBone>& a_matchedBones,
 		const std::vector<std::string>& a_boneNames,
 		RE::NiAVObject* a_actorRoot,
@@ -2468,12 +1918,10 @@ namespace
 			if (auto* flattenedBone = FindFlattenedBoneByName(flattened, matchedBone.name)) {
 				matchedBone.node = flattenedBone->node.get();
 				matchedBone.transform = matchedBone.node ? std::addressof(matchedBone.node->world) : std::addressof(flattenedBone->world);
-				matchedBone.resolvedFromSkeleton = true;
-				matchedBone.useActorKinematicBody = true;
+				matchedBone.isSharedActorBone = true;
 				matchedBone.meshOnlySkinBoneCandidate = false;
 			} else if (matchedBone.node) {
-				matchedBone.resolvedFromSkeleton = true;
-				matchedBone.useActorKinematicBody = false;
+				matchedBone.isSharedActorBone = false;
 			}
 		}
 
@@ -2491,148 +1939,13 @@ namespace
 				.node = node,
 				.transform = node ? std::addressof(node->world) : std::addressof(flattenedBone->world),
 				.name = boneName,
-				.resolvedFromSkeleton = true,
-				.useActorKinematicBody = true,
+				.isSharedActorBone = true,
 			});
 			spdlog::debug(
-				"resolved armor XML anchor '{}' directly from BSFlattenedBoneTree node={} transform={}",
+				"resolved XML anchor '{}' directly from the engine BSFlattenedBoneTree node={} transform={}",
 				boneName,
 				static_cast<void*>(node),
 				static_cast<void*>(a_matchedBones.back().transform));
-		}
-	}
-
-	void ResolveExplicitXmlBonesFromMergedSkeleton(
-		std::vector<MatchedSkinBone>& a_matchedBones,
-		const std::vector<std::string>& a_boneNames,
-		const std::vector<MergedSkeletonNode>& a_renamedNodes,
-		RE::NiAVObject* a_skeletonRoot,
-		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		if (!a_skeletonRoot) {
-			return;
-		}
-
-		for (const auto& boneName : a_boneNames) {
-			if (boneName.empty()) {
-				continue;
-			}
-
-			bool resolvedFromMergedNode = false;
-			RE::NiNode* skeletonNode = nullptr;
-			skeletonNode = FindCurrentMergedSkeletonNode(a_renamedNodes, boneName, a_skeletonRoot);
-			resolvedFromMergedNode = skeletonNode != nullptr;
-			if (!skeletonNode) {
-				skeletonNode = FindActorSkeletonNodeForSourceName(
-					a_skeletonRoot,
-					boneName,
-					a_actorSkeletonLookup,
-					a_excludedObjects,
-					a_knownArmorNodes);
-				resolvedFromMergedNode = false;
-			}
-			if (!skeletonNode) {
-				continue;
-			}
-
-			if (auto* existingByNode = FindMatchedSkinBone(a_matchedBones, skeletonNode)) {
-				existingByNode->name = boneName;
-				existingByNode->resolvedFromSkeleton = true;
-				existingByNode->useActorKinematicBody = !resolvedFromMergedNode;
-				existingByNode->meshOnlySkinBoneCandidate = false;
-				continue;
-			}
-
-			if (auto* existingByName = FindMatchedSkinBoneByName(a_matchedBones, boneName)) {
-				if (existingByName->node != skeletonNode) {
-					spdlog::debug(
-						"explicit XML bone '{}' resolved from {} node={} instead of skinned runtime node={}",
-						boneName,
-						resolvedFromMergedNode ? "merged attachment" : "actor skeleton",
-						static_cast<void*>(skeletonNode),
-						static_cast<void*>(existingByName->node));
-					if (!existingByName->sourceNode) {
-						existingByName->sourceNode = existingByName->node;
-					}
-					existingByName->node = skeletonNode;
-				}
-				existingByName->name = boneName;
-				existingByName->resolvedFromSkeleton = true;
-				existingByName->useActorKinematicBody = !resolvedFromMergedNode;
-				existingByName->meshOnlySkinBoneCandidate = false;
-				continue;
-			}
-
-			a_matchedBones.push_back({
-				.node = skeletonNode,
-				.name = boneName,
-				.resolvedFromSkeleton = true,
-				.useActorKinematicBody = !resolvedFromMergedNode,
-			});
-			spdlog::debug(
-				"explicit XML bone '{}' resolved from {} node={} nodeName='{}'",
-				boneName,
-				resolvedFromMergedNode ? "plugin-owned attachment clone" : "actor skeleton",
-				static_cast<void*>(skeletonNode),
-				std::string_view(skeletonNode->GetName()));
-		}
-	}
-
-	void ResolveMatchedSkinBonesFromSkeleton(
-		std::vector<MatchedSkinBone>& a_matchedBones,
-		const std::vector<MergedSkeletonNode>& a_renamedNodes,
-		RE::NiAVObject* a_skeletonRoot,
-		const ActorSkeletonLookup& a_actorSkeletonLookup,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownArmorNodes)
-	{
-		if (!a_skeletonRoot) {
-			return;
-		}
-
-		for (auto& matchedBone : a_matchedBones) {
-			if (matchedBone.name.empty()) {
-				continue;
-			}
-
-			bool resolvedFromMergedNode = false;
-			RE::NiNode* skeletonNode = nullptr;
-			skeletonNode = FindCurrentMergedSkeletonNode(a_renamedNodes, matchedBone.name, a_skeletonRoot);
-			resolvedFromMergedNode = skeletonNode != nullptr;
-			if (!skeletonNode) {
-				skeletonNode = FindActorSkeletonNodeForSourceName(
-					a_skeletonRoot,
-					matchedBone.name,
-					a_actorSkeletonLookup,
-					a_excludedObjects,
-					a_knownArmorNodes);
-				resolvedFromMergedNode = false;
-			}
-			if (!skeletonNode) {
-				continue;
-			}
-			if (skeletonNode == matchedBone.node) {
-				matchedBone.resolvedFromSkeleton = true;
-				matchedBone.useActorKinematicBody = !resolvedFromMergedNode;
-				continue;
-			}
-
-			spdlog::debug(
-				"matched skin bone '{}' resolved from {} node={} nodeName='{}' instead of attached runtime node={} rawName='{}'",
-				matchedBone.name,
-				resolvedFromMergedNode ? "plugin-owned attachment clone" : "actor skeleton",
-				static_cast<void*>(skeletonNode),
-				std::string_view(skeletonNode->GetName()),
-				static_cast<void*>(matchedBone.node),
-				matchedBone.node ? std::string_view(matchedBone.node->GetName()) : std::string_view{});
-			if (!matchedBone.sourceNode) {
-				matchedBone.sourceNode = matchedBone.node;
-			}
-			matchedBone.node = skeletonNode;
-			matchedBone.resolvedFromSkeleton = true;
-			matchedBone.useActorKinematicBody = !resolvedFromMergedNode;
 		}
 	}
 

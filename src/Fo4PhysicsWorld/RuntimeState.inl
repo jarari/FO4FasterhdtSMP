@@ -251,8 +251,6 @@ namespace Smp
 				}
 			}
 		}
-		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "suspend");
-
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
@@ -301,14 +299,14 @@ namespace Smp
 		a_state.runtimeSuspended = true;
 		a_state.runtimeSoftSuspended = false;
 		spdlog::debug(
-			"suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={} capturedSkinSlots={} preservedMergedNodes={} armorRecords={}",
+			"suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={} capturedSkinSlots={} cachedAttachmentBonePoses={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
 			buildGroups.size(),
 			bodyCount,
 			meshCount,
 			constraintCount,
 			capturedSkinSlots,
-			a_state.mergedNodes.size(),
+			a_state.attachmentBoneLocalPoses.size(),
 			a_state.armorRecords.size());
 	}
 
@@ -521,6 +519,15 @@ namespace Smp
 
 	void Fo4PhysicsWorld::ClearPrototypeStateLocked(PrototypeActorState& a_state, const bool a_restoreSkinSlots)
 	{
+		if (a_restoreSkinSlots && !a_state.attachmentBoneLocalPoses.empty()) {
+			std::vector<std::uint64_t> buildGroups;
+			for (const auto& localPose : a_state.attachmentBoneLocalPoses) {
+				if (localPose.buildGroup != 0 && std::ranges::find(buildGroups, localPose.buildGroup) == buildGroups.end()) {
+					buildGroups.push_back(localPose.buildGroup);
+				}
+			}
+			ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "clear-state");
+		}
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
@@ -584,14 +591,7 @@ namespace Smp
 			spdlog::debug("cleared {} prototype physics bodies for actor={}", a_state.bodies.size(), static_cast<void*>(a_state.actor));
 		}
 		a_state.bodies.clear();
-		for (auto& mergedNode : a_state.mergedNodes) {
-			auto* node = mergedNode.node ? mergedNode.node->IsNode() : nullptr;
-			if (mergedNode.parent && node && node->parent == mergedNode.parent) {
-				mergedNode.parent->DetachChild(mergedNode.node.get());
-				RefreshBoneScatterTable(mergedNode.parent);
-			}
-		}
-		a_state.mergedNodes.clear();
+		a_state.attachmentBoneLocalPoses.clear();
 		a_state.nextBuildGroup = 0;
 		a_state.nextAttachmentGeneration = 0;
 		a_state.lastReadRoot = nullptr;
@@ -810,7 +810,7 @@ namespace Smp
 				a_reason);
 		}
 		if (!buildGroups.empty()) {
-			ClearPrototypeGroupsLocked(a_state, buildGroups, true);
+			ClearPrototypeGroupsLocked(a_state, buildGroups);
 		}
 
 		const auto removedRecords = PrunePrototypeRecordsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
@@ -1081,84 +1081,23 @@ namespace Smp
 		const auto clearedHead = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHead);
 		const auto clearedHair = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHair);
 
-		std::uint32_t detachedNodeCount = 0;
-		auto detachHeadRenamedChildren = [&detachedNodeCount](auto&& a_self, RE::NiNode* a_node) -> void {
-			if (!a_node) {
-				return;
-			}
-
-			auto index = a_node->children.size();
-			while (index > 0) {
-				--index;
-				auto* child = a_node->children[index].get();
-				if (!child) {
-					continue;
-				}
-
-				const auto childName = child->GetName();
-				if (!childName.empty() && StartsWithInsensitive(childName, "hdtSSEPhysics_AutoRename_Head_")) {
-					RE::NiPointer<RE::NiAVObject> keepAlive{ child };
-					a_node->DetachChild(child);
-					RefreshBoneScatterTable(a_node);
-					++detachedNodeCount;
-					continue;
-				}
-
-				if (auto* childNode = child->IsNode()) {
-					a_self(a_self, childNode);
-				}
-			}
-		};
-
-		if (auto* actor = a_state.actor) {
-			if (auto* root = actor->Get3D(a_state.firstPerson)) {
-				if (auto* rootNode = root->IsNode()) {
-					detachHeadRenamedChildren(detachHeadRenamedChildren, rootNode);
-				}
-			}
-			if (auto* root = actor->Get3D(false)) {
-				if (auto* rootNode = root->IsNode()) {
-					detachHeadRenamedChildren(detachHeadRenamedChildren, rootNode);
-				}
-			}
-		}
-
-		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [](PrototypeMergedNode& a_node) {
-			auto* node = a_node.node ? a_node.node->IsNode() : nullptr;
-			if (!node) {
-				return false;
-			}
-			const auto name = node->GetName();
-			if (!name.empty() && StartsWithInsensitive(name, "hdtSSEPhysics_AutoRename_Head_")) {
-				if (a_node.parent && node->parent == a_node.parent) {
-					a_node.parent->DetachChild(a_node.node.get());
-					RefreshBoneScatterTable(a_node.parent);
-				}
-				a_node.node = nullptr;
-				a_node.parent = nullptr;
-				return true;
-			}
-			return false;
-		});
-
 		const auto recordCount = a_state.headPartRecords.size();
 		a_state.headPartRecords.clear();
 		spdlog::debug(
-			"cleared head/hair prototype tracking actor={} reason={} clearedHead={} clearedHair={} detachedHeadNodes={} mergedNodes={} headPartRecords={}",
+			"cleared head/hair prototype tracking actor={} reason={} clearedHead={} clearedHair={} headPartRecords={}",
 			static_cast<void*>(a_state.actor),
 			a_reason,
 			clearedHead,
 			clearedHair,
-			detachedNodeCount,
-			mergedNodeCount,
 			recordCount);
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, const bool a_detachMergedNodes)
+	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups)
 	{
 		if (a_buildGroups.empty()) {
 			return;
 		}
+		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, a_buildGroups, "clear-groups");
 
 		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
 			return std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
@@ -1302,21 +1241,8 @@ namespace Smp
 		const auto bodyCount = std::erase_if(a_state.bodies, [](const PrototypeBody& a_body) {
 			return a_body.buildGroups.empty();
 		});
-		const auto mergedNodeCount = std::erase_if(a_state.mergedNodes, [&a_state, &containsGroup, a_detachMergedNodes](PrototypeMergedNode& a_node) {
-			if (!containsGroup(a_node.buildGroup)) {
-				return false;
-			}
-			auto* node = a_node.node ? a_node.node->IsNode() : nullptr;
-			const auto nodeStillReferencedByKeptGroup = node && std::ranges::any_of(a_state.mergedNodes, [&](const PrototypeMergedNode& a_other) {
-				return std::addressof(a_other) != std::addressof(a_node) &&
-					!containsGroup(a_other.buildGroup) &&
-					a_other.node.get() == a_node.node.get();
-			});
-			if (a_detachMergedNodes && !nodeStillReferencedByKeptGroup && a_node.parent && node && node->parent == a_node.parent) {
-				a_node.parent->DetachChild(a_node.node.get());
-				RefreshBoneScatterTable(a_node.parent);
-			}
-			return true;
+		const auto localPoseCount = std::erase_if(a_state.attachmentBoneLocalPoses, [&containsGroup](const PrototypeAttachmentBoneLocalPose& a_pose) {
+			return containsGroup(a_pose.buildGroup);
 		});
 		std::erase_if(a_state.attachmentRecords, [&containsGroup](PrototypeAttachmentRecord& a_record) {
 			std::erase_if(a_record.buildGroups, [&containsGroup](const std::uint64_t a_buildGroup) {
@@ -1357,13 +1283,13 @@ namespace Smp
 		}
 
 		spdlog::debug(
-			"cleared prototype physics groups={} runtimes={} bodies={} meshes={} constraints={} mergedNodes={} armorRecords={} for actor={}",
+			"cleared prototype physics groups={} runtimes={} bodies={} meshes={} constraints={} attachmentBoneLocalPoses={} armorRecords={} for actor={}",
 			a_buildGroups.size(),
 			runtimeCount,
 			bodyCount,
 			meshCount,
 			constraintCount,
-			mergedNodeCount,
+			localPoseCount,
 			armorRecordCount,
 			static_cast<void*>(a_state.actor));
 	}

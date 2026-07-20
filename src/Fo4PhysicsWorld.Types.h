@@ -45,13 +45,11 @@
 			bool inBulletWorld{ false };
 		};
 
-		struct PrototypeMergedNode
+		struct PrototypeAttachmentBoneLocalPose
 		{
 			std::uint64_t buildGroup{ 0 };
-			RE::NiNode* parent{ nullptr };
 			RE::NiPointer<RE::NiAVObject> node;
-			RE::NiTransform localToParent{ RE::NiTransform::IDENTITY };
-			bool hasLocalToParent{ false };
+			RE::NiTransform local{ RE::NiTransform::IDENTITY };
 		};
 
 		struct PrototypeArmorRecord
@@ -139,7 +137,7 @@
 			std::vector<PrototypeBody> bodies;
 			std::vector<PrototypeMesh> meshes;
 			std::vector<PrototypeConstraint> constraints;
-			std::vector<PrototypeMergedNode> mergedNodes;
+			std::vector<PrototypeAttachmentBoneLocalPose> attachmentBoneLocalPoses;
 			std::vector<PrototypeArmorRecord> armorRecords;
 			std::vector<PrototypeAttachmentRecord> attachmentRecords;
 			std::vector<PrototypeHeadPartRecord> headPartRecords;

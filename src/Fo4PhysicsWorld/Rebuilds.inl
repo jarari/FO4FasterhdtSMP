@@ -1106,11 +1106,11 @@ namespace Smp
 						staleHeadBuildGroups.size());
 				}
 				if (!staleHeadBuildGroups.empty()) {
-					ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups, true);
+					ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups);
 				}
 			}
 			if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
-				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, true);
+				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
 				spdlog::debug(

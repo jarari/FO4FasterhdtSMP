@@ -42,7 +42,6 @@ namespace Smp
 		bool               firstPerson{ false };
 		bool               queue3DTasks{ false };
 		bool               queueDetach{ false };
-		bool               cloneSourceBeforeTraversal{ false };
 		RE::NiPointer<RE::NiAVObject> retainedObject;
 		RE::NiPointer<RE::NiAVObject> retainedSourceObject;
 		RE::NiPointer<RE::NiNode>     retainedDestinationRoot;
