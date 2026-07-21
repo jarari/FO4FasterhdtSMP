@@ -1,7 +1,6 @@
 #include "Fo4PhysicsWorld.h"
 
 #include "Address.h"
-#include "BSBoneMap.h"
 #include "BSSkin.h"
 #include "ConfigPaths.h"
 #include "DefaultBBP.h"

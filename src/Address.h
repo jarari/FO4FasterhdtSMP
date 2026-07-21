@@ -38,10 +38,8 @@ namespace Smp::Address
 	};
 
 	using ActorCalculateLOS_t = RE::NiAVObject*(RE::Actor*, const RE::NiPoint3&, RE::NiPoint3&, float);
-	using CreateBoneMap_t = void(RE::NiAVObject*);
 
 	extern REL::Relocation<ActorCalculateLOS_t*> ActorCalculateLOS;
-	extern REL::Relocation<CreateBoneMap_t*> CreateBoneMap;
 
 	extern REL::Relocation<std::uintptr_t> MainOnIdle;
 	extern REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects;

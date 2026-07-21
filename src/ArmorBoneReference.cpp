@@ -1,6 +1,5 @@
 #include "ArmorBoneReference.h"
 
-#include "BSBoneMap.h"
 #include "BSSkin.h"
 #include "Fo4NiObjectUtils.h"
 #include "RE/B/BSGeometry.h"
@@ -338,10 +337,8 @@ namespace Smp
 			}
 		}
 		const auto restoredArmorBoneNodes = RestoreCachedArmorLocals(boundBones, a_references);
-
-		if ((attachedArmorBones > 0 || reparentedArmorBones > 0) && actorRoot) {
-			RefreshBoneScatterTable(actorRoot);
-		}
+		// BSBoneMap is an actor-wide raw-pointer lookup cache owned by the engine.
+		// Rebuilding it here can publish transient attachment nodes that later detach.
 
 		spdlog::debug(
 			"finalized vanilla armor skin bindings actor={} object={} references={} attachedArmorOnlyBones={} reparentedArmorOnlyRoots={} restoredArmorOnlyNodes={}",

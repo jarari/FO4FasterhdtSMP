@@ -9,7 +9,6 @@ namespace Smp::Address
 	}
 
 	REL::Relocation<ActorCalculateLOS_t*> ActorCalculateLOS{ REL::ID{ 1324305, 2230201 } };
-	REL::Relocation<CreateBoneMap_t*> CreateBoneMap{ REL::ID{ 1131947, 2276147 } };
 
 	REL::Relocation<std::uintptr_t> MainOnIdle{ MainOnIdleID };
 	REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects{ REL::ID{ 224320, 2194381 } };
