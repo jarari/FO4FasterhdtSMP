@@ -1,69 +1,107 @@
 # FO4 Faster HDT-SMP
 
-Fallout 4 CommonLibF4/F4SE porting workspace for Faster HDT-SMP-style armor, head, and hair physics.
+FO4 Faster HDT-SMP is a CommonLibF4/F4SE port of Faster HDT-SMP-style physics for Fallout 4 armor, head parts, and hair.
 
-The current implementation is still prototype-labeled, but it now contains the main runtime path: XML discovery, defaultBBP mapping, Bullet body/mesh/constraint creation, actor/head lifecycle hooks, transform writeback, wind, actor budgeting, and rebuild handling for load/reset/customization events.
+## Runtime support
 
-## Build
+The current code has been tested in game on:
 
-Use the release-with-debug-info profile for validation:
+| Runtime | Version | Status |
+| --- | --- | --- |
+| Fallout 4 OG | 1.10.163 | Tested |
+| Fallout 4 AE | 1.11.221 | Tested |
 
-```bat
-xmake f -y -m releasedbg
-xmake -y
+Hooks use paired CommonLibF4 relocation IDs and runtime-specific instruction offsets for OG and AE. Other executable versions are not currently tested; do not assume that an unlisted runtime is compatible.
+
+## Features
+
+- Armor, head-part, and hair physics driven by physics XML files.
+- XML selection through `HDT Skinned Mesh Physics Object` NIF extra data or `defaultBBPs.xml` shape mappings and remaps.
+- Bullet rigid bodies, per-vertex and per-triangle skinned-mesh collision, collision filtering, and generic, cone-twist, and stiff-spring constraints.
+- Fallout 4 lifecycle handling for armor attach/detach, actor load and 3D reset, head initialization, FaceGen rebuilds, LooksMenu, loading screens, and new/load game transitions.
+- Runtime transform readback/writeback using Fallout 4's live armor bone bindings, with rebuild stabilization and ownership-aware cleanup.
+- NPC enable/disable controls, actor distance limits, frame-time budgeting, optional automatic actor-budget adjustment, and soft suspension of distant actors.
+- Optional weather-aware wind with smoothing and per-bone randomization.
+- Optional in-game Bullet debug visualization and geometry diagnostics.
+- Baseline, AVX2, and AVX-512 build variants.
+
+## Requirements
+
+- Fallout 4 1.10.163 or 1.11.221.
+- A matching F4SE installation.
+- Address Library for F4SE Plugins for the selected runtime.
+
+## Installation layout
+
+Install exactly one DLL variant. The optimized DLLs are alternatives to the baseline plugin, not additional plugins to load beside it.
+
+```text
+Data/
+  F4SE/
+    Plugins/
+      FO4FasterHdtSMP.dll              # or the AVX2/AVX-512 DLL
+      FO4FasterHdtSMP/
+        configs.xml
+        defaultBBPs.xml
+        prototype-sample.xml
+        <your physics XML files>
 ```
 
-The target plugin is `FO4FasterHdtSMP.dll`. The xmake install step also installs these sample/runtime files under `F4SE/Plugins/FO4FasterHdtSMP`:
+Choose the baseline `FO4FasterHdtSMP.dll` for the widest CPU compatibility. Use `FO4FasterHdtSMP-AVX2.dll` or `FO4FasterHdtSMP-AVX512.dll` only when the target CPU supports that instruction set.
 
-- `res/configs.xml`
-- `res/defaultBBPs.xml`
-- `res/prototype-sample.xml`
+## Physics XML discovery
 
-## Runtime Support
+For armor, the plugin searches for `NiStringExtraData` named `HDT Skinned Mesh Physics Object` on the relevant armor/attach objects and roots, then falls back to `defaultBBPs.xml`. Head and hair physics are discovered from the actor's face/head subtree after the corresponding FaceGen lifecycle events.
 
-The plugin metadata advertises these Fallout 4 runtimes:
+Relative XML paths are resolved in this order:
 
-- 1.10.163 (`og`)
-- 1.11.191 (`ae`)
+1. The path exactly as written.
+2. `Data/<path>`.
+3. `Data/F4SE/Plugins/FO4FasterHdtSMP/<path>`.
+4. `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/<path>` for legacy migration.
 
-The implementation is still strongest on 1.10.163. Some AE relocation IDs are present, but several OG-only call sites are intentionally guarded behind `REX::FModule::IsRuntimeOG()` until the AE hook sites are verified. Next-gen (`ng`) IDs remain disabled and are not guessed.
+`<prototypePhysicsXml>` in `configs.xml` remains available as a global test fallback, but normal armor/head/hair setups should use NIF extra data or `defaultBBPs.xml`.
 
-## Runtime Pipeline
-
-On load, the plugin:
-
-1. Loads `configs.xml`.
-2. Reloads `defaultBBPs.xml`.
-3. Clears and rebuilds the physics XML summary cache.
-4. Installs lifecycle hooks and registers for F4SE messaging.
-5. Creates one Bullet dynamics world for active prototype actors.
-
-Physics can be built from:
-
-- Armor attach/apply events from `BipedAnim`.
-- Equipped biped objects discovered after actor load or reset.
-- Head and hair rebuilds from `Actor::OnHeadInitialized` and `BSFaceGenUtils::PrepareHeadPart`.
-- A configured `<prototypePhysicsXml>` fallback for testing.
-
-The world steps from `Main::OnIdle` on verified OG builds, reads current bone transforms before stepping, applies Bullet simulation, and writes transforms back before the main sync/swap point. It suspends or rebuilds state around loading screens, LooksMenu, `Reset3D`, `Set3D`, and `Update3DModel`.
+See the complete [English physics XML guide](docs/physics-xml-guide.en.md) or [Korean physics XML guide](docs/physics-xml-guide.ko.md) for the supported schema, examples, runtime behavior, and troubleshooting advice.
 
 ## Configuration
 
-`configs.xml` contains the runtime settings:
+Runtime settings live in `Data/F4SE/Plugins/FO4FasterHdtSMP/configs.xml`. The shipped file documents the current defaults and includes:
 
-- Solver: `<numIterations>`, `<erp>`, `<min-fps>`, `<maxSubSteps>`.
-- Stability/writeback: `<clampRotations>`, `<rotationSpeedLimit>`, `<unclampedResets>`, `<unclampedResetAngle>`.
-- Performance: `<budgetMs>`, `<sampleSize>`, `<enableNpcPhysics>`, `<autoAdjustMaxActors>`, `<maxActiveActors>`, `<maxActorDistance>`.
-- Visibility/filtering: `<disable1stPersonViewPhysics>`, `<disableSMPHairWhenWigEquipped>`.
-- Diagnostics and migration: `<enablePrototypeDiagnostics>`, `<prototypePhysicsXml>`, `<backupNodeByName>`.
-- Wind: `<enabled>`, `<useWeather>`, `<windStrength>`, direction, obstruction distances, weather cooldowns, smoothing, and per-bone randomization.
+- Solver controls: iterations, ERP, minimum simulation FPS, and maximum substeps.
+- Stability controls: rotation clamping, rotation speed limits, and reset thresholds.
+- Performance controls: frame budget, timing mode, sample size, actor limits, and actor distance.
+- Visibility controls: first-person physics, NPC physics, and SMP hair suppression while a wig is equipped.
+- Diagnostics: log level, geometry diagnostics, Bullet visualization, and the prototype XML fallback.
+- Wind: fixed or weather-derived wind, strength/direction, distance falloff, cooldowns, smoothing, and per-bone randomization.
 
-Physics XML files are resolved from explicit paths, `Data`, `Data/F4SE/Plugins/FO4FasterHdtSMP`, and the legacy `Data/SKSE/Plugins/hdtSkinnedMeshConfigs` directory for migration testing.
+The runtime log is written to `Documents/My Games/Fallout4/F4SE/FO4FasterHdtSMP.log`.
 
-## Physics XML Selection
+## Building from source
 
-Armor XML is selected from direct `NiStringExtraData` named `HDT Skinned Mesh Physics Object`, nearby attach ancestors, source/destination roots, `defaultBBPs.xml`, or the test fallback in `<prototypePhysicsXml>`.
+Builds require Windows, an MSVC toolchain with C++23 support, [xmake](https://xmake.io/) 3.0 or newer, and the CommonLibF4 submodule.
 
-Head and hair XML is discovered from the face/head subtree. Direct `NiStringExtraData` is preferred, but `defaultBBPs.xml` can also match source geometry. Hair detection uses the actor hair headpart model/editor keys, and hair mesh bodies can be disabled automatically when a wig occupies the hair biped slots.
+```bat
+git submodule update --init --recursive
+xmake f -y -m releasedbg
+```
 
-See [docs/physics-xml-guide.en.md](docs/physics-xml-guide.en.md) and [docs/physics-xml-guide.ko.md](docs/physics-xml-guide.ko.md) for authoring details.
+Build one CPU variant:
+
+```bat
+xmake -y FO4FasterHdtSMP
+xmake -y FO4FasterHdtSMP-AVX2
+xmake -y FO4FasterHdtSMP-AVX512
+```
+
+Each command writes its DLL and PDB under `build/windows/x64/releasedbg`. To create an installable staging directory for one variant:
+
+```bat
+xmake install -y -o build/package FO4FasterHdtSMP
+```
+
+Replace the final target name with the AVX2 or AVX-512 target when packaging an optimized build. The install step also includes `configs.xml`, `defaultBBPs.xml`, and `prototype-sample.xml` under `F4SE/Plugins/FO4FasterHdtSMP`.
+
+## License
+
+FO4 Faster HDT-SMP is licensed under [GPL-3.0](LICENSE) with the additional modding/linking terms in [EXCEPTIONS](EXCEPTIONS).
