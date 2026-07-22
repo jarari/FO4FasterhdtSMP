@@ -8,7 +8,9 @@
 #include "RE/T/TESObjectREFR.h"
 
 #include <cctype>
+#include <functional>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Smp
 {
@@ -82,18 +84,34 @@ namespace Smp
 			return found != a_references.end() ? std::addressof(*found) : nullptr;
 		}
 
-		void UpdateWorldFromLocal(RE::NiAVObject* a_object)
+		const ArmorBoneReference* FindArmorBoneReference(
+			const std::vector<ArmorBoneReference>& a_references,
+			const std::string_view a_name)
 		{
-			if (!a_object) {
-				return;
-			}
+			const auto found = std::ranges::find_if(a_references, [a_name](const ArmorBoneReference& a_reference) {
+				return NormalizeBoneCacheName(a_reference.name) == NormalizeBoneCacheName(a_name);
+			});
+			return found != a_references.end() ? std::addressof(*found) : nullptr;
+		}
 
-			a_object->world = a_object->parent ? a_object->parent->world * a_object->local : a_object->local;
-			if (auto* node = a_object->IsNode()) {
-				for (auto& child : node->children) {
-					UpdateWorldFromLocal(child.get());
+		bool IsObjectInTree(RE::NiAVObject* a_root, const RE::NiAVObject* a_target)
+		{
+			if (!a_root || !a_target) {
+				return false;
+			}
+			if (a_root == a_target) {
+				return true;
+			}
+			auto* node = a_root->IsNode();
+			if (!node) {
+				return false;
+			}
+			for (auto& child : node->children) {
+				if (IsObjectInTree(child.get(), a_target)) {
+					return true;
 				}
 			}
+			return false;
 		}
 
 		using BoundBone = std::pair<std::string, RE::NiNode*>;
@@ -139,37 +157,47 @@ namespace Smp
 			return result;
 		}
 
-		std::uint32_t RestoreCachedArmorLocals(
-			const BoundBones& a_boundBones,
-			const std::vector<ArmorBoneReference>& a_references)
+		RE::NiNode* FindPersistentSkeletonNode(
+			RE::NiAVObject* a_skeletonRoot,
+			RE::NiAVObject* a_actorRoot,
+			RE::NiAVObject* a_attachedObject,
+			const std::string_view a_name)
 		{
-			std::vector<RE::NiNode*> updateRoots;
+			auto findInTree = [&](RE::NiAVObject* a_root) -> RE::NiNode* {
+				auto* node = NiObject::GetObjectNodeByName(a_root, a_name);
+				if (!node || (a_attachedObject && NiObject::IsDescendantOf(node, a_attachedObject))) {
+					return nullptr;
+				}
+				return node;
+			};
+
+			if (auto* node = findInTree(a_skeletonRoot)) {
+				return node;
+			}
+			return a_actorRoot != a_skeletonRoot ? findInTree(a_actorRoot) : nullptr;
+		}
+
+		std::uint32_t RestoreCachedArmorLocals(
+			const std::vector<ArmorBoneReference>& a_references,
+			RE::NiAVObject* a_currentActorRoot = nullptr)
+		{
 			std::uint32_t restored = 0;
 			for (const auto& reference : a_references) {
-				if (!reference.isArmorOnly || reference.parentBoneName.empty()) {
+				auto* bone = reference.resolvedNode.get();
+				if (!reference.isArmorOnly || !bone || (a_currentActorRoot && !IsObjectInTree(a_currentActorRoot, bone))) {
 					continue;
 				}
 
-				const auto normalizedBoneName = NormalizeBoneCacheName(reference.name);
-				const auto normalizedParentName = NormalizeBoneCacheName(reference.parentBoneName);
-				for (const auto& [name, bone] : a_boundBones) {
-					if (!bone || NormalizeBoneCacheName(name) != normalizedBoneName) {
+				if (!reference.parentBoneName.empty()) {
+					const auto* parentReference = FindArmorBoneReference(a_references, reference.parentBoneName);
+					if (!parentReference || bone->parent != parentReference->resolvedNode.get()) {
 						continue;
-					}
-					if (!bone->parent || NormalizeBoneCacheName(bone->parent->GetName()) != normalizedParentName) {
-						continue;
-					}
-
-					bone->local = reference.localToParentBone;
-					++restored;
-					if (!reference.parentBoneIsArmorOnly && std::ranges::find(updateRoots, bone) == updateRoots.end()) {
-						updateRoots.push_back(bone);
 					}
 				}
-			}
 
-			for (auto* root : updateRoots) {
-				UpdateWorldFromLocal(root);
+				bone->local = reference.localToParentBone;
+				bone->world = bone->parent ? bone->parent->world * bone->local : bone->local;
+				++restored;
 			}
 			return restored;
 		}
@@ -200,7 +228,8 @@ namespace Smp
 			return references;
 		}
 
-		auto captureSkin = [&](RE::BSSkin::Instance* a_skin) {
+		std::unordered_set<std::string> skinnedBoneNames;
+		auto captureSkinNames = [&](RE::BSSkin::Instance* a_skin) {
 			if (!a_skin || a_skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
 				return;
 			}
@@ -212,19 +241,45 @@ namespace Smp
 				}
 
 				const auto name = bone->GetName();
-				if (name.empty() || FindMutableArmorBoneReference(references, name)) {
+				if (!name.empty()) {
+					skinnedBoneNames.insert(NormalizeBoneCacheName(name));
+				}
+			}
+		};
+		ForEachSkin(a_modelRoot, captureSkinNames);
+
+		std::uint32_t duplicateNamedNodes = 0;
+		std::function<void(RE::NiNode*)> captureNamedNodes = [&](RE::NiNode* a_node) {
+			if (!a_node) {
+				return;
+			}
+
+			for (auto& childObject : a_node->children) {
+				auto* child = childObject ? childObject->IsNode() : nullptr;
+				if (!child) {
 					continue;
 				}
 
-				const auto isArmorOnly = a_skeletonRoot->GetObjectByName(RE::BSFixedString(name)) == nullptr;
-				references.push_back({
-					.name = std::string(name),
-					.isArmorOnly = isArmorOnly,
-				});
-				sourceBones.emplace(NormalizeBoneCacheName(name), bone);
+				const auto name = child->GetName();
+				if (!name.empty()) {
+					const auto normalizedName = NormalizeBoneCacheName(name);
+					if (!FindMutableArmorBoneReference(references, name)) {
+						const auto isArmorOnly = a_skeletonRoot->GetObjectByName(RE::BSFixedString(name)) == nullptr;
+						references.push_back({
+							.name = std::string(name),
+							.isSkinned = skinnedBoneNames.contains(normalizedName),
+							.isArmorOnly = isArmorOnly,
+						});
+						sourceBones.emplace(normalizedName, child);
+					} else {
+						++duplicateNamedNodes;
+					}
+				}
+
+				captureNamedNodes(child);
 			}
 		};
-		ForEachSkin(a_modelRoot, captureSkin);
+		captureNamedNodes(modelRoot);
 
 		for (auto& reference : references) {
 			const auto sourceBone = sourceBones.find(NormalizeBoneCacheName(reference.name));
@@ -232,6 +287,7 @@ namespace Smp
 				continue;
 			}
 			auto* bone = sourceBone->second;
+			bool foundParent = false;
 			for (auto* parent = bone ? bone->parent : nullptr; parent && parent != modelRoot; parent = parent->parent) {
 				auto* parentReference = FindMutableArmorBoneReference(references, parent->GetName());
 				if (!parentReference) {
@@ -241,7 +297,11 @@ namespace Smp
 				reference.parentBoneName = parentReference->name;
 				reference.localToParentBone = NiObject::BuildLocalToAncestor(bone, parent);
 				reference.parentBoneIsArmorOnly = parentReference->isArmorOnly;
+				foundParent = true;
 				break;
+			}
+			if (!foundParent) {
+				reference.localToParentBone = NiObject::BuildLocalToAncestor(bone, modelRoot);
 			}
 		}
 
@@ -257,7 +317,10 @@ namespace Smp
 					reference = cached->second;
 					++cacheHits;
 				} else {
-					cachedBones.emplace(normalizedBoneName, reference);
+					auto cachedReference = reference;
+					cachedReference.resolvedNode.reset();
+					cachedReference.createdByUs = false;
+					cachedBones.emplace(normalizedBoneName, std::move(cachedReference));
 					++cacheMisses;
 				}
 			}
@@ -267,14 +330,16 @@ namespace Smp
 		}));
 
 		spdlog::debug(
-			"resolved {} persistent armor skin bone references before attach nif='{}' modelRoot={} name='{}' skeletonRoot={} name='{}' armorOnlyBones={} cacheHits={} cacheMisses={}",
+			"resolved {} persistent named armor node references before attach nif='{}' modelRoot={} name='{}' skeletonRoot={} name='{}' skinnedBones={} armorOnlyBones={} duplicateNames={} cacheHits={} cacheMisses={}",
 			references.size(),
 			a_nifPath,
 			static_cast<void*>(modelRoot),
 			std::string_view(modelRoot->GetName()),
 			static_cast<void*>(a_skeletonRoot),
 			std::string_view(a_skeletonRoot->GetName()),
+			skinnedBoneNames.size(),
 			armorOnlyBones,
+			duplicateNamedNodes,
 			cacheHits,
 			cacheMisses);
 		return references;
@@ -283,86 +348,145 @@ namespace Smp
 	void FinalizeArmorSkinBindings(
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_attachedObject,
+		RE::NiNode* a_skeletonRoot,
 		const bool a_firstPerson,
 		std::vector<ArmorBoneReference>& a_references)
 	{
-		if (!a_attachedObject) {
+		if (!a_attachedObject || a_references.empty()) {
 			return;
 		}
 
 		auto* actorRoot = a_actor ? a_actor->Get3D(a_firstPerson) : nullptr;
+		if (!actorRoot && a_actor) {
+			actorRoot = a_actor->Get3D();
+		}
+		auto* destinationRoot = a_skeletonRoot ? a_skeletonRoot : actorRoot ? actorRoot->IsNode() : nullptr;
+		if (!destinationRoot) {
+			spdlog::warn(
+				"cannot reconcile named armor nodes because the destination skeleton is unavailable actor={} object={} references={}",
+				static_cast<void*>(a_actor),
+				static_cast<void*>(a_attachedObject),
+				a_references.size());
+			return;
+		}
+
 		const auto boundBones = CollectBoundBones(a_attachedObject);
 		const auto attachedArmorBones = static_cast<std::uint32_t>(std::ranges::count_if(boundBones, [&](const BoundBone& a_entry) {
 			auto* reference = FindMutableArmorBoneReference(a_references, a_entry.first);
 			return reference && reference->isArmorOnly;
 		}));
 
+		for (auto& reference : a_references) {
+			reference.resolvedNode.reset();
+			reference.createdByUs = false;
+		}
+
+		std::uint32_t createdArmorNodes = 0;
+		std::uint32_t reusedArmorNodes = 0;
 		std::uint32_t reparentedArmorBones = 0;
-		for (const auto& reference : a_references) {
-			if (!reference.isArmorOnly ||
-				reference.parentBoneName.empty() ||
-				reference.parentBoneIsArmorOnly) {
-				continue;
-			}
-
-			auto* expectedParent = FindUniqueBoundBone(boundBones, reference.parentBoneName);
-			if (!expectedParent ||
-				!actorRoot ||
-				!NiObject::IsDescendantOf(expectedParent, actorRoot)) {
-				continue;
-			}
-
-			const auto normalizedBoneName = NormalizeBoneCacheName(reference.name);
-			for (const auto& [name, bone] : boundBones) {
-				if (!bone || NormalizeBoneCacheName(name) != normalizedBoneName ||
-					bone == expectedParent || NiObject::IsDescendantOf(expectedParent, bone)) {
-					continue;
-				}
-
-				RE::NiPointer<RE::NiAVObject> keepAlive{ bone };
-				if (bone->parent != expectedParent) {
-					if (bone->parent) {
-						bone->parent->DetachChild(bone);
-					}
-					expectedParent->AttachChild(bone, false);
-				}
-				++reparentedArmorBones;
-				spdlog::debug(
-					"restored armor-only bone '{}' under source actor parent '{}' actor={} bone={} parent={}",
+		for (auto& reference : a_references) {
+			auto* parentReference = reference.parentBoneName.empty() ? nullptr :
+				FindMutableArmorBoneReference(a_references, reference.parentBoneName);
+			auto* expectedParent = parentReference ? parentReference->resolvedNode.get() : destinationRoot;
+			if (!expectedParent) {
+				spdlog::warn(
+					"cannot reconcile armor node '{}' because source parent '{}' was not resolved actor={} object={}",
 					reference.name,
 					reference.parentBoneName,
+					static_cast<void*>(a_actor),
+					static_cast<void*>(a_attachedObject));
+				continue;
+			}
+			reference.parentBoneIsArmorOnly = parentReference && parentReference->isArmorOnly;
+
+			auto* boundBone = FindUniqueBoundBone(boundBones, reference.name);
+			auto* persistentBone = FindPersistentSkeletonNode(destinationRoot, actorRoot, a_attachedObject, reference.name);
+			auto* bone = reference.isArmorOnly ?
+				(boundBone ? boundBone : persistentBone) :
+				(persistentBone ? persistentBone : boundBone);
+
+			if (!bone) {
+				auto createdBone = RE::make_nismart<RE::NiNode>(0);
+				createdBone->name = RE::BSFixedString(reference.name);
+				createdBone->local = reference.localToParentBone;
+				createdBone->world = expectedParent->world * createdBone->local;
+				expectedParent->AttachChild(createdBone.get(), false);
+				bone = createdBone.get();
+				reference.resolvedNode = std::move(createdBone);
+				reference.isArmorOnly = true;
+				reference.createdByUs = true;
+				++createdArmorNodes;
+				spdlog::debug(
+					"created persistent unskinned armor node '{}' under '{}' actor={} node={} parent={}",
+					reference.name,
+					expectedParent->GetName(),
+					static_cast<void*>(a_actor),
+					static_cast<void*>(bone),
+					static_cast<void*>(expectedParent));
+			} else {
+				reference.resolvedNode.reset(bone);
+				if (reference.isArmorOnly) {
+					++reusedArmorNodes;
+				}
+			}
+
+			if (!reference.isArmorOnly) {
+				continue;
+			}
+
+			if (bone != expectedParent &&
+				bone->parent != expectedParent &&
+				!NiObject::IsDescendantOf(expectedParent, bone)) {
+				RE::NiPointer<RE::NiAVObject> keepAlive{ bone };
+				if (bone->parent) {
+					bone->parent->DetachChild(bone);
+				}
+				expectedParent->AttachChild(bone, false);
+				++reparentedArmorBones;
+				spdlog::debug(
+					"restored armor-only node '{}' under source parent '{}' actor={} bone={} parent={}",
+					reference.name,
+					expectedParent->GetName(),
 					static_cast<void*>(a_actor),
 					static_cast<void*>(bone),
 					static_cast<void*>(expectedParent));
 			}
+
+			bone->local = reference.localToParentBone;
+			bone->world = bone->parent ? bone->parent->world * bone->local : bone->local;
 		}
-		const auto restoredArmorBoneNodes = RestoreCachedArmorLocals(boundBones, a_references);
-		// BSBoneMap is an actor-wide raw-pointer lookup cache owned by the engine.
-		// Rebuilding it here can publish transient attachment nodes that later detach.
+		auto* currentActorRoot = actorRoot ? actorRoot : static_cast<RE::NiAVObject*>(destinationRoot);
+		const auto restoredArmorBoneNodes = RestoreCachedArmorLocals(a_references, currentActorRoot);
 
 		spdlog::debug(
-			"finalized vanilla armor skin bindings actor={} object={} references={} attachedArmorOnlyBones={} reparentedArmorOnlyRoots={} restoredArmorOnlyNodes={}",
+			"finalized persistent armor hierarchy actor={} object={} skeletonRoot={} actorRoot={} references={} attachedArmorOnlyBones={} createdArmorNodes={} reusedArmorNodes={} reparentedArmorNodes={} restoredArmorOnlyNodes={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_attachedObject),
+			static_cast<void*>(destinationRoot),
+			static_cast<void*>(currentActorRoot),
 			a_references.size(),
 			attachedArmorBones,
+			createdArmorNodes,
+			reusedArmorNodes,
 			reparentedArmorBones,
 			restoredArmorBoneNodes);
 	}
 
 	void RestoreArmorBoneLocalPose(
 		RE::NiAVObject* a_attachedObject,
+		RE::NiAVObject* a_actorRoot,
 		const std::vector<ArmorBoneReference>& a_references)
 	{
-		if (!a_attachedObject || a_references.empty()) {
+		if (!a_attachedObject || !a_actorRoot || a_references.empty()) {
 			return;
 		}
 
-		const auto restored = RestoreCachedArmorLocals(CollectBoundBones(a_attachedObject), a_references);
+		const auto restored = RestoreCachedArmorLocals(a_references, a_actorRoot);
 		spdlog::debug(
-			"restored {} cached armor-only local transforms before physics build object={} references={}",
+			"restored {} cached armor-only local transforms before physics build object={} actorRoot={} references={}",
 			restored,
 			static_cast<void*>(a_attachedObject),
+			static_cast<void*>(a_actorRoot),
 			a_references.size());
 	}
 }

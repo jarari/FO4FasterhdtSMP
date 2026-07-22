@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RE/N/NiNode.h"
+#include "RE/N/NiPointer.h"
 #include "RE/N/NiTransform.h"
 
 #include <string>
@@ -19,8 +21,11 @@ namespace Smp
 		std::string name;
 		std::string parentBoneName;
 		RE::NiTransform localToParentBone{ RE::NiTransform::IDENTITY };
+		RE::NiPointer<RE::NiNode> resolvedNode;
+		bool isSkinned{ false };
 		bool isArmorOnly{ false };
 		bool parentBoneIsArmorOnly{ false };
+		bool createdByUs{ false };
 	};
 
 	std::vector<ArmorBoneReference> CaptureArmorBoneReferences(
@@ -30,9 +35,11 @@ namespace Smp
 	void FinalizeArmorSkinBindings(
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_attachedObject,
+		RE::NiNode* a_skeletonRoot,
 		bool a_firstPerson,
 		std::vector<ArmorBoneReference>& a_references);
 	void RestoreArmorBoneLocalPose(
 		RE::NiAVObject* a_attachedObject,
+		RE::NiAVObject* a_actorRoot,
 		const std::vector<ArmorBoneReference>& a_references);
 }

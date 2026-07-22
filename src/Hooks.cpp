@@ -412,7 +412,7 @@ namespace Hooks
 			attachedObject = OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
 		}
 		auto* actor = ResolveActor(a_biped);
-		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_firstPerson, preAttach.armorBoneReferences);
+		Smp::FinalizeArmorSkinBindings(actor, attachedObject, ApplySkinnedObjectsSkeletonRoot, a_firstPerson, preAttach.armorBoneReferences);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorApplySkinnedObjects,
 			.actor = actor,
@@ -447,7 +447,7 @@ namespace Hooks
 			return attachedObject;
 		}
 		auto* actor = ResolveActor(a_biped);
-		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_firstPerson, preAttach.armorBoneReferences);
+		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_skeletonRoot, a_firstPerson, preAttach.armorBoneReferences);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorAttachSkinnedObject,
 			.actor = actor,

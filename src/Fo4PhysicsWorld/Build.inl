@@ -99,9 +99,12 @@ namespace Smp
 			timing.referencePoseMs += ElapsedMs(phaseStart, Clock::now());
 		}
 		phaseStart = Clock::now();
+		if (a_domain == PrototypeBuildDomain::kArmor) {
+			RestoreArmorBoneLocalPose(a_event.object, actorRoot, a_event.armorBoneReferences);
+		}
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
 		if (a_domain == PrototypeBuildDomain::kArmor) {
-			RestoreArmorBoneLocalPose(a_event.object, a_event.armorBoneReferences);
+			CollectMatchedArmorReferenceBones(a_event.armorBoneReferences, a_summary.boneNames, actorRoot, matchedBones);
 		}
 		auto* engineSkeletonRoot = a_event.destinationRoot;
 		if (!engineSkeletonRoot) {

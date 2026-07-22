@@ -1621,6 +1621,58 @@ namespace
 		}
 	}
 
+	void CollectMatchedArmorReferenceBones(
+		const std::vector<Smp::ArmorBoneReference>& a_references,
+		const std::vector<std::string>& a_boneNames,
+		RE::NiAVObject* a_actorRoot,
+		std::vector<MatchedSkinBone>& a_result)
+	{
+		if (!a_actorRoot || a_boneNames.empty()) {
+			return;
+		}
+
+		for (const auto& reference : a_references) {
+			auto* node = reference.resolvedNode.get();
+			if (!node || !IsNodeInTree(a_actorRoot, node)) {
+				continue;
+			}
+
+			const auto matchedName = Smp::FindMatchingPhysicsName(a_boneNames, reference.name);
+			if (!matchedName) {
+				continue;
+			}
+
+			if (auto* existing = FindMatchedSkinBone(a_result, node)) {
+				existing->name = std::string(*matchedName);
+				existing->meshOnlySkinBoneCandidate = false;
+				continue;
+			}
+			if (auto* existing = FindMatchedSkinBoneByName(a_result, *matchedName)) {
+				spdlog::warn(
+					"resolved armor node '{}' differs from existing matched node actorRoot={} resolved={} existing={}",
+					*matchedName,
+					static_cast<void*>(a_actorRoot),
+					static_cast<void*>(node),
+					static_cast<void*>(existing->node));
+				continue;
+			}
+
+			a_result.push_back({
+				.node = node,
+				.transform = std::addressof(node->world),
+				.sourceNode = node,
+				.name = std::string(*matchedName),
+				.isSharedActorBone = !reference.isArmorOnly,
+			});
+			spdlog::debug(
+				"matched XML bone '{}' from persistent armor hierarchy node={} nodeName='{}' createdByUs={}",
+				*matchedName,
+				static_cast<void*>(node),
+				std::string_view(node->GetName()),
+				reference.createdByUs);
+		}
+	}
+
 	void UpdateTransformUpDown(RE::NiAVObject* a_object, const bool a_dirty)
 	{
 		if (!a_object) {
