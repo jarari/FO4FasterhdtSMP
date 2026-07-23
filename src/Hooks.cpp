@@ -79,6 +79,12 @@ namespace Hooks
 		return a_ref->IsActor() ? static_cast<RE::Actor*>(a_ref) : nullptr;
 	}
 
+	bool IsBipedObjectSlot(const RE::BIPED_OBJECT a_bipedObject)
+	{
+		const auto index = std::to_underlying(a_bipedObject);
+		return index >= 0 && index < std::to_underlying(RE::BIPED_OBJECT::kTotal);
+	}
+
 	struct ScopedApplySkinnedObjectsDepth
 	{
 		ScopedApplySkinnedObjectsDepth()
@@ -396,6 +402,14 @@ namespace Hooks
 
 	RE::NiAVObject* HookedBipedAnimApplySkinnedObjects(RE::BipedAnim* a_biped, RE::NiNode* a_originalModelRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
+		// Vanilla also uses this function for non-biped animation objects and passes
+		// kNone. GetBipObject performs unchecked array indexing, so only inspect real
+		// biped slots and leave animation-object attachment entirely to vanilla.
+		if (!IsBipedObjectSlot(a_bipedObject)) {
+			ScopedApplySkinnedObjectsDepth scopedDepth;
+			return OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
+		}
+
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
@@ -432,10 +446,18 @@ namespace Hooks
 
 	RE::NiAVObject* HookedBipedAnimAttachSkinnedObject(RE::BipedAnim* a_biped, RE::NiNode* a_modelRoot, RE::NiNode* a_skeletonRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
+		const bool nestedApply = ApplySkinnedObjectsDepth > 0;
+		if (!IsBipedObjectSlot(a_bipedObject)) {
+			auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_modelRoot, a_skeletonRoot, a_bipedObject, a_firstPerson);
+			if (nestedApply) {
+				ApplySkinnedObjectsSkeletonRoot = a_skeletonRoot;
+			}
+			return attachedObject;
+		}
+
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* modelObject = a_modelRoot ? static_cast<RE::NiAVObject*>(a_modelRoot) : nullptr;
-		const bool nestedApply = ApplySkinnedObjectsDepth > 0;
 		PreAttachPhysicsContext preAttach;
 		if (!nestedApply) {
 			preAttach = PreparePreAttachPhysicsContext(modelObject, a_skeletonRoot, nifPath, "model root");
@@ -468,7 +490,7 @@ namespace Hooks
 	void HookedBipedAnimAttachToParent(RE::NiAVObject* a_parent, RE::NiAVObject* a_attachedObject, RE::NiAVObject* a_sourceObject, RE::BSTSmartPointer<RE::BipedAnim>& a_biped, RE::BIPED_OBJECT a_bipedObject)
 	{
 		OriginalBipedAnimAttachToParent(a_parent, a_attachedObject, a_sourceObject, a_biped, a_bipedObject);
-		if (ApplySkinnedObjectsDepth > 0) {
+		if (ApplySkinnedObjectsDepth > 0 || !IsBipedObjectSlot(a_bipedObject)) {
 			return;
 		}
 		EmitEvent({
