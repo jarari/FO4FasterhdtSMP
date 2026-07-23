@@ -1332,7 +1332,8 @@ namespace Smp
 			});
 			return stagedBody != a_stagedBodies.end() ? std::addressof(*stagedBody) : nullptr;
 		};
-		for (const auto& descriptor : a_summary.constraintDescriptors) {
+		for (std::size_t descriptorIndex = 0; descriptorIndex < a_summary.constraintDescriptors.size(); ++descriptorIndex) {
+			const auto& descriptor = a_summary.constraintDescriptors[descriptorIndex];
 			const auto bodyA = findBodyForConstraint(descriptor.bodyA);
 			const auto bodyB = findBodyForConstraint(descriptor.bodyB);
 			if (!bodyA || !bodyB || !bodyA->bone || !bodyB->bone || bodyA->meshOnlySkinBone || bodyB->meshOnlySkinBone) {
@@ -1349,15 +1350,15 @@ namespace Smp
 				++kinematicPairsAllowed;
 				spdlog::debug("allowing FO4 kinematic-to-kinematic constraint '{}' between '{}'/'{}'", descriptor.name, descriptor.bodyA, descriptor.bodyB);
 			}
-			const auto existing = std::ranges::find_if(a_state.constraints, [&descriptor, a_buildGroup](const PrototypeConstraint& a_constraint) {
-					return a_constraint.buildGroup == a_buildGroup && PhysicsNamesEqual(a_constraint.bodyA, descriptor.bodyA) && PhysicsNamesEqual(a_constraint.bodyB, descriptor.bodyB);
+			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup](const PrototypeConstraint& a_constraint) {
+				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existing != a_state.constraints.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [&descriptor, a_buildGroup](const PrototypeConstraint& a_constraint) {
-					return a_constraint.buildGroup == a_buildGroup && PhysicsNamesEqual(a_constraint.bodyA, descriptor.bodyA) && PhysicsNamesEqual(a_constraint.bodyB, descriptor.bodyB);
+			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [descriptorIndex, a_buildGroup](const PrototypeConstraint& a_constraint) {
+				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existingStaged != a_stagedConstraints.end()) {
 				++skippedExisting;
@@ -1380,6 +1381,7 @@ namespace Smp
 			PrototypeConstraint prototypeConstraint;
 			prototypeConstraint.buildGroup = a_buildGroup;
 			prototypeConstraint.domain = a_domain;
+			prototypeConstraint.descriptorIndex = descriptorIndex;
 			prototypeConstraint.bodyA = descriptor.bodyA;
 			prototypeConstraint.bodyB = descriptor.bodyB;
 			prototypeConstraint.kind = descriptor.kind;

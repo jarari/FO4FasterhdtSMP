@@ -319,7 +319,7 @@ Frame modes:
 
 - `<frameInB>`: default. The explicit `frame` is interpreted in body B space.
 - `<frameInA>`: the explicit `frame` is interpreted in body A space.
-- `<frameInLerp>`: interpolates the two node transforms using `translationLerp` and `rotationLerp`, both clamped to `0.0` to `1.0`.
+- `<frameInLerp>`: interpolates the two node transforms using `translationLerp` and `rotationLerp`. An explicit `<frameInLerp>` resets both values to `0.0` before reading its children, and the values are passed through without clamping, matching hdtSMP64.
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`: orient A's X/Y/Z axis toward B.
 - Lowercase dashed forms such as `<a-with-x-point-to-b />` are also accepted.
 
@@ -346,8 +346,9 @@ Generic fields actually used by the runtime:
 How they behave:
 
 - Lower/upper limits use Bullet's standard convention: `upper < lower` means free, `upper == lower` means locked, and `upper > lower` means a limited range.
-- `useLinearReferenceFrameA` swaps the constraint body order and reverses the frame-dependent values so the linear frame behaves like body A's reference frame.
-- `linearStiffness` and `angularStiffness` enable spring behavior on the corresponding axis when the value is positive and the spring is enabled.
+- `useLinearReferenceFrameA` swaps the constraint body and frame order. Limits, equilibrium points, servo targets, and target velocities keep their XML signs, matching hdtSMP64.
+- `enableLinearSprings` and `enableAngularSprings` control the spring rows directly, even when their current stiffness and damping values are zero.
+- `linearStiffness` and `angularStiffness` set spring strength on the corresponding axes.
 - `linearDamping` and `angularDamping` damp the spring motion.
 - The non-Hookean fields add higher-order damping/stiffness terms for a harder or softer response curve near motion extremes.
 - `linearEquilibrium` and `angularEquilibrium` define the resting point. They also become servo targets.
@@ -355,7 +356,7 @@ How they behave:
 - `linearMaxMotorForce` and `angularMaxMotorForce` cap motor strength.
 - `motorERP` and `motorCFM` tune motor correction and softness.
 - `stopERP` and `stopCFM` tune limit correction and softness.
-- If an axis is fully locked, the runtime forces its stop ERP to `1.0`.
+- The configured `stopERP` is used unchanged for both limited and fully locked axes.
 
 When to use it:
 

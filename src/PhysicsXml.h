@@ -57,8 +57,8 @@ namespace Smp
 		std::string templateName;
 		PhysicsFrameMode frameMode{ PhysicsFrameMode::kFrameInB };
 		XmlTransform frame;
-		float translationLerp{ 0.5F };
-		float rotationLerp{ 0.5F };
+		float translationLerp{ 0.0F };
+		float rotationLerp{ 0.0F };
 		bool useLinearReferenceFrameA{ false };
 		XmlTransform frameInA;
 		XmlTransform frameInB;

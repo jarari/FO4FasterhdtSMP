@@ -319,7 +319,7 @@ frame mode:
 
 - `<frameInB>`: 기본값입니다. 명시한 `frame`은 body B space로 해석됩니다.
 - `<frameInA>`: 명시한 `frame`은 body A space로 해석됩니다.
-- `<frameInLerp>`: 두 node transform을 `translationLerp`, `rotationLerp`로 보간합니다. 둘 다 `0.0`~`1.0`으로 clamp 됩니다.
+- `<frameInLerp>`: 두 node transform을 `translationLerp`, `rotationLerp`로 보간합니다. 명시적인 `<frameInLerp>`는 child를 읽기 전에 두 값을 `0.0`으로 초기화하며, hdtSMP64와 동일하게 clamp하지 않고 그대로 전달합니다.
 - `<AWithXPointToB />`, `<AWithYPointToB />`, `<AWithZPointToB />`: A의 X/Y/Z 축이 B의 origin을 향하도록 맞춥니다.
 - `<a-with-x-point-to-b />` 같은 소문자 dashed form도 허용됩니다.
 
@@ -346,8 +346,9 @@ frame mode:
 동작:
 
 - lower/upper limit는 Bullet 표준 규칙을 따릅니다. `upper < lower`는 free, `upper == lower`는 locked, `upper > lower`는 limited range입니다.
-- `useLinearReferenceFrameA`는 constraint body 순서를 바꾸고, frame-dependent 값을 뒤집어 body A 기준 linear frame처럼 동작하게 만듭니다.
-- `linearStiffness`, `angularStiffness`는 해당 축의 spring 동작을 켭니다. 값이 양수이고 spring이 활성화되어 있을 때 의미가 있습니다.
+- `useLinearReferenceFrameA`는 constraint body와 frame 순서를 바꿉니다. limit, equilibrium point, servo target, target velocity의 XML 부호는 hdtSMP64와 동일하게 그대로 유지합니다.
+- `enableLinearSprings`, `enableAngularSprings`는 현재 stiffness와 damping 값이 0이어도 spring row를 직접 제어합니다.
+- `linearStiffness`, `angularStiffness`는 해당 축의 spring strength를 설정합니다.
 - `linearDamping`, `angularDamping`은 spring motion을 감쇠시킵니다.
 - non-Hookean 필드는 motion 끝단 근처에서 더 강하거나 더 부드러운 반응 곡선을 만드는 higher-order 항입니다.
 - `linearEquilibrium`, `angularEquilibrium`는 resting point를 정의합니다. servo target으로도 사용됩니다.
@@ -355,7 +356,7 @@ frame mode:
 - `linearMaxMotorForce`, `angularMaxMotorForce`는 motor strength를 제한합니다.
 - `motorERP`, `motorCFM`은 motor correction과 softness를 조정합니다.
 - `stopERP`, `stopCFM`은 limit correction과 softness를 조정합니다.
-- 축이 완전히 locked 되어 있으면 runtime이 stop ERP를 `1.0`으로 강제합니다.
+- 설정된 `stopERP`는 limited 축과 완전히 locked 된 축 모두에 변경 없이 사용됩니다.
 
 언제 쓰는가:
 

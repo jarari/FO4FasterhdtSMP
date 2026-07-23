@@ -22,6 +22,7 @@
 		{
 			std::uint64_t buildGroup{ 0 };
 			PrototypeBuildDomain domain{ PrototypeBuildDomain::kArmor };
+			std::size_t descriptorIndex{ 0 };
 			std::string bodyA;
 			std::string bodyB;
 			PhysicsConstraintKind kind{};

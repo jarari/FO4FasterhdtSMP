@@ -2479,27 +2479,6 @@ namespace
 		}
 	}
 
-	btVector3 ReversedLimitLowerToBullet([[maybe_unused]] const Smp::XmlVector3& a_lower, const Smp::XmlVector3& a_upper)
-	{
-		return btVector3(-a_upper.x, -a_upper.y, -a_upper.z);
-	}
-
-	btVector3 ReversedLimitUpperToBullet(const Smp::XmlVector3& a_lower, [[maybe_unused]] const Smp::XmlVector3& a_upper)
-	{
-		return btVector3(-a_lower.x, -a_lower.y, -a_lower.z);
-	}
-
-	float AxisValue(const Smp::XmlVector3& a_value, const int a_axis, const bool a_reverse)
-	{
-		const auto value = AxisValue(a_value, a_axis);
-		return a_reverse ? -value : value;
-	}
-
-	bool AxisLocked(const Smp::XmlVector3& a_lower, const Smp::XmlVector3& a_upper, const int a_axis)
-	{
-		return AxisValue(a_lower, a_axis) == AxisValue(a_upper, a_axis);
-	}
-
 	btQuaternion RotFromAToB(const btVector3& a_from, const btVector3& a_to)
 	{
 		const auto axis = a_from.cross(a_to);
@@ -2556,10 +2535,8 @@ namespace
 		}
 		case Smp::PhysicsFrameMode::kFrameInLerp:
 		{
-			const auto translationLerp = std::clamp(a_descriptor.translationLerp, 0.0F, 1.0F);
-			const auto rotationLerp = std::clamp(a_descriptor.rotationLerp, 0.0F, 1.0F);
-			const auto origin = a_transformA.getOrigin().lerp(a_transformB.getOrigin(), translationLerp);
-			const auto rotation = a_transformA.getBasis().slerp(a_transformB.getBasis(), rotationLerp);
+			const auto origin = a_transformA.getOrigin().lerp(a_transformB.getOrigin(), a_descriptor.translationLerp);
+			const auto rotation = a_transformA.getBasis().slerp(a_transformB.getBasis(), a_descriptor.rotationLerp);
 			const hdt::btQsTransform frameWorld(rotation, origin);
 			frameA = (a_transformA.inverse() * frameWorld).asTransform();
 			frameB = (a_transformB.inverse() * frameWorld).asTransform();
@@ -2591,18 +2568,16 @@ namespace
 			const float a_maxDistanceFactor,
 			const float a_stiffness,
 			const float a_damping,
-			const float a_equilibriumFactor) :
+			const float a_equilibriumFactor,
+			const float a_initialDistance) :
 			btTypedConstraint(MAX_CONSTRAINT_TYPE, a_bodyA, a_bodyB),
 			rigToLocalA_(a_rigToLocalA),
 			rigToLocalB_(a_rigToLocalB),
 			stiffness_(std::max(a_stiffness, 0.0F)),
 			damping_(std::max(a_damping, 0.0F))
 		{
-			const auto localA = rigToLocalA_ * m_rbA.getWorldTransform();
-			const auto localB = rigToLocalB_ * m_rbB.getWorldTransform();
-			const auto distance = localA.getOrigin().distance(localB.getOrigin());
-			minDistance_ = distance * std::max(a_minDistanceFactor, 0.0F);
-			maxDistance_ = distance * std::max(a_maxDistanceFactor, 0.0F);
+			minDistance_ = a_initialDistance * std::max(a_minDistanceFactor, 0.0F);
+			maxDistance_ = a_initialDistance * std::max(a_maxDistanceFactor, 0.0F);
 			const auto equilibriumFactor = std::clamp(a_equilibriumFactor, 0.0F, 1.0F);
 			equilibriumPoint_ = minDistance_ * equilibriumFactor + maxDistance_ * (1.0F - equilibriumFactor);
 		}
@@ -2785,6 +2760,7 @@ namespace
 		case Smp::PhysicsConstraintKind::kConeTwist:
 		{
 			auto constraint = std::make_unique<btConeTwistConstraint>(a_bodyA, a_bodyB, frameA, frameB);
+			constraint->enableMotor(false);
 			constraint->setLimit(
 				a_descriptor.swingSpan1,
 				a_descriptor.swingSpan2,
@@ -2804,71 +2780,67 @@ namespace
 				a_descriptor.maxDistanceFactor,
 				a_descriptor.stiffness,
 				a_descriptor.damping,
-				a_descriptor.equilibriumFactor);
+				a_descriptor.equilibriumFactor,
+				a_nodeTransformA.getOrigin().distance(a_nodeTransformB.getOrigin()));
 		case Smp::PhysicsConstraintKind::kGeneric:
 		default:
 		{
-			const bool reverseFrames = a_descriptor.useLinearReferenceFrameA;
-			auto constraint = reverseFrames ?
+			const bool swapBodies = a_descriptor.useLinearReferenceFrameA;
+			auto constraint = swapBodies ?
 				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyB, a_bodyA, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ) :
 				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyA, a_bodyB, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ);
-			if (reverseFrames) {
+			if (swapBodies) {
 				constraint->setFrames(frameB, frameA);
 			} else {
 				constraint->setFrames(frameA, frameB);
 			}
-			constraint->setLinearLowerLimit(reverseFrames ? ReversedLimitLowerToBullet(a_descriptor.linearLowerLimit, a_descriptor.linearUpperLimit) : ToBulletVector(a_descriptor.linearLowerLimit));
-			constraint->setLinearUpperLimit(reverseFrames ? ReversedLimitUpperToBullet(a_descriptor.linearLowerLimit, a_descriptor.linearUpperLimit) : ToBulletVector(a_descriptor.linearUpperLimit));
-			constraint->setAngularLowerLimit(reverseFrames ? ReversedLimitLowerToBullet(a_descriptor.angularLowerLimit, a_descriptor.angularUpperLimit) : ToBulletVector(a_descriptor.angularLowerLimit));
-			constraint->setAngularUpperLimit(reverseFrames ? ReversedLimitUpperToBullet(a_descriptor.angularLowerLimit, a_descriptor.angularUpperLimit) : ToBulletVector(a_descriptor.angularUpperLimit));
+			for (int axis = 0; axis < 6; ++axis) {
+				constraint->enableSpring(axis, true);
+			}
+			constraint->setLinearLowerLimit(ToBulletVector(a_descriptor.linearLowerLimit));
+			constraint->setLinearUpperLimit(ToBulletVector(a_descriptor.linearUpperLimit));
+			constraint->setAngularLowerLimit(ToBulletVector(a_descriptor.angularLowerLimit));
+			constraint->setAngularUpperLimit(ToBulletVector(a_descriptor.angularUpperLimit));
 			for (int axis = 0; axis < 3; ++axis) {
-				const auto linearStiffness = AxisValue(a_descriptor.linearStiffness, axis);
-				const auto linearDamping = AxisValue(a_descriptor.linearDamping, axis);
-				const bool hasLinearSpring = a_descriptor.enableLinearSprings &&
-					(linearStiffness > 0.0F || linearDamping > 0.0F);
-				const bool hasAngularSpring = a_descriptor.enableAngularSprings &&
-					(AxisValue(a_descriptor.angularStiffness, axis) > 0.0F || AxisValue(a_descriptor.angularDamping, axis) > 0.0F);
-				constraint->enableSpring(axis, hasLinearSpring);
-				constraint->enableSpring(axis + 3, hasAngularSpring);
-				constraint->setStiffness(axis, linearStiffness, a_descriptor.linearStiffnessLimited);
+				constraint->setStiffness(axis, AxisValue(a_descriptor.linearStiffness, axis), a_descriptor.linearStiffnessLimited);
 				constraint->setStiffness(axis + 3, AxisValue(a_descriptor.angularStiffness, axis), a_descriptor.angularStiffnessLimited);
-				constraint->setDamping(axis, linearDamping, a_descriptor.springDampingLimited);
+				constraint->setDamping(axis, AxisValue(a_descriptor.linearDamping, axis), a_descriptor.springDampingLimited);
 				constraint->setDamping(axis + 3, AxisValue(a_descriptor.angularDamping, axis), a_descriptor.springDampingLimited);
+				constraint->setEquilibriumPoint(axis, AxisValue(a_descriptor.linearEquilibrium, axis));
+				constraint->setEquilibriumPoint(axis + 3, AxisValue(a_descriptor.angularEquilibrium, axis));
 				constraint->setNonHookeanDamping(axis, AxisValue(a_descriptor.linearNonHookeanDamping, axis));
 				constraint->setNonHookeanDamping(axis + 3, AxisValue(a_descriptor.angularNonHookeanDamping, axis));
 				constraint->setNonHookeanStiffness(axis, AxisValue(a_descriptor.linearNonHookeanStiffness, axis));
 				constraint->setNonHookeanStiffness(axis + 3, AxisValue(a_descriptor.angularNonHookeanStiffness, axis));
-				constraint->setEquilibriumPoint(axis, AxisValue(a_descriptor.linearEquilibrium, axis, reverseFrames));
-				constraint->setEquilibriumPoint(axis + 3, AxisValue(a_descriptor.angularEquilibrium, axis, reverseFrames));
-				constraint->setBounce(axis, AxisValue(a_descriptor.linearBounce, axis));
-				constraint->setBounce(axis + 3, AxisValue(a_descriptor.angularBounce, axis));
+				constraint->enableSpring(axis, a_descriptor.enableLinearSprings);
+				constraint->enableSpring(axis + 3, a_descriptor.enableAngularSprings);
 				constraint->enableMotor(axis, a_descriptor.linearMotors);
 				constraint->enableMotor(axis + 3, a_descriptor.angularMotors);
 				constraint->setServo(axis, a_descriptor.linearServoMotors);
 				constraint->setServo(axis + 3, a_descriptor.angularServoMotors);
-				constraint->setServoTarget(axis, AxisValue(a_descriptor.linearEquilibrium, axis, reverseFrames));
-				constraint->setServoTarget(axis + 3, AxisValue(a_descriptor.angularEquilibrium, axis, reverseFrames));
-				constraint->setTargetVelocity(axis, AxisValue(a_descriptor.linearTargetVelocity, axis, reverseFrames));
-				constraint->setTargetVelocity(axis + 3, AxisValue(a_descriptor.angularTargetVelocity, axis, reverseFrames));
+				constraint->setServoTarget(axis, AxisValue(a_descriptor.linearEquilibrium, axis));
+				constraint->setServoTarget(axis + 3, AxisValue(a_descriptor.angularEquilibrium, axis));
+				constraint->setTargetVelocity(axis, AxisValue(a_descriptor.linearTargetVelocity, axis));
+				constraint->setTargetVelocity(axis + 3, AxisValue(a_descriptor.angularTargetVelocity, axis));
 				constraint->setMaxMotorForce(axis, AxisValue(a_descriptor.linearMaxMotorForce, axis));
 				constraint->setMaxMotorForce(axis + 3, AxisValue(a_descriptor.angularMaxMotorForce, axis));
 				constraint->setParam(BT_CONSTRAINT_ERP, a_descriptor.motorErp, axis);
-				constraint->setParam(BT_CONSTRAINT_ERP, a_descriptor.motorErp, axis + 3);
 				constraint->setParam(BT_CONSTRAINT_CFM, a_descriptor.motorCfm, axis);
-				constraint->setParam(BT_CONSTRAINT_CFM, a_descriptor.motorCfm, axis + 3);
-				constraint->setParam(BT_CONSTRAINT_STOP_ERP, AxisLocked(a_descriptor.linearLowerLimit, a_descriptor.linearUpperLimit, axis) ? 1.0F : a_descriptor.stopErp, axis);
-				constraint->setParam(BT_CONSTRAINT_STOP_ERP, AxisLocked(a_descriptor.angularLowerLimit, a_descriptor.angularUpperLimit, axis) ? 1.0F : a_descriptor.stopErp, axis + 3);
+				constraint->setParam(BT_CONSTRAINT_STOP_ERP, a_descriptor.stopErp, axis);
 				constraint->setParam(BT_CONSTRAINT_STOP_CFM, a_descriptor.stopCfm, axis);
-				constraint->setParam(BT_CONSTRAINT_STOP_CFM, a_descriptor.stopCfm, axis + 3);
 				if (auto* motor = constraint->getRotationalLimitMotor(axis)) {
 					motor->m_motorERP = a_descriptor.motorErp;
 					motor->m_motorCFM = a_descriptor.motorCfm;
-					motor->m_stopERP = AxisLocked(a_descriptor.angularLowerLimit, a_descriptor.angularUpperLimit, axis) ? 1.0F : a_descriptor.stopErp;
+					motor->m_stopERP = a_descriptor.stopErp;
 					motor->m_stopCFM = a_descriptor.stopCfm;
-					motor->m_bounce = AxisValue(a_descriptor.angularBounce, axis);
 				}
 			}
 			constraint->getTranslationalLimitMotor()->m_bounce = ToBulletVector(a_descriptor.linearBounce);
+			for (int axis = 0; axis < 3; ++axis) {
+				if (auto* motor = constraint->getRotationalLimitMotor(axis)) {
+					motor->m_bounce = AxisValue(a_descriptor.angularBounce, axis);
+				}
+			}
 			return constraint;
 		}
 		}

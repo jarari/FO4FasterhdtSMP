@@ -80,6 +80,16 @@ namespace
 		return a_default;
 	}
 
+	float ReadFloatElement(tinyxml2::XMLElement* a_element, const float a_default)
+	{
+		if (const auto text = a_element ? a_element->GetText() : nullptr) {
+			if (float value = a_default; ParseFloat(text, value)) {
+				return value;
+			}
+		}
+		return a_default;
+	}
+
 	float ReadFloatAttribute(tinyxml2::XMLElement* a_element, const char* a_name, const float a_default)
 	{
 		if (const auto text = a_element ? a_element->Attribute(a_name) : nullptr) {
@@ -115,6 +125,29 @@ namespace
 				if (valueText == "0" || valueText == "false") {
 					return false;
 				}
+			}
+		}
+		return a_default;
+	}
+
+	bool ReadBoolElement(tinyxml2::XMLElement* a_element, const bool a_default)
+	{
+		if (!a_element) {
+			return a_default;
+		}
+
+		bool value = a_default;
+		if (a_element->QueryBoolText(std::addressof(value)) == tinyxml2::XML_SUCCESS) {
+			return value;
+		}
+
+		if (const auto text = a_element->GetText()) {
+			const auto valueText = LowerString(Trim(text));
+			if (valueText == "1" || valueText == "true") {
+				return true;
+			}
+			if (valueText == "0" || valueText == "false") {
+				return false;
 			}
 		}
 		return a_default;
@@ -557,76 +590,157 @@ namespace
 		result.bodyB = ReadAttribute(a_constraint, "bodyB", result.bodyB);
 		result.templateName = ReadAttribute(a_constraint, "template", result.templateName);
 		const auto context = result.name.empty() ? std::string_view(a_constraint->Name()) : std::string_view(result.name);
-		for (auto* child = a_constraint->FirstChildElement(); child; child = child->NextSiblingElement()) {
-			const std::string name = child->Name();
-			if (name == "frameInA") {
+
+		const auto readFrame = [&](tinyxml2::XMLElement* a_element, const std::string_view a_name) {
+			if (a_name == "frameInA") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInA;
-				result.frame = ReadRequiredTransform(child, result.frame, result.valid, context);
+				result.frame = ReadRequiredTransform(a_element, Smp::XmlTransform{}, result.valid, context);
 				result.frameInA = result.frame;
-			} else if (name == "frameInB") {
+				return true;
+			}
+			if (a_name == "frameInB") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInB;
-				result.frame = ReadRequiredTransform(child, result.frame, result.valid, context);
+				result.frame = ReadRequiredTransform(a_element, Smp::XmlTransform{}, result.valid, context);
 				result.frameInB = result.frame;
-			} else if (name == "frameInLerp") {
+				return true;
+			}
+			if (a_name == "frameInLerp") {
 				result.frameMode = Smp::PhysicsFrameMode::kFrameInLerp;
-				result.translationLerp = ReadFloat(child, "translationLerp", result.translationLerp);
-				result.rotationLerp = ReadFloat(child, "rotationLerp", result.rotationLerp);
-			} else if (name == "AWithXPointToB" || name == "a-with-x-point-to-b") {
+				result.frame = Smp::XmlTransform{};
+				result.translationLerp = 0.0F;
+				result.rotationLerp = 0.0F;
+				for (auto* child = a_element->FirstChildElement(); child; child = child->NextSiblingElement()) {
+					const std::string_view childName(child->Name());
+					if (childName == "translationLerp") {
+						result.translationLerp = ReadFloatElement(child, result.translationLerp);
+					} else if (childName == "rotationLerp") {
+						result.rotationLerp = ReadFloatElement(child, result.rotationLerp);
+					}
+				}
+				return true;
+			}
+
+			// Retain the point-to-body frame modes supported by this port. They do not
+			// change the behavior of any frame mode accepted by the reference parser.
+			if (a_name == "AWithXPointToB" || a_name == "a-with-x-point-to-b") {
 				result.frameMode = Smp::PhysicsFrameMode::kAWithXPointToB;
-			} else if (name == "AWithYPointToB" || name == "a-with-y-point-to-b") {
+				return true;
+			}
+			if (a_name == "AWithYPointToB" || a_name == "a-with-y-point-to-b") {
 				result.frameMode = Smp::PhysicsFrameMode::kAWithYPointToB;
-			} else if (name == "AWithZPointToB" || name == "a-with-z-point-to-b") {
+				return true;
+			}
+			if (a_name == "AWithZPointToB" || a_name == "a-with-z-point-to-b") {
 				result.frameMode = Smp::PhysicsFrameMode::kAWithZPointToB;
+				return true;
+			}
+			return false;
+		};
+
+		for (auto* child = a_constraint->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			const std::string_view name(child->Name());
+			if (a_kind != Smp::PhysicsConstraintKind::kStiffSpring && readFrame(child, name)) {
+				continue;
+			}
+
+			if (a_kind == Smp::PhysicsConstraintKind::kGeneric) {
+				if (name == "enableLinearSprings") {
+					result.enableLinearSprings = ReadBoolElement(child, result.enableLinearSprings);
+				} else if (name == "enableAngularSprings") {
+					result.enableAngularSprings = ReadBoolElement(child, result.enableAngularSprings);
+				} else if (name == "linearStiffnessLimited") {
+					result.linearStiffnessLimited = ReadBoolElement(child, result.linearStiffnessLimited);
+				} else if (name == "angularStiffnessLimited") {
+					result.angularStiffnessLimited = ReadBoolElement(child, result.angularStiffnessLimited);
+				} else if (name == "springDampingLimited") {
+					result.springDampingLimited = ReadBoolElement(child, result.springDampingLimited);
+				} else if (name == "linearNonHookeanDamping") {
+					result.linearNonHookeanDamping = ReadRequiredVector3(child, result.linearNonHookeanDamping, result.valid, context);
+				} else if (name == "angularNonHookeanDamping") {
+					result.angularNonHookeanDamping = ReadRequiredVector3(child, result.angularNonHookeanDamping, result.valid, context);
+				} else if (name == "linearNonHookeanStiffness") {
+					result.linearNonHookeanStiffness = ReadRequiredVector3(child, result.linearNonHookeanStiffness, result.valid, context);
+				} else if (name == "angularNonHookeanStiffness") {
+					result.angularNonHookeanStiffness = ReadRequiredVector3(child, result.angularNonHookeanStiffness, result.valid, context);
+				} else if (name == "linearMotors") {
+					result.linearMotors = ReadBoolElement(child, result.linearMotors);
+				} else if (name == "angularMotors") {
+					result.angularMotors = ReadBoolElement(child, result.angularMotors);
+				} else if (name == "linearServoMotors") {
+					result.linearServoMotors = ReadBoolElement(child, result.linearServoMotors);
+				} else if (name == "angularServoMotors") {
+					result.angularServoMotors = ReadBoolElement(child, result.angularServoMotors);
+				} else if (name == "linearTargetVelocity") {
+					result.linearTargetVelocity = ReadRequiredVector3(child, result.linearTargetVelocity, result.valid, context);
+				} else if (name == "angularTargetVelocity") {
+					result.angularTargetVelocity = ReadRequiredVector3(child, result.angularTargetVelocity, result.valid, context);
+				} else if (name == "linearMaxMotorForce") {
+					result.linearMaxMotorForce = ReadRequiredVector3(child, result.linearMaxMotorForce, result.valid, context);
+				} else if (name == "angularMaxMotorForce") {
+					result.angularMaxMotorForce = ReadRequiredVector3(child, result.angularMaxMotorForce, result.valid, context);
+				} else if (name == "stopERP") {
+					result.stopErp = ReadFloatElement(child, result.stopErp);
+				} else if (name == "stopCFM") {
+					result.stopCfm = ReadFloatElement(child, result.stopCfm);
+				} else if (name == "motorERP") {
+					result.motorErp = ReadFloatElement(child, result.motorErp);
+				} else if (name == "motorCFM") {
+					result.motorCfm = ReadFloatElement(child, result.motorCfm);
+				} else if (name == "useLinearReferenceFrameA") {
+					result.useLinearReferenceFrameA = ReadBoolElement(child, result.useLinearReferenceFrameA);
+				} else if (name == "linearLowerLimit") {
+					result.linearLowerLimit = ReadRequiredVector3(child, result.linearLowerLimit, result.valid, context);
+				} else if (name == "linearUpperLimit") {
+					result.linearUpperLimit = ReadRequiredVector3(child, result.linearUpperLimit, result.valid, context);
+				} else if (name == "angularLowerLimit") {
+					result.angularLowerLimit = ReadRequiredVector3(child, result.angularLowerLimit, result.valid, context);
+				} else if (name == "angularUpperLimit") {
+					result.angularUpperLimit = ReadRequiredVector3(child, result.angularUpperLimit, result.valid, context);
+				} else if (name == "linearStiffness") {
+					result.linearStiffness = ReadRequiredVector3(child, result.linearStiffness, result.valid, context);
+				} else if (name == "angularStiffness") {
+					result.angularStiffness = ReadRequiredVector3(child, result.angularStiffness, result.valid, context);
+				} else if (name == "linearDamping") {
+					result.linearDamping = ReadRequiredVector3(child, result.linearDamping, result.valid, context);
+				} else if (name == "angularDamping") {
+					result.angularDamping = ReadRequiredVector3(child, result.angularDamping, result.valid, context);
+				} else if (name == "linearEquilibrium") {
+					result.linearEquilibrium = ReadRequiredVector3(child, result.linearEquilibrium, result.valid, context);
+				} else if (name == "angularEquilibrium") {
+					result.angularEquilibrium = ReadRequiredVector3(child, result.angularEquilibrium, result.valid, context);
+				} else if (name == "linearBounce") {
+					result.linearBounce = ReadRequiredVector3(child, result.linearBounce, result.valid, context);
+				} else if (name == "angularBounce") {
+					result.angularBounce = ReadRequiredVector3(child, result.angularBounce, result.valid, context);
+				}
+			} else if (a_kind == Smp::PhysicsConstraintKind::kConeTwist) {
+				if (name == "swingSpan1" || name == "coneLimit" || name == "limitZ") {
+					result.swingSpan1 = std::max(ReadFloatElement(child, result.swingSpan1), 0.0F);
+				} else if (name == "swingSpan2" || name == "planeLimit" || name == "limitY") {
+					result.swingSpan2 = std::max(ReadFloatElement(child, result.swingSpan2), 0.0F);
+				} else if (name == "twistSpan" || name == "twistLimit" || name == "limitX") {
+					result.twistSpan = std::max(ReadFloatElement(child, result.twistSpan), 0.0F);
+				} else if (name == "limitSoftness") {
+					result.limitSoftness = std::clamp(ReadFloatElement(child, result.limitSoftness), 0.0F, 1.0F);
+				} else if (name == "biasFactor") {
+					result.biasFactor = std::clamp(ReadFloatElement(child, result.biasFactor), 0.0F, 1.0F);
+				} else if (name == "relaxationFactor") {
+					result.relaxationFactor = std::clamp(ReadFloatElement(child, result.relaxationFactor), 0.0F, 1.0F);
+				}
+			} else if (a_kind == Smp::PhysicsConstraintKind::kStiffSpring) {
+				if (name == "minDistanceFactor") {
+					result.minDistanceFactor = std::max(ReadFloatElement(child, result.minDistanceFactor), 0.0F);
+				} else if (name == "maxDistanceFactor") {
+					result.maxDistanceFactor = std::max(ReadFloatElement(child, result.maxDistanceFactor), 0.0F);
+				} else if (name == "stiffness") {
+					result.stiffness = std::max(ReadFloatElement(child, result.stiffness), 0.0F);
+				} else if (name == "damping") {
+					result.damping = std::max(ReadFloatElement(child, result.damping), 0.0F);
+				} else if (name == "equilibrium") {
+					result.equilibriumFactor = std::clamp(ReadFloatElement(child, result.equilibriumFactor), 0.0F, 1.0F);
+				}
 			}
 		}
-
-		result.useLinearReferenceFrameA = ReadBool(a_constraint, "useLinearReferenceFrameA", result.useLinearReferenceFrameA);
-		result.linearLowerLimit = ReadRequiredVector3(a_constraint->FirstChildElement("linearLowerLimit"), result.linearLowerLimit, result.valid, context);
-		result.linearUpperLimit = ReadRequiredVector3(a_constraint->FirstChildElement("linearUpperLimit"), result.linearUpperLimit, result.valid, context);
-		result.angularLowerLimit = ReadRequiredVector3(a_constraint->FirstChildElement("angularLowerLimit"), result.angularLowerLimit, result.valid, context);
-		result.angularUpperLimit = ReadRequiredVector3(a_constraint->FirstChildElement("angularUpperLimit"), result.angularUpperLimit, result.valid, context);
-		result.linearStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("linearStiffness"), result.linearStiffness, result.valid, context);
-		result.angularStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("angularStiffness"), result.angularStiffness, result.valid, context);
-		result.linearDamping = ReadRequiredVector3(a_constraint->FirstChildElement("linearDamping"), result.linearDamping, result.valid, context);
-		result.angularDamping = ReadRequiredVector3(a_constraint->FirstChildElement("angularDamping"), result.angularDamping, result.valid, context);
-		result.linearNonHookeanDamping = ReadRequiredVector3(a_constraint->FirstChildElement("linearNonHookeanDamping"), result.linearNonHookeanDamping, result.valid, context);
-		result.angularNonHookeanDamping = ReadRequiredVector3(a_constraint->FirstChildElement("angularNonHookeanDamping"), result.angularNonHookeanDamping, result.valid, context);
-		result.linearNonHookeanStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("linearNonHookeanStiffness"), result.linearNonHookeanStiffness, result.valid, context);
-		result.angularNonHookeanStiffness = ReadRequiredVector3(a_constraint->FirstChildElement("angularNonHookeanStiffness"), result.angularNonHookeanStiffness, result.valid, context);
-		result.linearEquilibrium = ReadRequiredVector3(a_constraint->FirstChildElement("linearEquilibrium"), result.linearEquilibrium, result.valid, context);
-		result.angularEquilibrium = ReadRequiredVector3(a_constraint->FirstChildElement("angularEquilibrium"), result.angularEquilibrium, result.valid, context);
-		result.linearBounce = ReadRequiredVector3(a_constraint->FirstChildElement("linearBounce"), result.linearBounce, result.valid, context);
-		result.angularBounce = ReadRequiredVector3(a_constraint->FirstChildElement("angularBounce"), result.angularBounce, result.valid, context);
-		result.linearTargetVelocity = ReadRequiredVector3(a_constraint->FirstChildElement("linearTargetVelocity"), result.linearTargetVelocity, result.valid, context);
-		result.angularTargetVelocity = ReadRequiredVector3(a_constraint->FirstChildElement("angularTargetVelocity"), result.angularTargetVelocity, result.valid, context);
-		result.linearMaxMotorForce = ReadRequiredVector3(a_constraint->FirstChildElement("linearMaxMotorForce"), result.linearMaxMotorForce, result.valid, context);
-		result.angularMaxMotorForce = ReadRequiredVector3(a_constraint->FirstChildElement("angularMaxMotorForce"), result.angularMaxMotorForce, result.valid, context);
-		result.enableLinearSprings = ReadBool(a_constraint, "enableLinearSprings", result.enableLinearSprings);
-		result.enableAngularSprings = ReadBool(a_constraint, "enableAngularSprings", result.enableAngularSprings);
-		result.linearStiffnessLimited = ReadBool(a_constraint, "linearStiffnessLimited", result.linearStiffnessLimited);
-		result.angularStiffnessLimited = ReadBool(a_constraint, "angularStiffnessLimited", result.angularStiffnessLimited);
-		result.springDampingLimited = ReadBool(a_constraint, "springDampingLimited", result.springDampingLimited);
-		result.linearMotors = ReadBool(a_constraint, "linearMotors", result.linearMotors);
-		result.angularMotors = ReadBool(a_constraint, "angularMotors", result.angularMotors);
-		result.linearServoMotors = ReadBool(a_constraint, "linearServoMotors", result.linearServoMotors);
-		result.angularServoMotors = ReadBool(a_constraint, "angularServoMotors", result.angularServoMotors);
-		result.motorErp = ReadFloat(a_constraint, "motorERP", result.motorErp);
-		result.motorCfm = ReadFloat(a_constraint, "motorCFM", result.motorCfm);
-		result.stopErp = ReadFloat(a_constraint, "stopERP", result.stopErp);
-		result.stopCfm = ReadFloat(a_constraint, "stopCFM", result.stopCfm);
-
-		result.swingSpan1 = std::max(ReadFloat(a_constraint, "swingSpan1", ReadFloat(a_constraint, "coneLimit", ReadFloat(a_constraint, "limitZ", result.swingSpan1))), 0.0F);
-		result.swingSpan2 = std::max(ReadFloat(a_constraint, "swingSpan2", ReadFloat(a_constraint, "planeLimit", ReadFloat(a_constraint, "limitY", result.swingSpan2))), 0.0F);
-		result.twistSpan = std::max(ReadFloat(a_constraint, "twistSpan", ReadFloat(a_constraint, "twistLimit", ReadFloat(a_constraint, "limitX", result.twistSpan))), 0.0F);
-		result.limitSoftness = std::clamp(ReadFloat(a_constraint, "limitSoftness", result.limitSoftness), 0.0F, 1.0F);
-		result.biasFactor = std::clamp(ReadFloat(a_constraint, "biasFactor", result.biasFactor), 0.0F, 1.0F);
-		result.relaxationFactor = std::clamp(ReadFloat(a_constraint, "relaxationFactor", result.relaxationFactor), 0.0F, 1.0F);
-
-		result.minDistanceFactor = std::max(ReadFloat(a_constraint, "minDistanceFactor", result.minDistanceFactor), 0.0F);
-		result.maxDistanceFactor = std::max(ReadFloat(a_constraint, "maxDistanceFactor", result.maxDistanceFactor), 0.0F);
-		result.stiffness = std::max(ReadFloat(a_constraint, "stiffness", result.stiffness), 0.0F);
-		result.damping = std::max(ReadFloat(a_constraint, "damping", result.damping), 0.0F);
-		result.equilibriumFactor = std::clamp(ReadFloat(a_constraint, "equilibrium", result.equilibriumFactor), 0.0F, 1.0F);
 		return result;
 	}
 
