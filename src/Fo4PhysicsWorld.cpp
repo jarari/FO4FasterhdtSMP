@@ -46,6 +46,7 @@
 #	undef max
 #endif
 
+#include <BulletCollision/CollisionDispatch/btSimulationIslandManager.h>
 #include <btBulletDynamicsCommon.h>
 
 #include <array>
@@ -277,6 +278,75 @@ namespace
 				m_dispatcher1->dispatchAllCollisionPairs(m_broadphasePairCache->getOverlappingPairCache(), dispatchInfo, m_dispatcher1);
 			}
 			AddFrameCollisionProfile(ElapsedMs(profileStart, Clock::now()));
+		}
+
+		void calculateSimulationIslands() override
+		{
+			BT_PROFILE("calculateSimulationIslands");
+			getSimulationIslandManager()->updateActivationState(getCollisionWorld(), getCollisionWorld()->getDispatcher());
+
+			auto* unionFind = std::addressof(getSimulationIslandManager()->getUnionFind());
+
+			for (int index = 0; index < m_predictiveManifolds.size(); ++index) {
+				auto* manifold = m_predictiveManifolds[index];
+				const auto* object0 = manifold->getBody0();
+				const auto* object1 = manifold->getBody1();
+				if (object0 && !object0->isStaticOrKinematicObject() &&
+					object1 && !object1->isStaticOrKinematicObject()) {
+					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
+				}
+			}
+
+			for (int index = 0; index < m_constraints.size(); ++index) {
+				auto* constraint = m_constraints[index];
+				if (!constraint || !constraint->isEnabled()) {
+					continue;
+				}
+
+				const auto* object0 = std::addressof(constraint->getRigidBodyA());
+				const auto* object1 = std::addressof(constraint->getRigidBodyB());
+				if (!object0->isStaticOrKinematicObject() && !object1->isStaticOrKinematicObject()) {
+					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
+				}
+			}
+
+			auto* dispatcher = getCollisionWorld()->getDispatcher();
+			const auto manifoldCount = dispatcher ? dispatcher->getNumManifolds() : 0;
+			for (int index = 0; index < manifoldCount; ++index) {
+				auto* manifold = dispatcher->getManifoldByIndexInternal(index);
+				if (!manifold || manifold->getNumContacts() <= 0) {
+					continue;
+				}
+
+				const auto* object0 = static_cast<const btCollisionObject*>(manifold->getBody0());
+				const auto* object1 = static_cast<const btCollisionObject*>(manifold->getBody1());
+				if (object0 && !object0->isStaticOrKinematicObject() &&
+					object1 && !object1->isStaticOrKinematicObject()) {
+					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
+				}
+			}
+
+			getSimulationIslandManager()->storeIslandActivationState(getCollisionWorld());
+		}
+
+		void solveConstraints(btContactSolverInfo& a_solverInfo) override
+		{
+			BT_PROFILE("solveConstraints");
+			if (!m_collisionObjects.size()) {
+				return;
+			}
+
+			for (int index = 0; index < m_constraints.size(); ++index) {
+				auto* constraint = m_constraints[index];
+				if (constraint && constraint->isEnabled() &&
+					constraint->getRigidBodyA().isStaticOrKinematicObject() &&
+					constraint->getRigidBodyB().isStaticOrKinematicObject()) {
+					constraint->setEnabled(false);
+				}
+			}
+
+			btDiscreteDynamicsWorld::solveConstraints(a_solverInfo);
+			static_cast<hdt::CollisionDispatcher*>(m_dispatcher1)->clearAllManifold();
 		}
 
 		void integrateTransforms(const btScalar a_timeStep) override

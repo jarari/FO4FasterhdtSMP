@@ -178,9 +178,6 @@ namespace Smp
 		if (!translationOffset.fuzzyZero()) {
 			RefreshSkinnedMeshWorldState(*dynamicsWorld_);
 		}
-		if (dispatcher_) {
-			dispatcher_->clearAllManifold();
-		}
 		const auto bulletMs = ElapsedMs(phaseStart, Clock::now());
 		std::uint32_t collisionCalls = 0;
 		const auto collisionMs = ConsumeFrameCollisionProfile(collisionCalls);
