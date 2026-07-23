@@ -6,7 +6,7 @@
 		std::unique_ptr<btDefaultCollisionConfiguration> collisionConfiguration_;
 		std::unique_ptr<hdt::CollisionDispatcher> dispatcher_;
 		std::unique_ptr<btBroadphaseInterface> broadphase_;
-		std::unique_ptr<btSequentialImpulseConstraintSolver> solver_;
+		std::unique_ptr<btConstraintSolverPoolMt> solver_;
 		std::unique_ptr<btDiscreteDynamicsWorld> dynamicsWorld_;
 		std::uint64_t candidateEvents_{ 0 };
 		std::uint64_t simulationFrame_{ 1 };

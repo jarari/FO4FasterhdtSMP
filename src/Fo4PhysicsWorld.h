@@ -20,11 +20,11 @@
 class btBroadphaseInterface;
 class btCollisionDispatcher;
 class btCollisionShape;
+class btConstraintSolverPoolMt;
 class btDefaultCollisionConfiguration;
 struct btDefaultMotionState;
 class btDiscreteDynamicsWorld;
 class btRigidBody;
-class btSequentialImpulseConstraintSolver;
 class btTypedConstraint;
 
 namespace RE

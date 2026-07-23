@@ -47,6 +47,8 @@
 #endif
 
 #include <BulletCollision/CollisionDispatch/btSimulationIslandManager.h>
+#include <BulletDynamics/Dynamics/btDiscreteDynamicsWorldMt.h>
+#include <LinearMath/btThreads.h>
 #include <btBulletDynamicsCommon.h>
 
 #include <array>
@@ -189,6 +191,19 @@ namespace
 		return collisionMs;
 	}
 
+	int InitializeBulletTaskSchedulerAndGetThreadCount()
+	{
+		auto* scheduler = btGetTBBTaskScheduler();
+		if (!scheduler) {
+			scheduler = btGetSequentialTaskScheduler();
+		}
+		btSetTaskScheduler(scheduler);
+
+		const auto concurrency = std::max(1, scheduler->getMaxNumThreads());
+		spdlog::info("FO4 Faster HDT-SMP constraint solving is using {} threads", concurrency);
+		return concurrency;
+	}
+
 	class OwnedCompoundShape :
 		public btCompoundShape
 	{
@@ -197,10 +212,10 @@ namespace
 	};
 
 	class PrototypeDynamicsWorld :
-		public btDiscreteDynamicsWorld
+		public btDiscreteDynamicsWorldMt
 	{
 	public:
-		using btDiscreteDynamicsWorld::btDiscreteDynamicsWorld;
+		using btDiscreteDynamicsWorldMt::btDiscreteDynamicsWorldMt;
 
 		int StepReference(const btScalar a_remainingTimeStep, const btScalar a_fixedTimeStep)
 		{
@@ -235,7 +250,7 @@ namespace
 				}
 			}
 
-			btDiscreteDynamicsWorld::applyGravity();
+			btDiscreteDynamicsWorldMt::applyGravity();
 		}
 
 		void performDiscreteCollisionDetection() override
@@ -336,16 +351,7 @@ namespace
 				return;
 			}
 
-			for (int index = 0; index < m_constraints.size(); ++index) {
-				auto* constraint = m_constraints[index];
-				if (constraint && constraint->isEnabled() &&
-					constraint->getRigidBodyA().isStaticOrKinematicObject() &&
-					constraint->getRigidBodyB().isStaticOrKinematicObject()) {
-					constraint->setEnabled(false);
-				}
-			}
-
-			btDiscreteDynamicsWorld::solveConstraints(a_solverInfo);
+			btDiscreteDynamicsWorldMt::solveConstraints(a_solverInfo);
 			static_cast<hdt::CollisionDispatcher*>(m_dispatcher1)->clearAllManifold();
 		}
 
@@ -385,7 +391,7 @@ namespace
 				body->setAngularVelocity(angularVelocity);
 			}
 
-			btDiscreteDynamicsWorld::integrateTransforms(a_timeStep);
+			btDiscreteDynamicsWorldMt::integrateTransforms(a_timeStep);
 		}
 	};
 

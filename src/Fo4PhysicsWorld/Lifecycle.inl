@@ -12,8 +12,13 @@ namespace Smp
 		collisionConfiguration_ = std::make_unique<btDefaultCollisionConfiguration>();
 		dispatcher_ = std::make_unique<hdt::CollisionDispatcher>(collisionConfiguration_.get());
 		broadphase_ = std::make_unique<btDbvtBroadphase>();
-		solver_ = std::make_unique<btSequentialImpulseConstraintSolver>();
-		dynamicsWorld_ = std::make_unique<PrototypeDynamicsWorld>(dispatcher_.get(), broadphase_.get(), solver_.get(), collisionConfiguration_.get());
+		solver_ = std::make_unique<btConstraintSolverPoolMt>(InitializeBulletTaskSchedulerAndGetThreadCount());
+		dynamicsWorld_ = std::make_unique<PrototypeDynamicsWorld>(
+			dispatcher_.get(),
+			broadphase_.get(),
+			solver_.get(),
+			nullptr,
+			collisionConfiguration_.get());
 		dynamicsWorld_->setGravity(btVector3(0.0F, 0.0F, kGravityAcceleration));
 		auto& solverInfo = dynamicsWorld_->getSolverInfo();
 		solverInfo.m_numIterations = solverIterations_;
