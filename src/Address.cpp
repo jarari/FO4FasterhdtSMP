@@ -15,7 +15,6 @@ namespace Smp::Address
 	REL::Relocation<std::uintptr_t> BipedAnimAttachSkinnedObject{ REL::ID{ 1575810, 2194388 } };
 	REL::Relocation<std::uintptr_t> BipedAnimAttachToParent{ REL::ID{ 1370428, 2194378 } };
 	REL::Relocation<std::uintptr_t> BipedAnimRemovePart{ REL::ID{ 575576, 2194342 } };
-	REL::Relocation<std::uintptr_t> Update3DModel{ REL::ID{ 986782, 2231882 } };
 	REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
 	REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ BSFaceGenAddHeadPartOnActorID };
 	REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 2209387 } };
@@ -35,7 +34,6 @@ namespace Smp::Address
 	const VariantOffset BipedAnimAttachSkinnedObjectPrologueSize{ 15, 16 };
 	const VariantOffset BipedAnimAttachToParentPrologueSize{ 15, 15 };
 	const VariantOffset BipedAnimRemovePartPrologueSize{ 15, 18 };
-	const VariantOffset Update3DModelPrologueSize{ 5, 5 };
 	const VariantOffset Reset3DPrologueSize{ 5, 5 };
 	const VariantOffset BSFaceGenModelExtraDataSetBoneNamePrologueSize{ 5, 5 };
 	const VariantOffset LooksMenuUtilsShowLooksMenuPrologueSize{ 5, 5 };

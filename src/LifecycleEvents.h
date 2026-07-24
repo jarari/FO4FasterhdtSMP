@@ -21,7 +21,6 @@ namespace Smp
 		kActorHeadInitialized,
 		kHeadSkinAllGeometry,
 		kHeadSkinSingleGeometry,
-		kActorUpdate3DModel,
 		kActorReset3D
 	};
 

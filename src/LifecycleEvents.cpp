@@ -143,8 +143,6 @@ namespace Smp
 			return "HeadSkinAllGeometry";
 		case LifecycleEventType::kHeadSkinSingleGeometry:
 			return "HeadSkinSingleGeometry";
-		case LifecycleEventType::kActorUpdate3DModel:
-			return "ActorUpdate3DModel";
 		case LifecycleEventType::kActorReset3D:
 			return "ActorReset3D";
 		default:

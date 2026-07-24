@@ -46,7 +46,6 @@ namespace Smp::Address
 	extern REL::Relocation<std::uintptr_t> BipedAnimAttachSkinnedObject;
 	extern REL::Relocation<std::uintptr_t> BipedAnimAttachToParent;
 	extern REL::Relocation<std::uintptr_t> BipedAnimRemovePart;
-	extern REL::Relocation<std::uintptr_t> Update3DModel;
 	extern REL::Relocation<std::uintptr_t> Reset3D;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName;
@@ -59,7 +58,6 @@ namespace Smp::Address
 	extern const VariantOffset BipedAnimAttachSkinnedObjectPrologueSize;
 	extern const VariantOffset BipedAnimAttachToParentPrologueSize;
 	extern const VariantOffset BipedAnimRemovePartPrologueSize;
-	extern const VariantOffset Update3DModelPrologueSize;
 	extern const VariantOffset Reset3DPrologueSize;
 	extern const VariantOffset BSFaceGenModelExtraDataSetBoneNamePrologueSize;
 	extern const VariantOffset LooksMenuUtilsShowLooksMenuPrologueSize;

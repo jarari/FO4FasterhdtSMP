@@ -216,7 +216,6 @@ namespace Smp
 			spdlog::debug("prototype physics detach begin actor={} object={}", static_cast<void*>(a_event.actor), static_cast<void*>(a_event.object));
 			break;
 		case LifecycleEventType::kActorReset3D:
-		case LifecycleEventType::kActorUpdate3DModel:
 			spdlog::debug("prototype physics actor rebuild/reset actor={} object={}", static_cast<void*>(a_event.actor), static_cast<void*>(a_event.object));
 			break;
 		default:

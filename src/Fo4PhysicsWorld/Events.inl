@@ -168,12 +168,6 @@ namespace Smp
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object),
 				queuedSoftReload);
-		} else if (a_event.type == LifecycleEventType::kActorUpdate3DModel) {
-			spdlog::trace(
-				"physics world observed per-frame update candidate {} actor={} object={}; pending rebuilds run from Main::OnIdle",
-				ToString(a_event.type),
-				static_cast<void*>(a_event.actor),
-				static_cast<void*>(a_event.object));
 		} else if (IsHeadCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
 			if (DeferCharacterCustomizationLifecycleLocked(a_event, false, true)) {

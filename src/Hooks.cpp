@@ -35,7 +35,6 @@ namespace Hooks
 	using ActorLoad3D_t = RE::NiAVObject* (*)(RE::TESObjectREFR*, bool);
 	using Set3D_t = void (*)(RE::TESObjectREFR*, RE::NiAVObject*, bool);
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
-	using Update3DModel_t = void (*)(void*, RE::Actor*, bool);
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
@@ -53,7 +52,6 @@ namespace Hooks
 	Set3D_t                        OriginalPlayerCharacterSet3D{ nullptr };
 	OnHeadInitialized_t            OriginalActorOnHeadInitialized{ nullptr };
 	OnHeadInitialized_t            OriginalPlayerCharacterOnHeadInitialized{ nullptr };
-	Update3DModel_t                OriginalUpdate3DModel{ nullptr };
 	Reset3D_t                      OriginalReset3D{ nullptr };
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
@@ -292,7 +290,6 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
 		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
-		LogRelocationTarget("AIProcess::Update3DModel", Address::Update3DModel.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
 		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
@@ -302,7 +299,6 @@ namespace Hooks
 	void EmitEvent(const Smp::LifecycleEvent& a_event)
 	{
 		const auto highFrequency =
-			a_event.type == Smp::LifecycleEventType::kActorUpdate3DModel ||
 			(a_event.type == Smp::LifecycleEventType::kActorSet3D && !a_event.object) ||
 			((a_event.type == Smp::LifecycleEventType::kArmorApplySkinnedObjects ||
 				 a_event.type == Smp::LifecycleEventType::kArmorAttachSkinnedObject) &&
@@ -696,16 +692,6 @@ namespace Hooks
 		OriginalMainSwap(a_main);
 	}
 
-	void HookedUpdate3DModel(void* a_middleProcess, RE::Actor* a_actor, bool a_flag)
-	{
-		OriginalUpdate3DModel(a_middleProcess, a_actor, a_flag);
-		EmitEvent({
-			.type = Smp::LifecycleEventType::kActorUpdate3DModel,
-			.actor = a_actor,
-			.object = a_actor ? a_actor->Get3D() : nullptr,
-		});
-	}
-
 	void HookedReset3D(RE::Actor* a_actor, bool a_reloadAll, std::uint32_t a_additionalFlags, bool a_queueReset, std::uint32_t a_excludeFlags)
 	{
 		OriginalReset3D(a_actor, a_reloadAll, a_additionalFlags, a_queueReset, a_excludeFlags);
@@ -771,9 +757,6 @@ namespace Hooks
 				reinterpret_cast<void*>(&HookedFaceGenSkinAllGeometry));
 		}
 
-		if (!OriginalUpdate3DModel) {
-			OriginalUpdate3DModel = CreateBranchGateway5<Update3DModel_t>("AIProcess::Update3DModel", Address::Update3DModel, Address::Update3DModelPrologueSize.value(), reinterpret_cast<void*>(&HookedUpdate3DModel));
-		}
 		if (!OriginalReset3D) {
 			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Address::Reset3D, Address::Reset3DPrologueSize.value(), reinterpret_cast<void*>(&HookedReset3D));
 		}
@@ -811,7 +794,6 @@ namespace Hooks
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
 			OriginalFaceGenSkinAllGeometry &&
-			OriginalUpdate3DModel &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
 			OriginalSetFaceGenBoneName &&
