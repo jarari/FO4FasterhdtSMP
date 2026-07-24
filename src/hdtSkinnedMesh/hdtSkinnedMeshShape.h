@@ -1,7 +1,6 @@
 #pragma once
 
 #include "hdtCollider.h"
-#include "hdtCollisionAlgorithm.h"
 #include "hdtSkinnedMeshBody.h"
 
 namespace hdt

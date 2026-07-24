@@ -374,12 +374,41 @@ namespace Smp
 
 	void Fo4PhysicsWorld::ApplyWindForcesLocked()
 	{
-		if (currentWind_.length2() <= SIMD_EPSILON) {
+		const auto windMagnitude = currentWind_.length();
+		if (windMagnitude <= SIMD_EPSILON) {
 			for (auto& actorState : prototypeActors_) {
 				actorState.currentWindFactor = 0.0F;
 			}
 			return;
 		}
+
+		constexpr btScalar kMaxFrameStep = 0.1F;
+		constexpr btScalar kTimeWrap = 4096.0F;
+		constexpr btScalar kResponseToBodyVelocity = 0.08F;
+		constexpr btScalar kGustSpeedPerForce = 7.0F;
+		constexpr btScalar kMinGustSpeed = 180.0F;
+		constexpr btScalar kMaxGustSpeed = 1200.0F;
+		constexpr btScalar kCrosswindTimeScale = 0.004F;
+		constexpr btScalar kVerticalPhaseScale = 0.006F;
+		constexpr btScalar kPressureCenterOffset = 0.8F;
+
+		windTime_ += hdt::clampScalar(currentStepSeconds_, 0.0F, kMaxFrameStep);
+		if (windTime_ > kTimeWrap) {
+			windTime_ -= kTimeWrap;
+		}
+
+		const auto windDirection = currentWind_ / windMagnitude;
+		const btVector3 up(0.0F, 0.0F, 1.0F);
+		auto side = windDirection.cross(up);
+		if (btFuzzyZero(side.length2())) {
+			side = btVector3(1.0F, 0.0F, 0.0F);
+		} else {
+			side.normalize();
+		}
+		const auto gustSpeed = hdt::clampScalar(
+			windMagnitude * kGustSpeedPerForce,
+			kMinGustSpeed,
+			kMaxGustSpeed);
 
 		for (auto& actorState : prototypeActors_) {
 			if (actorState.runtimeSoftSuspended) {
@@ -407,10 +436,53 @@ namespace Smp
 					continue;
 				}
 
-				const auto boneWind = randomizePerBoneWind_ ?
-					actorWind * StableWindVariation(prototypeBody.boneName) :
-					actorWind;
-				prototypeBody.bone->m_rig.applyCentralForce(boneWind * prototypeBody.bone->m_windFactor);
+				auto& body = prototypeBody.bone->m_rig;
+				const auto variation = randomizePerBoneWind_ ?
+					StableWindVariation(prototypeBody.boneName) :
+					1.0F;
+				const auto windFactor = prototypeBody.bone->m_windFactor * variation;
+				const auto origin = body.getWorldTransform().getOrigin();
+				const auto advectedTime =
+					windTime_ -
+					origin.dot(windDirection) / gustSpeed -
+					origin.dot(side) * kCrosswindTimeScale;
+				const auto verticalPhase = origin.getZ() * kVerticalPhaseScale;
+
+				const auto longGust = std::sin(advectedTime * 0.55F + verticalPhase * 0.35F);
+				const auto midGust = std::sin(advectedTime * 1.35F + verticalPhase + longGust * 0.5F);
+				const auto flutter = std::sin(advectedTime * 4.15F + verticalPhase * 2.2F + midGust);
+				const auto gustPulse = 0.5F + 0.5F * std::sin(advectedTime * 0.85F + verticalPhase * 0.6F);
+				const auto gustBurst = gustPulse * gustPulse;
+				const auto gustScale = hdt::clampScalar(
+					0.68F +
+						longGust * 0.18F +
+						midGust * 0.12F +
+						flutter * 0.06F +
+						gustBurst * 0.45F,
+					0.35F,
+					1.55F);
+				const auto relativeScale = hdt::clampScalar(
+					(currentWind_ - body.getLinearVelocity() * kResponseToBodyVelocity)
+						.dot(windDirection) /
+						windMagnitude,
+					0.0F,
+					1.4F);
+				const auto baseMagnitude = windMagnitude * actorWindScale * windFactor;
+				const auto sidewaysFlutter =
+					(midGust * 0.13F + flutter * 0.06F + gustBurst * 0.04F) *
+					baseMagnitude;
+				const auto verticalFlutter =
+					(std::sin(advectedTime * 1.9F + verticalPhase * 1.4F) * 0.018F +
+						flutter * 0.01F) *
+					baseMagnitude;
+				const auto windForce =
+					actorWind * windFactor * gustScale * relativeScale +
+					side * sidewaysFlutter +
+					up * verticalFlutter;
+				const auto pressureOffset =
+					(side * midGust + up * (0.35F + flutter * 0.25F)) *
+					kPressureCenterOffset;
+				body.applyForce(windForce, pressureOffset);
 			}
 		}
 	}
@@ -588,16 +660,6 @@ namespace Smp
 				if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
 					continue;
 				}
-				const auto resetReadPending = std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
-						return a_runtime.pendingResetPhysicsRead;
-					});
-				if (resetReadPending) {
-					skippedDuplicate = true;
-					spdlog::trace(
-						"skipping prototype writeback until pending reset physics read completes actor={}",
-						static_cast<void*>(actorState.actor));
-					continue;
-				}
 				if (!CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					skippedDuplicate = true;
 					continue;
@@ -628,7 +690,16 @@ namespace Smp
 					wroteAny = true;
 				};
 				if (!actorState.runtimes.empty()) {
-					for (const auto& runtime : actorState.runtimes) {
+					for (auto& runtime : actorState.runtimes) {
+						if (runtime.pendingResetPhysicsWriteback) {
+							skippedDuplicate = true;
+							spdlog::trace(
+								"skipping first prototype writeback after reset physics read actor={} buildGroup={}",
+								static_cast<void*>(actorState.actor),
+								runtime.buildGroup);
+							runtime.pendingResetPhysicsWriteback = false;
+							continue;
+						}
 						for (auto* bone : runtime.bones) {
 							auto body = std::ranges::find_if(actorState.bodies, [bone](const PrototypeBody& a_body) {
 								return a_body.bone.get() == bone;
@@ -677,16 +748,6 @@ namespace Smp
 					continue;
 				}
 
-				const auto resetReadPending = std::ranges::any_of(actorState.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
-						return a_runtime.pendingResetPhysicsRead;
-					});
-				if (resetReadPending) {
-					skippedDuplicate = true;
-					spdlog::trace(
-						"skipping targeted prototype writeback until pending reset physics read completes actor={}",
-						static_cast<void*>(actorState.actor));
-					continue;
-				}
 				if (CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					actorState.lastWritebackFrame = simulationFrame_;
 					actorState.lastWritebackSource = a_source;
@@ -714,7 +775,16 @@ namespace Smp
 						wroteAny = true;
 					};
 					if (!actorState.runtimes.empty()) {
-						for (const auto& runtime : actorState.runtimes) {
+						for (auto& runtime : actorState.runtimes) {
+							if (runtime.pendingResetPhysicsWriteback) {
+								skippedDuplicate = true;
+								spdlog::trace(
+									"skipping first targeted prototype writeback after reset physics read actor={} buildGroup={}",
+									static_cast<void*>(actorState.actor),
+									runtime.buildGroup);
+								runtime.pendingResetPhysicsWriteback = false;
+								continue;
+							}
 							for (auto* bone : runtime.bones) {
 								auto body = std::ranges::find_if(actorState.bodies, [bone](const PrototypeBody& a_body) {
 									return a_body.bone.get() == bone;

@@ -99,10 +99,28 @@ namespace hdt
 			const auto radius0 = sphere0.marginMultiplier() * this->shapeProp0->margin;
 			const auto sphere1 = this->vertices1[a_rhs->vertex_];
 			const auto radius1 = sphere1.marginMultiplier() * this->shapeProp1->margin;
-			const auto result = checkSphereSphere(sphere0.pos(), sphere1.pos(), radius0, radius1, a_result);
+			const auto position0 = sphere0.pos();
+			const auto position1 = sphere1.pos();
+			const auto difference = position0 - position1;
+			const auto distanceSquared = difference.length2();
+			const auto radiusSum = radius0 + radius1;
+			if (distanceSquared > radiusSum * radiusSum) {
+				return false;
+			}
+
+			const auto distance = btSqrt(distanceSquared);
+			auto normal = btVector3(1.0F, 0.0F, 0.0F);
+			if (distance > FLT_EPSILON) {
+				normal = difference / distance;
+			}
+
+			a_result.normOnB = normal;
+			a_result.depth = distance - radiusSum;
+			a_result.posA = position0 - normal * radius0;
+			a_result.posB = position1 + normal * radius1;
 			a_result.colliderA = a_lhs;
 			a_result.colliderB = a_rhs;
-			return result;
+			return true;
 		}
 	};
 
@@ -122,7 +140,7 @@ namespace hdt
 			const auto point0 = this->vertices1[a_rhs->vertices_[0]];
 			const auto point1 = this->vertices1[a_rhs->vertices_[1]];
 			const auto point2 = this->vertices1[a_rhs->vertices_[2]];
-			auto margin = (point0.marginMultiplier() + point1.marginMultiplier() + point2.marginMultiplier()) / 3.0F;
+			auto margin = (point0.marginMultiplier() + point1.marginMultiplier() + point2.marginMultiplier()) * (1.0F / 3.0F);
 			auto penetration = this->shapeProp1->penetration * margin;
 			margin *= this->shapeProp1->margin;
 			if (penetration > -FLT_EPSILON && penetration < FLT_EPSILON) {
@@ -158,6 +176,7 @@ namespace hdt
 				}
 				return distanceFromPlane < radiusWithMargin;
 			}();
+			// This has a very high early rejection rate, up to ~60% on average.
 			if (!insideContactPlane) {
 				return false;
 			}
@@ -232,8 +251,11 @@ namespace hdt
 
 		int operator()()
 		{
-			std::vector<std::pair<ColliderTree*, ColliderTree*>> pairs;
-			pairs.reserve(this->tree0->numCollider_ + this->tree1->numCollider_);
+			thread_local std::vector<std::pair<ColliderTree*, ColliderTree*>> pairs;
+			pairs.clear();
+			if (pairs.capacity() < 256) {
+				pairs.reserve(256);
+			}
 			this->tree0->checkCollisionL(this->tree1, pairs);
 			if (pairs.empty() || pairs.size() > MaxCollisionPairs) {
 				return 0;
@@ -291,8 +313,8 @@ namespace hdt
 			};
 
 			if (pairs.size() >= ParallelCollisionPairThreshold) {
-				// Isolate inner work so a waiting worker cannot steal an outer collision task
-				// that would alias thread_local MergeBuffer/listA/listB state.
+				// If this is changed from isolate, every thread_local collision buffer
+				// used by this path must be reviewed for task-stealing aliasing.
 				tbb::this_task_arena::isolate([&]() {
 					tbb::parallel_for_each(pairs.begin(), pairs.end(), processPair);
 				});

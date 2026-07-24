@@ -124,6 +124,7 @@ namespace Smp
 			for (auto& actorState : prototypeActors_) {
 				for (auto& runtime : actorState.runtimes) {
 					runtime.pendingResetPhysicsRead = true;
+					runtime.pendingResetPhysicsWriteback = true;
 				}
 				if (actorState.actor &&
 					std::ranges::none_of(actors, [&](const auto& a_entry) {

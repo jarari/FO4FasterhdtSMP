@@ -3,6 +3,7 @@
 #include <btBulletCollisionCommon.h>
 #include <btBulletDynamicsCommon.h>
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cassert>
@@ -134,6 +135,11 @@ namespace hdt
 	inline U32 aligned2Pow(U32 a_limit)
 	{
 		return std::bit_floor(a_limit);
+	}
+
+	inline btScalar clampScalar(const btScalar a_value, const btScalar a_low, const btScalar a_high)
+	{
+		return std::clamp(a_value, a_low, a_high);
 	}
 
 	inline btVector3 vectorFromM128(__m128 a_value)

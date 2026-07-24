@@ -110,11 +110,24 @@ namespace hdt
 
 	btVector3 PerTriangleShape::baryCoord(const Collider* a_collider, const btVector3& a_point)
 	{
-		return BaryCoord(
-			owner_->vertexPositions_[a_collider->vertices_[0]].pos(),
-			owner_->vertexPositions_[a_collider->vertices_[1]].pos(),
-			owner_->vertexPositions_[a_collider->vertices_[2]].pos(),
-			a_point);
+		const auto point0 = owner_->vertexPositions_[a_collider->vertices_[0]].pos();
+		const auto point1 = owner_->vertexPositions_[a_collider->vertices_[1]].pos();
+		const auto point2 = owner_->vertexPositions_[a_collider->vertices_[2]].pos();
+		const auto side0 = point0 - a_point;
+		const auto side1 = point1 - a_point;
+		const auto side2 = point2 - a_point;
+		auto area0 = btCross(side0, side1).get128();
+		auto area1 = btCross(side1, side2).get128();
+		auto area2 = btCross(side2, side0).get128();
+		area0 = _mm_dp_ps(area0, area0, 0x74);
+		area1 = _mm_dp_ps(area1, area1, 0x71);
+		area2 = _mm_dp_ps(area2, area2, 0x72);
+		area0 = _mm_or_ps(area0, area1);
+		area0 = _mm_or_ps(area0, area2);
+		area0 = _mm_sqrt_ps(area0);
+		area1 = _mm_set_ps1(1.0F);
+		area1 = _mm_dp_ps(area1, area0, 0x77);
+		return vectorFromM128(_mm_div_ps(area0, area1));
 	}
 
 	void PerTriangleShape::finishBuild()

@@ -104,6 +104,7 @@
 			std::vector<Fo4SkinnedMeshBone*> bones;
 			std::vector<btTypedConstraint*> constraints;
 			bool pendingResetPhysicsRead{ false };
+			bool pendingResetPhysicsWriteback{ false };
 		};
 
 		struct PrototypeReadPreparation

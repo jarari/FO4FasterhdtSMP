@@ -16,8 +16,12 @@
 #include "PhysicsProfiler.h"
 #include "SmpConfig.h"
 #include "hdtSkinnedMesh/hdtDispatcher.h"
+#include "hdtSkinnedMesh/hdtConeTwistConstraint.h"
+#include "hdtSkinnedMesh/hdtGeneric6DofConstraint.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshShape.h"
+#include "hdtSkinnedMesh/hdtSkinnedMeshWorld.h"
+#include "hdtSkinnedMesh/hdtStiffSpringConstraint.h"
 #include "RE/B/BipedAnim.h"
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/bhkPickData.h"
@@ -64,6 +68,7 @@
 #include <string_view>
 #include <tbb/parallel_for.h>
 #include <tbb/task_group.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -216,201 +221,24 @@ namespace
 	};
 
 	class PrototypeDynamicsWorld :
-		public btDiscreteDynamicsWorldMt
+		public hdt::SkinnedMeshWorld
 	{
 	public:
-		using btDiscreteDynamicsWorldMt::btDiscreteDynamicsWorldMt;
+		using hdt::SkinnedMeshWorld::SkinnedMeshWorld;
 
 		int StepReference(const btScalar a_remainingTimeStep, const btScalar a_fixedTimeStep)
 		{
 			BT_PROFILE("FO4FasterHdtSMP_StepReference");
-			auto remainingTimeStep = a_remainingTimeStep;
-			applyGravity();
-
-			while (remainingTimeStep > a_fixedTimeStep) {
-				internalSingleStepSimulation(a_fixedTimeStep);
-				remainingTimeStep -= a_fixedTimeStep;
-			}
-
-			constexpr auto minPossiblePeriod = btScalar(1.0F / 300.0F);
-			if (remainingTimeStep > minPossiblePeriod) {
-				internalSingleStepSimulation(remainingTimeStep);
-			}
-
-			clearForces();
-			return 0;
-		}
-
-		void applyGravity() override
-		{
-			BT_PROFILE("applyGravity");
-			const auto worldGravity = getGravity();
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				auto* body = btRigidBody::upcast(m_collisionObjects[index]);
-				if (!body || body->isStaticOrKinematicObject() || (body->getFlags() & BT_DISABLE_WORLD_GRAVITY)) {
-					continue;
-				}
-
-				if (const auto* bone = static_cast<hdt::SkinnedMeshBone*>(body->getUserPointer())) {
-					body->setGravity(worldGravity * std::clamp(bone->m_gravityFactor, 0.0F, 1.0F));
-				}
-			}
-
-			btDiscreteDynamicsWorldMt::applyGravity();
+			return stepReference(a_remainingTimeStep, a_fixedTimeStep);
 		}
 
 		void performDiscreteCollisionDetection() override
 		{
-			BT_PROFILE("performDiscreteCollisionDetection");
 			const auto profileStart = Clock::now();
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				if (auto* rigidBody = btRigidBody::upcast(m_collisionObjects[index])) {
-					if (auto* bone = static_cast<hdt::SkinnedMeshBone*>(rigidBody->getUserPointer())) {
-						bone->internalUpdate();
-					}
-				}
-			}
-
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				auto* object = m_collisionObjects[index];
-				if (!object || !object->getCollisionShape() || object->getCollisionShape()->getShapeType() != CUSTOM_CONCAVE_SHAPE_TYPE) {
-					continue;
-				}
-
-				auto* meshBody = static_cast<hdt::SkinnedMeshBody*>(object);
-				meshBody->updateBoundingSphereAabb();
-			}
-
-			btDispatcherInfo& dispatchInfo = getDispatchInfo();
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				auto* object = m_collisionObjects[index];
-				auto* proxy = object ? object->getBroadphaseHandle() : nullptr;
-				if (!object || !proxy || (proxy->m_collisionFilterGroup == 0 && proxy->m_collisionFilterMask == 0)) {
-					continue;
-				}
-
-				btVector3 minAabb;
-				btVector3 maxAabb;
-				object->getCollisionShape()->getAabb(object->getWorldTransform(), minAabb, maxAabb);
-				m_broadphasePairCache->setAabb(proxy, minAabb, maxAabb, m_dispatcher1);
-			}
-
-			m_broadphasePairCache->calculateOverlappingPairs(m_dispatcher1);
-			if (m_dispatcher1) {
-				m_dispatcher1->dispatchAllCollisionPairs(m_broadphasePairCache->getOverlappingPairCache(), dispatchInfo, m_dispatcher1);
-			}
+			hdt::SkinnedMeshWorld::performDiscreteCollisionDetection();
 			AddFrameCollisionProfile(ElapsedMs(profileStart, Clock::now()));
 		}
 
-		void calculateSimulationIslands() override
-		{
-			BT_PROFILE("calculateSimulationIslands");
-			getSimulationIslandManager()->updateActivationState(getCollisionWorld(), getCollisionWorld()->getDispatcher());
-
-			auto* unionFind = std::addressof(getSimulationIslandManager()->getUnionFind());
-
-			for (int index = 0; index < m_predictiveManifolds.size(); ++index) {
-				auto* manifold = m_predictiveManifolds[index];
-				const auto* object0 = manifold->getBody0();
-				const auto* object1 = manifold->getBody1();
-				if (object0 && !object0->isStaticOrKinematicObject() &&
-					object1 && !object1->isStaticOrKinematicObject()) {
-					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
-				}
-			}
-
-			for (int index = 0; index < m_constraints.size(); ++index) {
-				auto* constraint = m_constraints[index];
-				if (!constraint || !constraint->isEnabled()) {
-					continue;
-				}
-
-				const auto* object0 = std::addressof(constraint->getRigidBodyA());
-				const auto* object1 = std::addressof(constraint->getRigidBodyB());
-				if (!object0->isStaticOrKinematicObject() && !object1->isStaticOrKinematicObject()) {
-					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
-				}
-			}
-
-			auto* dispatcher = getCollisionWorld()->getDispatcher();
-			const auto manifoldCount = dispatcher ? dispatcher->getNumManifolds() : 0;
-			for (int index = 0; index < manifoldCount; ++index) {
-				auto* manifold = dispatcher->getManifoldByIndexInternal(index);
-				if (!manifold || manifold->getNumContacts() <= 0) {
-					continue;
-				}
-
-				const auto* object0 = static_cast<const btCollisionObject*>(manifold->getBody0());
-				const auto* object1 = static_cast<const btCollisionObject*>(manifold->getBody1());
-				if (object0 && !object0->isStaticOrKinematicObject() &&
-					object1 && !object1->isStaticOrKinematicObject()) {
-					unionFind->unite(object0->getIslandTag(), object1->getIslandTag());
-				}
-			}
-
-			getSimulationIslandManager()->storeIslandActivationState(getCollisionWorld());
-		}
-
-		void solveConstraints(btContactSolverInfo& a_solverInfo) override
-		{
-			BT_PROFILE("solveConstraints");
-			if (!m_collisionObjects.size()) {
-				return;
-			}
-
-			for (int index = 0; index < m_constraints.size(); ++index) {
-				auto* constraint = m_constraints[index];
-				if (constraint &&
-					constraint->isEnabled() &&
-					constraint->getRigidBodyA().isStaticOrKinematicObject() &&
-					constraint->getRigidBodyB().isStaticOrKinematicObject()) {
-					constraint->setEnabled(false);
-				}
-			}
-
-			btDiscreteDynamicsWorldMt::solveConstraints(a_solverInfo);
-			static_cast<hdt::CollisionDispatcher*>(m_dispatcher1)->clearAllManifold();
-		}
-
-		void integrateTransforms(const btScalar a_timeStep) override
-		{
-			BT_PROFILE("integrateTransforms");
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				auto* body = m_collisionObjects[index];
-				if (!body || !body->isKinematicObject()) {
-					continue;
-				}
-
-				btTransformUtil::integrateTransform(
-					body->getWorldTransform(),
-					body->getInterpolationLinearVelocity(),
-					body->getInterpolationAngularVelocity(),
-					a_timeStep,
-					body->getInterpolationWorldTransform());
-				body->setWorldTransform(body->getInterpolationWorldTransform());
-			}
-
-			const btVector3 limitMin(-1e9F, -1e9F, -1e9F);
-			const btVector3 limitMax(1e9F, 1e9F, 1e9F);
-			for (int index = 0; index < m_nonStaticRigidBodies.size(); ++index) {
-				auto* body = m_nonStaticRigidBodies[index];
-				if (!body) {
-					continue;
-				}
-
-				auto linearVelocity = body->getLinearVelocity();
-				linearVelocity.setMax(limitMin);
-				linearVelocity.setMin(limitMax);
-				body->setLinearVelocity(linearVelocity);
-
-				auto angularVelocity = body->getAngularVelocity();
-				angularVelocity.setMax(limitMin);
-				angularVelocity.setMin(limitMax);
-				body->setAngularVelocity(angularVelocity);
-			}
-
-			btDiscreteDynamicsWorldMt::integrateTransforms(a_timeStep);
-		}
 	};
 
 	using ArmorPhysicsXmlSelection = Smp::PhysicsXmlSelection::ArmorSelection;
@@ -1321,7 +1149,9 @@ namespace
 		RE::NiNode* node{ nullptr };
 		RE::NiTransform* transform{ nullptr };
 		RE::NiNode* sourceNode{ nullptr };
+		RE::NiTransform canonicalWorld{ RE::NiTransform::IDENTITY };
 		std::string name;
+		bool hasCanonicalWorld{ false };
 		bool isSharedActorBone{ false };
 		bool meshOnlySkinBoneCandidate{ false };
 		std::vector<SkinWorldTransformSlot> skinWorldTransforms;
@@ -1941,6 +1771,245 @@ namespace
 		return false;
 	}
 
+	RE::NiTransform ComposeFo4NiTransform(
+		const RE::NiTransform& a_parentWorld,
+		const RE::NiTransform& a_local)
+	{
+		// Fallout 4 stores Ni rotations transposed relative to Bullet. Its
+		// NiTransform composition therefore multiplies the stored matrices in
+		// local-to-parent order. This is the math used by both
+		// NiAVObject::UpdateWorldData and BSFlattenedBoneTree::UpdateBoneArray.
+		RE::NiTransform result;
+		result.rotate = a_local.rotate * a_parentWorld.rotate;
+		result.translate =
+			a_parentWorld.translate +
+			(a_parentWorld.rotate.Transpose() * a_local.translate) * a_parentWorld.scale;
+		result.scale = a_parentWorld.scale * a_local.scale;
+		return result;
+	}
+
+	bool BuildDetachedHavokReferencePose(
+		RE::Actor* a_actor,
+		RE::BSFlattenedBoneTree* a_flattened,
+		const std::vector<Smp::ArmorBoneReference>& a_armorBoneReferences,
+		std::vector<MatchedSkinBone>& a_matchedBones)
+	{
+		// Constraint frames still need a canonical pose, but hot armor attachment
+		// must not expose that pose through the actor's live scene graph.
+		const auto* skeleton = GetHavokReferenceSkeleton(a_actor);
+		if (!skeleton ||
+			!a_flattened ||
+			!a_flattened->bone ||
+			a_flattened->boneCountExpanded <= 0 ||
+			skeleton->bones.size <= 0 ||
+			skeleton->referencePose.size <= 0) {
+			return false;
+		}
+
+		const auto havokBoneCount = std::min(skeleton->bones.size, skeleton->referencePose.size);
+		std::unordered_map<std::string, RE::NiTransform> referenceLocals;
+		referenceLocals.reserve(static_cast<std::size_t>(havokBoneCount));
+		for (std::int32_t index = 0; index < havokBoneCount; ++index) {
+			const auto* boneName = HkStringPtrData(skeleton->bones.data[index].name);
+			if (!boneName || *boneName == '\0') {
+				continue;
+			}
+			referenceLocals.insert_or_assign(
+				Smp::NormalizePhysicsName(boneName),
+				ToNiTransform(skeleton->referencePose.data[index]));
+		}
+		if (referenceLocals.empty()) {
+			return false;
+		}
+
+		// Emulate BSFlattenedBoneTree::UpdateBoneArray without mutating the live
+		// tree. The reference implementation replaces matching Ni locals with
+		// Havok reference locals and then lets the game skeleton hierarchy compute
+		// worlds; composing through hkaSkeleton::parentIndices is not equivalent
+		// for merged armor/hair skeletons.
+		const auto flattenedBoneCount = static_cast<std::size_t>(a_flattened->boneCountExpanded);
+		std::unordered_map<std::string, std::size_t> flattenedIndices;
+		flattenedIndices.reserve(flattenedBoneCount);
+		for (std::size_t index = 0; index < flattenedBoneCount; ++index) {
+			const auto name = std::string_view(a_flattened->bone[index].name);
+			if (!name.empty()) {
+				flattenedIndices.try_emplace(Smp::NormalizePhysicsName(name), index);
+			}
+		}
+
+		std::vector<RE::NiTransform> canonicalActorWorlds(flattenedBoneCount, RE::NiTransform::IDENTITY);
+		std::vector<std::uint8_t> actorWorldState(flattenedBoneCount, 0);
+		std::uint32_t appliedReferenceLocals = 0;
+		std::uint32_t retainedFlattenedLocals = 0;
+		const auto computeActorWorld = [&](this auto&& a_self, const std::size_t a_index, RE::NiTransform& a_world) -> bool {
+			if (a_index >= canonicalActorWorlds.size()) {
+				return false;
+			}
+			if (actorWorldState[a_index] == 2) {
+				a_world = canonicalActorWorlds[a_index];
+				return true;
+			}
+			if (actorWorldState[a_index] == 1) {
+				return false;
+			}
+
+			actorWorldState[a_index] = 1;
+			const auto& flattenedBone = a_flattened->bone[a_index];
+			const auto referenceLocal = referenceLocals.find(Smp::NormalizePhysicsName(flattenedBone.name.c_str()));
+			const auto& local = referenceLocal != referenceLocals.end() ? referenceLocal->second : flattenedBone.local;
+			if (referenceLocal != referenceLocals.end()) {
+				++appliedReferenceLocals;
+			} else {
+				++retainedFlattenedLocals;
+			}
+
+			RE::NiTransform parentWorld = a_flattened->world;
+			const auto parentIndex = flattenedBone.parent;
+			if (parentIndex >= 0) {
+				if (static_cast<std::size_t>(parentIndex) == a_index ||
+					!a_self(static_cast<std::size_t>(parentIndex), parentWorld)) {
+					actorWorldState[a_index] = 0;
+					return false;
+				}
+			}
+
+			a_world = ComposeFo4NiTransform(parentWorld, local);
+			canonicalActorWorlds[a_index] = a_world;
+			actorWorldState[a_index] = 2;
+			return true;
+		};
+
+		const auto findActorWorld = [&](const std::string_view a_name, RE::NiTransform& a_world) {
+			// The flattened tree object itself is the named skeleton root; it is
+			// not duplicated in the flattened-bone array.
+			if (Smp::PhysicsNamesEqual(a_name, a_flattened->GetName())) {
+				a_world = a_flattened->world;
+				return true;
+			}
+			const auto found = flattenedIndices.find(Smp::NormalizePhysicsName(a_name));
+			return found != flattenedIndices.end() && computeActorWorld(found->second, a_world);
+		};
+
+		std::unordered_map<std::string, const Smp::ArmorBoneReference*> capturedReferences;
+		capturedReferences.reserve(a_armorBoneReferences.size());
+		for (const auto& reference : a_armorBoneReferences) {
+			if (!reference.name.empty()) {
+				capturedReferences.try_emplace(Smp::NormalizePhysicsName(reference.name), std::addressof(reference));
+			}
+		}
+		std::unordered_map<std::string, RE::NiTransform> canonicalCapturedWorlds;
+		canonicalCapturedWorlds.reserve(capturedReferences.size());
+		std::unordered_set<std::string> visitingCapturedBones;
+		const auto computeCapturedWorld = [&](this auto&& a_self, const Smp::ArmorBoneReference& a_reference, RE::NiTransform& a_world) -> bool {
+			const auto normalizedName = Smp::NormalizePhysicsName(a_reference.name);
+			if (const auto cached = canonicalCapturedWorlds.find(normalizedName); cached != canonicalCapturedWorlds.end()) {
+				a_world = cached->second;
+				return true;
+			}
+
+			// Shared bones belong to the actor pose whenever FO4 exposes them
+			// through the flattened tree. The captured transform is only the
+			// compatibility fallback for shared attachment nodes omitted from
+			// that tree (notably some twist bones).
+			if (!a_reference.isArmorOnly && findActorWorld(a_reference.name, a_world)) {
+				canonicalCapturedWorlds.emplace(normalizedName, a_world);
+				return true;
+			}
+			if (!visitingCapturedBones.insert(normalizedName).second) {
+				return false;
+			}
+
+			RE::NiTransform parentWorld;
+			bool foundParent = false;
+			if (!a_reference.parentBoneName.empty()) {
+				const auto normalizedParent = Smp::NormalizePhysicsName(a_reference.parentBoneName);
+				const auto parentReference = capturedReferences.find(normalizedParent);
+				if (parentReference != capturedReferences.end() && parentReference->second->isArmorOnly) {
+					foundParent = a_self(*parentReference->second, parentWorld);
+				} else {
+					foundParent = findActorWorld(a_reference.parentBoneName, parentWorld);
+					if (!foundParent && parentReference != capturedReferences.end()) {
+						foundParent = a_self(*parentReference->second, parentWorld);
+					}
+				}
+			} else {
+				parentWorld = a_flattened->world;
+				foundParent = true;
+			}
+			visitingCapturedBones.erase(normalizedName);
+			if (!foundParent) {
+				return false;
+			}
+
+			a_world = ComposeFo4NiTransform(parentWorld, a_reference.localToParentBone);
+			canonicalCapturedWorlds.emplace(normalizedName, a_world);
+			return true;
+		};
+
+		std::uint32_t appliedArmorBones = 0;
+		std::uint32_t appliedActorBones = 0;
+		std::uint32_t appliedCapturedSharedFallbackBones = 0;
+		std::uint32_t resolvedMatchedBones = 0;
+		std::uint32_t requiredMatchedBones = 0;
+		std::vector<std::string_view> unresolvedRequiredBones;
+		for (auto& matchedBone : a_matchedBones) {
+			if (!matchedBone.meshOnlySkinBoneCandidate) {
+				++requiredMatchedBones;
+			}
+			RE::NiTransform canonicalWorld;
+			bool resolved = false;
+			const auto reference = capturedReferences.find(Smp::NormalizePhysicsName(matchedBone.name));
+			if (reference != capturedReferences.end() && reference->second->isArmorOnly) {
+				resolved = computeCapturedWorld(*reference->second, canonicalWorld);
+				if (resolved) {
+					++appliedArmorBones;
+				}
+			} else {
+				resolved = findActorWorld(matchedBone.name, canonicalWorld);
+				if (resolved) {
+					++appliedActorBones;
+				} else if (reference != capturedReferences.end()) {
+					resolved = computeCapturedWorld(*reference->second, canonicalWorld);
+					if (resolved) {
+						++appliedCapturedSharedFallbackBones;
+					}
+				}
+			}
+			if (!resolved) {
+				if (!matchedBone.meshOnlySkinBoneCandidate) {
+					unresolvedRequiredBones.push_back(matchedBone.name);
+				}
+				continue;
+			}
+			matchedBone.canonicalWorld = canonicalWorld;
+			matchedBone.hasCanonicalWorld = true;
+			++resolvedMatchedBones;
+		}
+
+		spdlog::debug(
+			"built detached armor reference pose for prototype actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
+			static_cast<void*>(a_actor),
+			static_cast<void*>(a_flattened),
+			havokBoneCount,
+			flattenedBoneCount,
+			appliedReferenceLocals,
+			retainedFlattenedLocals,
+			appliedArmorBones,
+			appliedActorBones,
+			appliedCapturedSharedFallbackBones,
+			resolvedMatchedBones,
+			a_matchedBones.size(),
+			requiredMatchedBones,
+			unresolvedRequiredBones.size());
+		for (const auto name : unresolvedRequiredBones) {
+			spdlog::warn(
+				"cannot build armor constraint reference pose because required bone '{}' is absent from both Havok reference skeleton and captured armor hierarchy actor={}",
+				name,
+				static_cast<void*>(a_actor));
+		}
+		return requiredMatchedBones > 0 && unresolvedRequiredBones.empty();
+	}
+
 	void RestoreSavedLocalPoses(std::vector<SavedNodeLocalPose>& a_savedPoses, RE::NiAVObject* a_updateRoot)
 	{
 		if (a_savedPoses.empty()) {
@@ -2434,23 +2503,6 @@ namespace
 		return std::isfinite(scale) && scale > FLT_EPSILON ? scale : 1.0F;
 	}
 
-	float WeightedScaleFactor(
-		const float a_oldScaleA,
-		const float a_oldScaleB,
-		const float a_newScaleA,
-		const float a_newScaleB,
-		const float a_invMassA,
-		const float a_invMassB)
-	{
-		const auto factorA = a_newScaleA / std::max(a_oldScaleA, FLT_EPSILON);
-		const auto factorB = a_newScaleB / std::max(a_oldScaleB, FLT_EPSILON);
-		const auto weight = a_invMassA + a_invMassB;
-		if (weight <= FLT_EPSILON) {
-			return (factorA + factorB) * 0.5F;
-		}
-		return (factorA * a_invMassA + factorB * a_invMassB) / weight;
-	}
-
 	void IncrementWritebackCounter(
 		const Smp::WritebackSource a_source,
 		std::uint32_t& a_cellJobsCounter,
@@ -2579,212 +2631,27 @@ namespace
 		return { frameA, frameB };
 	}
 
-	class PrototypeStiffSpringConstraint :
-		public btTypedConstraint
-	{
-	public:
-		PrototypeStiffSpringConstraint(
-			btRigidBody& a_bodyA,
-			btRigidBody& a_bodyB,
-			const btTransform& a_rigToLocalA,
-			const btTransform& a_rigToLocalB,
-			const float a_minDistanceFactor,
-			const float a_maxDistanceFactor,
-			const float a_stiffness,
-			const float a_damping,
-			const float a_equilibriumFactor,
-			const float a_initialDistance) :
-			btTypedConstraint(MAX_CONSTRAINT_TYPE, a_bodyA, a_bodyB),
-			rigToLocalA_(a_rigToLocalA),
-			rigToLocalB_(a_rigToLocalB),
-			stiffness_(std::max(a_stiffness, 0.0F)),
-			damping_(std::max(a_damping, 0.0F))
-		{
-			minDistance_ = a_initialDistance * std::max(a_minDistanceFactor, 0.0F);
-			maxDistance_ = a_initialDistance * std::max(a_maxDistanceFactor, 0.0F);
-			const auto equilibriumFactor = std::clamp(a_equilibriumFactor, 0.0F, 1.0F);
-			equilibriumPoint_ = minDistance_ * equilibriumFactor + maxDistance_ * (1.0F - equilibriumFactor);
-		}
-
-		void getInfo1(btConstraintInfo1* a_info) override
-		{
-			const auto localA = rigToLocalA_ * m_rbA.getWorldTransform();
-			const auto localB = rigToLocalB_ * m_rbB.getWorldTransform();
-			const auto distance = (localA.getOrigin() - localB.getOrigin()).length();
-
-			a_info->m_numConstraintRows = btFuzzyZero(distance) ? 0 : 1;
-			a_info->nub = 0;
-		}
-
-		void getInfo2(btConstraintInfo2* a_info) override
-		{
-			const auto localA = rigToLocalA_ * m_rbA.getWorldTransform();
-			const auto localB = rigToLocalB_ * m_rbB.getWorldTransform();
-			const auto deltaVector = localA.getOrigin() - localB.getOrigin();
-			const auto distance = deltaVector.length();
-			if (btFuzzyZero(distance)) {
-				return;
-			}
-
-			const auto direction = deltaVector.normalized();
-			a_info->m_J1linearAxis[0] = direction[0];
-			a_info->m_J1linearAxis[1] = direction[1];
-			a_info->m_J1linearAxis[2] = direction[2];
-			a_info->m_J2linearAxis[0] = -direction[0];
-			a_info->m_J2linearAxis[1] = -direction[1];
-			a_info->m_J2linearAxis[2] = -direction[2];
-
-			int currentLimit = 0;
-			float currentLimitError = 0.0F;
-			if (distance < minDistance_) {
-				currentLimit = 2;
-				currentLimitError = distance - minDistance_;
-			} else if (distance > maxDistance_) {
-				currentLimit = 1;
-				currentLimitError = distance - maxDistance_;
-			}
-
-			if (currentLimit == 0) {
-				const auto delta = distance - equilibriumPoint_;
-				const auto velocity = (delta - oldDiff_) * a_info->fps;
-				auto force = (delta + oldDiff_) * 0.5F * stiffness_;
-				const auto friction = damping_ * velocity;
-				force += force * friction < 0.0F ? btClamped(friction, -std::abs(force), std::abs(force)) : friction;
-
-				const auto targetVelocity = (a_info->fps / static_cast<btScalar>(a_info->m_numIterations)) * force;
-				const auto maxMotorForce = btFabs(force) / a_info->fps;
-				const auto motorFactor = getMotorFactor(distance, minDistance_, maxDistance_, targetVelocity, a_info->fps * a_info->erp);
-				a_info->m_constraintError[0] = motorFactor * targetVelocity * (m_rbA.getInvMass() + m_rbB.getInvMass());
-				a_info->m_lowerLimit[0] = -maxMotorForce;
-				a_info->m_upperLimit[0] = maxMotorForce;
-				oldDiff_ = delta;
-				return;
-			}
-
-			const auto k = a_info->fps * a_info->erp;
-			a_info->m_constraintError[0] = k * currentLimitError;
-			if (minDistance_ == maxDistance_) {
-				a_info->m_lowerLimit[0] = -SIMD_INFINITY;
-				a_info->m_upperLimit[0] = SIMD_INFINITY;
-			} else if (currentLimit == 1) {
-				a_info->m_lowerLimit[0] = -SIMD_INFINITY;
-				a_info->m_upperLimit[0] = 0.0F;
-			} else {
-				a_info->m_lowerLimit[0] = 0.0F;
-				a_info->m_upperLimit[0] = SIMD_INFINITY;
-			}
-		}
-
-		void setParam([[maybe_unused]] int a_num, [[maybe_unused]] btScalar a_value, [[maybe_unused]] int a_axis = -1) override {}
-		btScalar getParam([[maybe_unused]] int a_num, [[maybe_unused]] int a_axis = -1) const override { return 0.0F; }
-
-	private:
-		btTransform rigToLocalA_{ btTransform::getIdentity() };
-		btTransform rigToLocalB_{ btTransform::getIdentity() };
-		float minDistance_{ 0.0F };
-		float maxDistance_{ 0.0F };
-		float stiffness_{ 0.0F };
-		float damping_{ 0.0F };
-		float equilibriumPoint_{ 0.0F };
-		float oldDiff_{ 0.0F };
-
-	public:
-		void ScaleConstraint(
-			const float a_oldScaleA,
-			const float a_oldScaleB,
-			const float a_newScaleA,
-			const float a_newScaleB)
-		{
-			const auto factor = WeightedScaleFactor(
-				a_oldScaleA,
-				a_oldScaleB,
-				a_newScaleA,
-				a_newScaleB,
-				m_rbA.getInvMass(),
-				m_rbB.getInvMass());
-			const auto factorCubed = factor * factor * factor;
-
-			minDistance_ *= factor;
-			maxDistance_ *= factor;
-			equilibriumPoint_ *= factor;
-			stiffness_ *= factorCubed;
-			damping_ *= factorCubed;
-		}
-	};
-
-	void ScaleGenericConstraint(
-		btGeneric6DofSpring2Constraint& a_constraint,
-		const float a_oldScaleA,
-		const float a_oldScaleB,
-		const float a_newScaleA,
-		const float a_newScaleB)
-	{
-		const auto factorA = a_newScaleA / std::max(a_oldScaleA, FLT_EPSILON);
-		const auto factorB = a_newScaleB / std::max(a_oldScaleB, FLT_EPSILON);
-		const auto factor = WeightedScaleFactor(
-			a_oldScaleA,
-			a_oldScaleB,
-			a_newScaleA,
-			a_newScaleB,
-			a_constraint.getRigidBodyA().getInvMass(),
-			a_constraint.getRigidBodyB().getInvMass());
-		const auto factorSquared = factor * factor;
-		const auto factorCubed = factorSquared * factor;
-		const auto factorFifth = factorCubed * factorSquared;
-
-		auto frameA = a_constraint.getFrameOffsetA();
-		auto frameB = a_constraint.getFrameOffsetB();
-		frameA.setOrigin(frameA.getOrigin() * factorA);
-		frameB.setOrigin(frameB.getOrigin() * factorB);
-		a_constraint.setFrames(frameA, frameB);
-
-		auto* linear = a_constraint.getTranslationalLimitMotor();
-		linear->m_equilibriumPoint *= factor;
-		linear->m_springStiffness *= factorCubed;
-		linear->m_lowerLimit *= factor;
-		linear->m_upperLimit *= factor;
-
-		for (int axis = 0; axis < 3; ++axis) {
-			if (auto* motor = a_constraint.getRotationalLimitMotor(axis)) {
-				motor->m_springStiffness *= factorFifth;
-			}
-		}
-	}
-
-	void ScaleConeTwistConstraint(
-		btConeTwistConstraint& a_constraint,
-		const float a_oldScaleA,
-		const float a_oldScaleB,
-		const float a_newScaleA,
-		const float a_newScaleB)
-	{
-		const auto factorA = a_newScaleA / std::max(a_oldScaleA, FLT_EPSILON);
-		const auto factorB = a_newScaleB / std::max(a_oldScaleB, FLT_EPSILON);
-		auto frameA = a_constraint.getFrameOffsetA();
-		auto frameB = a_constraint.getFrameOffsetB();
-		frameA.setOrigin(frameA.getOrigin() * factorA);
-		frameB.setOrigin(frameB.getOrigin() * factorB);
-		a_constraint.setFrames(frameA, frameB);
-	}
-
 	std::unique_ptr<btTypedConstraint> CreatePrototypeConstraint(
 		const Smp::PhysicsConstraintDescriptor& a_descriptor,
-		btRigidBody& a_bodyA,
-		btRigidBody& a_bodyB,
-		const btTransform& a_rigToLocalA,
-		const btTransform& a_rigToLocalB,
+		hdt::SkinnedMeshBone* a_boneA,
+		hdt::SkinnedMeshBone* a_boneB,
 		const hdt::btQsTransform& a_nodeTransformA,
 		const hdt::btQsTransform& a_nodeTransformB)
 	{
+		if (!a_boneA || !a_boneB) {
+			return nullptr;
+		}
+
 		auto [nodeFrameA, nodeFrameB] = CalculateConstraintFrames(a_descriptor, a_nodeTransformA, a_nodeTransformB);
-		const auto frameA = a_rigToLocalA * nodeFrameA;
-		const auto frameB = a_rigToLocalB * nodeFrameB;
 
 		switch (a_descriptor.kind) {
 		case Smp::PhysicsConstraintKind::kConeTwist:
 		{
-			auto constraint = std::make_unique<btConeTwistConstraint>(a_bodyA, a_bodyB, frameA, frameB);
-			constraint->enableMotor(false);
+			auto constraint = std::make_unique<hdt::ConeTwistConstraint>(
+				a_boneA,
+				a_boneB,
+				nodeFrameA,
+				nodeFrameB);
 			constraint->setLimit(
 				a_descriptor.swingSpan1,
 				a_descriptor.swingSpan2,
@@ -2795,32 +2662,26 @@ namespace
 			return constraint;
 		}
 		case Smp::PhysicsConstraintKind::kStiffSpring:
-			return std::make_unique<PrototypeStiffSpringConstraint>(
-				a_bodyA,
-				a_bodyB,
-				a_rigToLocalA,
-				a_rigToLocalB,
-				a_descriptor.minDistanceFactor,
-				a_descriptor.maxDistanceFactor,
-				a_descriptor.stiffness,
-				a_descriptor.damping,
-				a_descriptor.equilibriumFactor,
-				a_nodeTransformA.getOrigin().distance(a_nodeTransformB.getOrigin()));
+		{
+			auto constraint = std::make_unique<hdt::StiffSpringConstraint>(a_boneA, a_boneB);
+			const auto initialDistance = a_nodeTransformA.getOrigin().distance(a_nodeTransformB.getOrigin());
+			constraint->m_minDistance = initialDistance * std::max(a_descriptor.minDistanceFactor, 0.0F);
+			constraint->m_maxDistance = initialDistance * std::max(a_descriptor.maxDistanceFactor, 0.0F);
+			const auto equilibriumFactor = std::clamp(a_descriptor.equilibriumFactor, 0.0F, 1.0F);
+			constraint->m_equilibriumPoint =
+				constraint->m_minDistance * equilibriumFactor +
+				constraint->m_maxDistance * (1.0F - equilibriumFactor);
+			constraint->m_stiffness = std::max(a_descriptor.stiffness, 0.0F);
+			constraint->m_damping = std::max(a_descriptor.damping, 0.0F);
+			return constraint;
+		}
 		case Smp::PhysicsConstraintKind::kGeneric:
 		default:
 		{
 			const bool swapBodies = a_descriptor.useLinearReferenceFrameA;
 			auto constraint = swapBodies ?
-				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyB, a_bodyA, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ) :
-				std::make_unique<btGeneric6DofSpring2Constraint>(a_bodyA, a_bodyB, btTransform::getIdentity(), btTransform::getIdentity(), RO_XYZ);
-			if (swapBodies) {
-				constraint->setFrames(frameB, frameA);
-			} else {
-				constraint->setFrames(frameA, frameB);
-			}
-			for (int axis = 0; axis < 6; ++axis) {
-				constraint->enableSpring(axis, true);
-			}
+				std::make_unique<hdt::Generic6DofConstraint>(a_boneB, a_boneA, nodeFrameB, nodeFrameA) :
+				std::make_unique<hdt::Generic6DofConstraint>(a_boneA, a_boneB, nodeFrameA, nodeFrameB);
 			constraint->setLinearLowerLimit(ToBulletVector(a_descriptor.linearLowerLimit));
 			constraint->setLinearUpperLimit(ToBulletVector(a_descriptor.linearUpperLimit));
 			constraint->setAngularLowerLimit(ToBulletVector(a_descriptor.angularLowerLimit));

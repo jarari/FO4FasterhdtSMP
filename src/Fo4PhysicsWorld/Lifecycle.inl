@@ -83,6 +83,7 @@ namespace Smp
 		duplicatePostAnimationWritebacks_ = 0;
 		currentWind_.setZero();
 		targetWind_.setZero();
+		windTime_ = 0.0F;
 		windWeatherCooldown_ = 0.0F;
 		characterCustomizationMenuDepth_ = 0;
 		ClearCharacterCustomizationTargetLocked();

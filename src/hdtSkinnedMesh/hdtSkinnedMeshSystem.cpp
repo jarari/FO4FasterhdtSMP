@@ -16,6 +16,16 @@ namespace hdt
 				bone->readTransform(a_timeStep);
 			}
 		}
+		for (const auto& constraint : constraints_) {
+			if (constraint) {
+				constraint->scaleConstraint();
+			}
+		}
+		for (const auto& group : constraintGroups_) {
+			if (group) {
+				group->scaleConstraint();
+			}
+		}
 	}
 
 	void SkinnedMeshSystem::writeTransform()
@@ -31,6 +41,7 @@ namespace hdt
 
 	void SkinnedMeshSystem::internalUpdate()
 	{
+
 		for (const auto& bone : bones_) {
 			if (bone) {
 				bone->internalUpdate();
@@ -72,6 +83,20 @@ namespace hdt
 	{
 		if (a_mesh) {
 			meshes_.push_back(std::move(a_mesh));
+		}
+	}
+
+	void SkinnedMeshSystem::addConstraint(RE::BSTSmartPointer<BoneScaleConstraint> a_constraint)
+	{
+		if (a_constraint) {
+			constraints_.push_back(std::move(a_constraint));
+		}
+	}
+
+	void SkinnedMeshSystem::addConstraintGroup(RE::BSTSmartPointer<ConstraintGroup> a_group)
+	{
+		if (a_group) {
+			constraintGroups_.push_back(std::move(a_group));
 		}
 	}
 }

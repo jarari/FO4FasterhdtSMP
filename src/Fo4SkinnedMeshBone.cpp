@@ -299,9 +299,14 @@ namespace Smp
 			return;
 		}
 
+		readTransformFrom(*transform_, a_timeStep);
+	}
+
+	void Fo4SkinnedMeshBone::readTransformFrom(const RE::NiTransform& a_transform, const float a_timeStep)
+	{
 		const auto oldScale = m_currentTransform.getScale();
 		const auto isStaticOrKinematic = m_rig.isStaticOrKinematicObject();
-		m_currentTransform = Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(*transform_);
+		m_currentTransform = Smp::Fo4Transform::ToBulletQsTransformNormalizedScale(a_transform);
 		const auto newScale = m_currentTransform.getScale();
 		const auto current = m_rig.getWorldTransform();
 

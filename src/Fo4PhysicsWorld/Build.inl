@@ -50,6 +50,9 @@ namespace Smp
 		}
 
 		std::vector<MatchedSkinBone> matchedBones;
+		// Armor may be added while other groups are simulating. Build its
+		// canonical pose out-of-band so their live writeback targets stay intact.
+		const auto detachedArmorBuild = a_domain == PrototypeBuildDomain::kArmor;
 		auto phaseStart = Clock::now();
 		const auto actorSkeletonSearchExclusions = BuildBipedPartExclusions(a_event);
 		const auto knownAttachmentNodes = BuildKnownAttachmentNodeSet(a_event);
@@ -58,7 +61,7 @@ namespace Smp
 			actorRoot = a_event.actor->Get3D();
 		}
 		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
-		if (actorRootNode) {
+		if (actorRootNode && !detachedArmorBuild) {
 			UpdateTransformUpDown(actorRootNode, true);
 		}
 		timing.actorTreePrepMs += ElapsedMs(phaseStart, Clock::now());
@@ -83,7 +86,7 @@ namespace Smp
 			}
 		}
 		std::vector<SavedNodeLocalPose> savedBuildPoses;
-		if (actorRootNode) {
+		if (actorRootNode && !detachedArmorBuild) {
 			phaseStart = Clock::now();
 			if (!ApplyHavokReferencePose(
 					a_event.actor,
@@ -99,9 +102,6 @@ namespace Smp
 			timing.referencePoseMs += ElapsedMs(phaseStart, Clock::now());
 		}
 		phaseStart = Clock::now();
-		if (a_domain == PrototypeBuildDomain::kArmor) {
-			RestoreArmorBoneLocalPose(a_event.object, actorRoot, a_event.armorBoneReferences);
-		}
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
 		if (a_domain == PrototypeBuildDomain::kArmor) {
 			CollectMatchedArmorReferenceBones(a_event.armorBoneReferences, a_summary.boneNames, actorRoot, matchedBones);
@@ -112,6 +112,27 @@ namespace Smp
 		}
 		ResolveEnginePreparedBones(matchedBones, a_summary.boneNames, actorRoot, engineSkeletonRoot);
 		timing.xmlSkinResolveMs += ElapsedMs(phaseStart, Clock::now());
+		if (detachedArmorBuild) {
+			const auto referencePoseStart = Clock::now();
+			auto* flattened = FindFlattenedBoneTreeInScene(engineSkeletonRoot);
+			if (!flattened) {
+				flattened = FindFlattenedBoneTreeInScene(actorRoot);
+			}
+			if (!BuildDetachedHavokReferencePose(
+					a_event.actor,
+					flattened,
+					a_event.armorBoneReferences,
+					matchedBones)) {
+				spdlog::error(
+					"aborting prototype armor physics build because a complete detached Havok reference pose is unavailable actor={} root={}",
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(actorRootNode));
+				timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
+				logBuildTiming("incomplete-detached-reference-pose");
+				return {};
+			}
+			timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
+		}
 		if (matchedBones.empty()) {
 			spdlog::debug(
 				"prototype physics XML matched no skin bones for {} actor={} object={}",
@@ -276,7 +297,7 @@ namespace Smp
 			}
 
 			const auto localToRig = ToBulletTransform(boneDescriptor.centerOfMassTransform);
-			const auto& initialWorld = *matchedBone.transform;
+			const auto& initialWorld = matchedBone.hasCanonicalWorld ? matchedBone.canonicalWorld : *matchedBone.transform;
 			auto motionState = std::make_unique<btDefaultMotionState>(Smp::Fo4Transform::ToBulletTransform(initialWorld) * localToRig);
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(mass, motionState.get(), shape.get(), localInertia);
 			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, matchedBone.transform, constructionInfo);
@@ -301,7 +322,7 @@ namespace Smp
 			} else {
 				++dynamicBodies;
 			}
-			bone->readTransform(0.0F);
+			bone->readTransformFrom(initialWorld, 0.0F);
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
 				spdlog::debug(
@@ -337,7 +358,9 @@ namespace Smp
 			return lhsDepth < rhsDepth;
 		});
 
-		ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
+		if (!detachedArmorBuild) {
+			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
+		}
 		std::vector<PrototypeMesh> stagedMeshes;
 		phaseStart = Clock::now();
 		const auto cpuCopyPending = BuildPrototypeMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
@@ -421,7 +444,9 @@ namespace Smp
 			a_state.constraints.push_back(std::move(stagedConstraint));
 		}
 		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
-		ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
+		if (!detachedArmorBuild) {
+			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
+		}
 		if (a_commitToBullet) {
 			CommitPrototypeBuildGroupToBulletLocked(a_state, buildGroup);
 			result.committed = true;
@@ -583,10 +608,6 @@ namespace Smp
 		};
 
 		auto resetBodyToCurrentPose = [](PrototypeBody& a_body) {
-			if (a_body.node) {
-				auto* updateRoot = a_body.node->parent ? static_cast<RE::NiAVObject*>(a_body.node->parent) : static_cast<RE::NiAVObject*>(a_body.node);
-				UpdateTransformUpDown(updateRoot, true);
-			}
 			a_body.bone->readTransform(0.0F);
 			a_body.bone->RefreshSkinWorldTransforms();
 		};
@@ -619,6 +640,27 @@ namespace Smp
 		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
 			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
 		};
+		const auto nodeHasOutsideOwner = [&](RE::NiAVObject* a_node) {
+			if (!a_node) {
+				return false;
+			}
+			if (std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+					return a_pose.node.get() == a_node && a_pose.buildGroup != 0 && !containsGroup(a_pose.buildGroup);
+				})) {
+				return true;
+			}
+			return std::ranges::any_of(a_state.bodies, [&](const PrototypeBody& a_body) {
+				if (a_body.node != a_node) {
+					return false;
+				}
+				if (!a_body.buildGroups.empty()) {
+					return std::ranges::any_of(a_body.buildGroups, [&](const std::uint64_t a_buildGroup) {
+						return a_buildGroup != 0 && !containsGroup(a_buildGroup);
+					});
+				}
+				return a_body.buildGroup != 0 && !containsGroup(a_body.buildGroup);
+			});
+		};
 
 		std::vector<RE::NiNode*> restoredNodes;
 		for (auto& localPose : a_state.attachmentBoneLocalPoses) {
@@ -627,7 +669,9 @@ namespace Smp
 			}
 
 			auto* node = localPose.node ? localPose.node->IsNode() : nullptr;
-			if (!node || std::ranges::find(restoredNodes, node) != restoredNodes.end()) {
+			if (!node ||
+				nodeHasOutsideOwner(node) ||
+				std::ranges::find(restoredNodes, node) != restoredNodes.end()) {
 				continue;
 			}
 
@@ -1371,10 +1415,8 @@ namespace Smp
 
 			auto constraint = CreatePrototypeConstraint(
 				descriptor,
-				bodyA->bone->m_rig,
-				bodyB->bone->m_rig,
-				bodyA->bone->m_rigToLocal,
-				bodyB->bone->m_rigToLocal,
+				bodyA->bone.get(),
+				bodyB->bone.get(),
 				bodyA->bone->m_currentTransform,
 				bodyB->bone->m_currentTransform);
 			if (!constraint) {
@@ -1435,25 +1477,14 @@ namespace Smp
 
 			switch (prototypeConstraint.kind) {
 			case PhysicsConstraintKind::kConeTwist:
-				ScaleConeTwistConstraint(
-					*static_cast<btConeTwistConstraint*>(prototypeConstraint.constraint.get()),
-					prototypeConstraint.scaleA,
-					prototypeConstraint.scaleB,
-					newScaleA,
-					newScaleB);
+				static_cast<hdt::ConeTwistConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
 				break;
 			case PhysicsConstraintKind::kStiffSpring:
-				static_cast<PrototypeStiffSpringConstraint*>(prototypeConstraint.constraint.get())
-					->ScaleConstraint(prototypeConstraint.scaleA, prototypeConstraint.scaleB, newScaleA, newScaleB);
+				static_cast<hdt::StiffSpringConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
 				break;
 			case PhysicsConstraintKind::kGeneric:
 			default:
-				ScaleGenericConstraint(
-					*static_cast<btGeneric6DofSpring2Constraint*>(prototypeConstraint.constraint.get()),
-					prototypeConstraint.scaleA,
-					prototypeConstraint.scaleB,
-					newScaleA,
-					newScaleB);
+				static_cast<hdt::Generic6DofConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
 				break;
 			}
 
@@ -1486,25 +1517,14 @@ namespace Smp
 
 			switch (prototypeConstraint->kind) {
 			case PhysicsConstraintKind::kConeTwist:
-				ScaleConeTwistConstraint(
-					*static_cast<btConeTwistConstraint*>(prototypeConstraint->constraint.get()),
-					prototypeConstraint->scaleA,
-					prototypeConstraint->scaleB,
-					newScaleA,
-					newScaleB);
+				static_cast<hdt::ConeTwistConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
 				break;
 			case PhysicsConstraintKind::kStiffSpring:
-				static_cast<PrototypeStiffSpringConstraint*>(prototypeConstraint->constraint.get())
-					->ScaleConstraint(prototypeConstraint->scaleA, prototypeConstraint->scaleB, newScaleA, newScaleB);
+				static_cast<hdt::StiffSpringConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
 				break;
 			case PhysicsConstraintKind::kGeneric:
 			default:
-				ScaleGenericConstraint(
-					*static_cast<btGeneric6DofSpring2Constraint*>(prototypeConstraint->constraint.get()),
-					prototypeConstraint->scaleA,
-					prototypeConstraint->scaleB,
-					newScaleA,
-					newScaleB);
+				static_cast<hdt::Generic6DofConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
 				break;
 			}
 

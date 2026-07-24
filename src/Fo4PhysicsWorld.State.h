@@ -66,6 +66,7 @@
 		btVector3 windDirection_{ 1.0F, 0.0F, 0.0F };
 		btVector3 currentWind_{ 0.0F, 0.0F, 0.0F };
 		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };
+		float windTime_{ 0.0F };
 		std::string prototypePhysicsXml_;
 		std::vector<PrototypeActorState> prototypeActors_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;

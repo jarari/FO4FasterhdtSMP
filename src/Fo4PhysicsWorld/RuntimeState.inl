@@ -1548,6 +1548,7 @@ namespace Smp
 				PrototypeBuildGroupRuntime newRuntime;
 				newRuntime.buildGroup = a_buildGroup;
 				newRuntime.pendingResetPhysicsRead = true;
+				newRuntime.pendingResetPhysicsWriteback = true;
 				if (const auto mesh = std::ranges::find_if(a_state.meshes, [a_buildGroup](const PrototypeMesh& a_mesh) {
 						return a_mesh.buildGroup == a_buildGroup;
 					});

@@ -50,6 +50,7 @@ namespace Smp
 		void RemoveSkinWorldTransformsForBuildGroup(std::uint64_t a_buildGroup, std::span<const ActiveSkinSlot> a_activeSlots);
 		void RefreshSkinWorldTransforms();
 		void readTransform(float a_timeStep) override;
+		void readTransformFrom(const RE::NiTransform& a_transform, float a_timeStep);
 		void writeTransform() override;
 
 		RE::NiNode* GetNode() const { return node_.get(); }
