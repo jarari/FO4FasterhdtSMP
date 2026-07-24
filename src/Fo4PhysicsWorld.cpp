@@ -13,6 +13,7 @@
 #include "PhysicsXml.h"
 #include "PhysicsXmlSelection.h"
 #include "PapyrusFunctions.h"
+#include "PhysicsProfiler.h"
 #include "SmpConfig.h"
 #include "hdtSkinnedMesh/hdtDispatcher.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
@@ -222,6 +223,7 @@ namespace
 
 		int StepReference(const btScalar a_remainingTimeStep, const btScalar a_fixedTimeStep)
 		{
+			BT_PROFILE("FO4FasterHdtSMP_StepReference");
 			auto remainingTimeStep = a_remainingTimeStep;
 			applyGravity();
 
@@ -241,6 +243,7 @@ namespace
 
 		void applyGravity() override
 		{
+			BT_PROFILE("applyGravity");
 			const auto worldGravity = getGravity();
 			for (int index = 0; index < m_collisionObjects.size(); ++index) {
 				auto* body = btRigidBody::upcast(m_collisionObjects[index]);
@@ -258,6 +261,7 @@ namespace
 
 		void performDiscreteCollisionDetection() override
 		{
+			BT_PROFILE("performDiscreteCollisionDetection");
 			const auto profileStart = Clock::now();
 			for (int index = 0; index < m_collisionObjects.size(); ++index) {
 				if (auto* rigidBody = btRigidBody::upcast(m_collisionObjects[index])) {
@@ -354,12 +358,23 @@ namespace
 				return;
 			}
 
+			for (int index = 0; index < m_constraints.size(); ++index) {
+				auto* constraint = m_constraints[index];
+				if (constraint &&
+					constraint->isEnabled() &&
+					constraint->getRigidBodyA().isStaticOrKinematicObject() &&
+					constraint->getRigidBodyB().isStaticOrKinematicObject()) {
+					constraint->setEnabled(false);
+				}
+			}
+
 			btDiscreteDynamicsWorldMt::solveConstraints(a_solverInfo);
 			static_cast<hdt::CollisionDispatcher*>(m_dispatcher1)->clearAllManifold();
 		}
 
 		void integrateTransforms(const btScalar a_timeStep) override
 		{
+			BT_PROFILE("integrateTransforms");
 			for (int index = 0; index < m_collisionObjects.size(); ++index) {
 				auto* body = m_collisionObjects[index];
 				if (!body || !body->isKinematicObject()) {
@@ -2858,6 +2873,7 @@ namespace
 
 
 #include "Fo4PhysicsWorld/Core.inl"
+#include "Fo4PhysicsWorld/Console.inl"
 #include "Fo4PhysicsWorld/Simulation.inl"
 #include "Fo4PhysicsWorld/Events.inl"
 #include "Fo4PhysicsWorld/Lifecycle.inl"

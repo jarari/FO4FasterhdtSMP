@@ -115,6 +115,58 @@ namespace Smp
 		ResetLocked();
 	}
 
+	void Fo4PhysicsWorld::ResetSystems()
+	{
+		WaitForAsyncStep();
+		std::vector<std::pair<RE::Actor*, RE::ActorHandle>> actors;
+		{
+			std::scoped_lock lock(lock_);
+			for (auto& actorState : prototypeActors_) {
+				for (auto& runtime : actorState.runtimes) {
+					runtime.pendingResetPhysicsRead = true;
+				}
+				if (actorState.actor &&
+					std::ranges::none_of(actors, [&](const auto& a_entry) {
+						return a_entry.first == actorState.actor;
+					})) {
+					actors.emplace_back(actorState.actor, actorState.actorHandle);
+				}
+			}
+			ResetStepClockLocked();
+		}
+
+		for (const auto& [actor, handle] : actors) {
+			const auto resolved = handle.get();
+			if (resolved && resolved.get() == actor) {
+				ResetActorPhysics(resolved.get(), true);
+			}
+		}
+	}
+
+	void Fo4PhysicsWorld::SetDisabled(const bool a_disabled)
+	{
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		disabled_ = a_disabled;
+		ResetStepClockLocked();
+	}
+
+	bool Fo4PhysicsWorld::IsDisabled()
+	{
+		std::scoped_lock lock(lock_);
+		return disabled_;
+	}
+
+	void Fo4PhysicsWorld::SetProfilerCapture(
+		const bool a_enabled,
+		const std::uint64_t a_sampleFrames,
+		const std::uint64_t a_printFrames)
+	{
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		PhysicsProfiler::SetCapture(a_enabled, a_sampleFrames, a_printFrames);
+	}
+
 	void Fo4PhysicsWorld::WaitForAsyncStep()
 	{
 		if (asyncStepState_) {

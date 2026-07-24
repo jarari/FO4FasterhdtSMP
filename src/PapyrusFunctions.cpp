@@ -133,22 +133,7 @@ namespace
 
 	void ResetPhysics(std::monostate, RE::Actor* a_actor, const bool a_full)
 	{
-		if (!a_actor) {
-			return;
-		}
-
-		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
-		if (!handle) {
-			return;
-		}
-
-		if (const auto* tasks = F4SE::GetTaskInterface()) {
-			tasks->AddTask([handle, a_full]() mutable {
-				if (auto actor = handle.get()) {
-					Smp::Fo4PhysicsWorld::GetSingleton()->ResetActorPhysics(actor.get(), a_full);
-				}
-			});
-		}
+		Smp::Papyrus::QueueResetPhysics(a_actor, a_full);
 	}
 
 	bool F4SEAPI RegisterPapyrusFunctions(RE::BSScript::IVirtualMachine* a_vm)
@@ -299,6 +284,26 @@ namespace
 
 namespace Smp::Papyrus
 {
+	void QueueResetPhysics(RE::Actor* a_actor, const bool a_full)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		if (!handle) {
+			return;
+		}
+
+		if (const auto* tasks = F4SE::GetTaskInterface()) {
+			tasks->AddTask([handle, a_full]() mutable {
+				if (auto actor = handle.get()) {
+					Fo4PhysicsWorld::GetSingleton()->ResetActorPhysics(actor.get(), a_full);
+				}
+			});
+		}
+	}
+
 	bool Register()
 	{
 		const auto* papyrus = F4SE::GetPapyrusInterface();
@@ -355,5 +360,20 @@ namespace Smp::Papyrus
 			return std::nullopt;
 		}
 		return override->second;
+	}
+
+	std::string QueryPhysicsFileOverrides()
+	{
+		std::scoped_lock lock(overrideLock);
+
+		std::string result("[DynamicHDT] -- Querying existing override data...\n");
+		for (const auto& [actorFormID, overrides] : physicsFileOverrides) {
+			result += std::format("Actor formID: {:08X}\t{}\n", actorFormID, overrides.size());
+			for (const auto& [originalPath, overridePath] : overrides) {
+				result += std::format("\tOriginal file: {}\n\t\t| Override: {}\n", originalPath, overridePath);
+			}
+		}
+		result += "[DynamicHDT] -- Query finished...\n";
+		return result;
 	}
 }

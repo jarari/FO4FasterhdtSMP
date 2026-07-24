@@ -75,6 +75,12 @@ namespace Smp
 		bool Initialize();
 		void ApplyConfig(const RuntimeSettings& a_settings);
 		void Reset();
+		void ResetSystems();
+		void SetDisabled(bool a_disabled);
+		[[nodiscard]] bool IsDisabled();
+		void SetProfilerCapture(bool a_enabled, std::uint64_t a_sampleFrames = 240, std::uint64_t a_printFrames = 240);
+		void PrintConsoleDetails(bool a_includeItems);
+		void PrintConsoleSummary();
 		void StepFrame();
 		void Step(float a_deltaSeconds);
 		void UpdateWindLocked();

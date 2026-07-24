@@ -1348,7 +1348,11 @@ namespace Smp
 			}
 			if (bodyA->bone->m_rig.isStaticOrKinematicObject() && bodyB->bone->m_rig.isStaticOrKinematicObject()) {
 				++kinematicPairsAllowed;
-				spdlog::debug("allowing FO4 kinematic-to-kinematic constraint '{}' between '{}'/'{}'", descriptor.name, descriptor.bodyA, descriptor.bodyB);
+				spdlog::debug(
+					"retaining initially kinematic-to-kinematic constraint '{}' between '{}'/'{}'; it will remain disabled until one body becomes dynamic",
+					descriptor.name,
+					descriptor.bodyA,
+					descriptor.bodyB);
 			}
 			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup](const PrototypeConstraint& a_constraint) {
 				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;

@@ -8,6 +8,13 @@ namespace Smp
 		WaitForAsyncStep();
 		DrainQueuedLifecycleEvents();
 		ProcessPendingRebuilds();
+		{
+			std::scoped_lock lock(lock_);
+			if (disabled_) {
+				ResetStepClockLocked();
+				return;
+			}
+		}
 
 		auto delta = fixedStepSeconds_;
 		if (const auto timer = RE::BSTimer::GetSingleton()) {
@@ -190,6 +197,7 @@ namespace Smp
 		if (simulationFrame_ == 0) {
 			simulationFrame_ = 1;
 		}
+		PhysicsProfiler::AdvanceFrame();
 	}
 
 	void Fo4PhysicsWorld::LogRootConstraintDiagnosticsLocked(const std::string_view a_phase, const PrototypeActorState& a_state)
@@ -438,6 +446,7 @@ namespace Smp
 		averageStepWindMs_ = ((averageStepWindMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepWindMs_, 0.0F)) / sampleWeight;
 		averageStepBulletMs_ = ((averageStepBulletMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepBulletMs_, 0.0F)) / sampleWeight;
 		averageStepCollisionMs_ = ((averageStepCollisionMs_ * (sampleWeight - 1.0F)) + std::max(pendingStepCollisionMs_, 0.0F)) / sampleWeight;
+
 		pendingWritebackMs_ = 0.0F;
 		pendingMainSyncMs_ = 0.0F;
 		pendingStepReadMs_ = 0.0F;

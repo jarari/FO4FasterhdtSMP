@@ -39,6 +39,7 @@
 		std::uint32_t mainSyncWritebacks_{ 0 };
 		std::uint32_t duplicateCellJobsWritebacks_{ 0 };
 		std::uint32_t duplicatePostAnimationWritebacks_{ 0 };
+		bool disabled_{ false };
 		int solverIterations_{ 10 };
 		float solverErp_{ 0.2F };
 		bool clampRotations_{ true };

@@ -340,7 +340,19 @@ namespace Smp
 			}
 
 			if (a_full) {
-				MarkPendingActorRebuildLocked(a_actor, actorState->firstPerson, {}, true, true, true);
+				auto armorRecords = actorState->armorRecords;
+				for (auto& record : armorRecords) {
+					record.buildGroups.clear();
+					record.cpuCopyRetryCount = 0;
+					record.preserveCurrentPose = false;
+				}
+				MarkPendingActorRebuildLocked(
+					a_actor,
+					actorState->firstPerson,
+					std::move(armorRecords),
+					true,
+					true,
+					true);
 				queuedActorRebuild = true;
 			} else {
 				auto armorRecords = actorState->armorRecords;
