@@ -55,7 +55,7 @@
 		std::vector<std::uint64_t> CollectPrototypeGroupsForObjectLocked(const PrototypeActorState& a_state, RE::NiAVObject* a_object) const;
 		std::vector<std::uint64_t> CollectArmorPrototypeGroupsForBipedObjectLocked(const PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup = 0) const;
 		std::uint32_t PrunePrototypeRecordsForBipedObjectLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup = 0);
-		std::uint32_t ClearStaleHairSlotArmorGroupsLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup, std::string_view a_reason, RE::NiAVObject* a_object = nullptr, std::string_view a_physicsXmlPath = {});
+		std::uint32_t ClearStaleHairSlotArmorGroupsLocked(PrototypeActorState& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup, std::string_view a_reason, RE::NiAVObject* a_object = nullptr, std::string_view a_physicsXmlPath = {}, bool a_resetToStoredLocalPose = true);
 		std::uint32_t CollectHeadPartGroupsLocked(const PrototypeActorState& a_state, std::vector<std::uint64_t>& a_buildGroups) const;
 		bool HasActiveHairSlotArmorLocked(const PrototypeActorState& a_state) const;
 		bool PrototypeBuildGroupsIncludeHairSlotArmorLocked(const PrototypeActorState& a_state, std::span<const std::uint64_t> a_buildGroups) const;
@@ -64,7 +64,7 @@
 		bool ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, std::span<const std::string> a_boneNames, PrototypeBuildDomain a_domain);
 		bool ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, PrototypeBuildDomain a_domain);
 		void ClearHeadPrototypeTrackingLocked(PrototypeActorState& a_state, std::string_view a_reason);
-		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups);
+		void ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups, bool a_resetToStoredLocalPose = true);
 		void ClearAllPrototypeStatesLocked();
 		void ResumeFromLoadingMenuLocked();
 		PrototypeReadPreparation PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep);

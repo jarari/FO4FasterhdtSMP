@@ -63,6 +63,7 @@
 			std::vector<ArmorBoneReference> armorBoneReferences;
 			std::vector<std::uint64_t> buildGroups;
 			std::uint32_t cpuCopyRetryCount{ 0 };
+			bool preserveCurrentPose{ false };
 		};
 
 		struct PrototypeAttachmentRecord

@@ -3,6 +3,7 @@
 #include "Fo4PhysicsWorld.h"
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
+#include "PapyrusFunctions.h"
 #include "PhysicsXml.h"
 #include "PrototypePhysicsSystem.h"
 #include "SmpConfig.h"
@@ -142,6 +143,15 @@ F4SEPluginLoad(const F4SE::LoadInterface* a_f4se)
 		RuntimeName(),
 		runtimeVersion.string(),
 		executableVersion.string());
+
+	if (!Smp::Papyrus::Register()) {
+		spdlog::error("failed to register DynamicHDT Papyrus functions");
+		return false;
+	}
+	if (!Smp::Papyrus::RegisterSerialization()) {
+		spdlog::error("failed to register DynamicHDT F4SE serialization");
+		return false;
+	}
 
 	if (!Hooks::InstallLifecycleHooks()) {
 		spdlog::error("failed to install FO4 Faster HDT-SMP lifecycle hooks");

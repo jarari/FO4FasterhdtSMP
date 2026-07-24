@@ -1079,6 +1079,34 @@ namespace Smp
 
 			auto& actorState = GetOrCreatePrototypeStateLocked(a_actor, a_pending.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
+			std::vector<PrototypeAttachmentBoneLocalPose> preservedPoseCache;
+			const auto cacheCurrentPoseForGroups = [&](const std::span<const std::uint64_t> a_buildGroups) {
+				if (!record.preserveCurrentPose || a_buildGroups.empty()) {
+					return;
+				}
+				for (const auto& localPose : actorState.attachmentBoneLocalPoses) {
+					if (!localPose.node ||
+						std::ranges::find(a_buildGroups, localPose.buildGroup) == a_buildGroups.end() ||
+						std::ranges::any_of(preservedPoseCache, [&](const PrototypeAttachmentBoneLocalPose& a_cached) {
+							return a_cached.node.get() == localPose.node.get();
+						})) {
+						continue;
+					}
+					auto cachedPose = localPose;
+					cachedPose.buildGroup = kPapyrusArmorPoseCacheBuildGroup;
+					preservedPoseCache.push_back(std::move(cachedPose));
+				}
+			};
+			const auto restoreCachedPoses = [&]() {
+				for (const auto& cachedPose : preservedPoseCache) {
+					const auto alreadyCached = std::ranges::any_of(actorState.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_existing) {
+						return a_existing.buildGroup == kPapyrusArmorPoseCacheBuildGroup && a_existing.node.get() == cachedPose.node.get();
+					});
+					if (!alreadyCached) {
+						actorState.attachmentBoneLocalPoses.push_back(cachedPose);
+					}
+				}
+			};
 			const auto hairSlotArmorBuild = IsHairBipedObject(record.bipedObject);
 			if (const auto* attachment = FindPrototypeAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath)) {
 				for (const auto buildGroup : attachment->buildGroups) {
@@ -1110,7 +1138,9 @@ namespace Smp
 				}
 			}
 			if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
-				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
+				cacheCurrentPoseForGroups(staleArmorBuildGroups);
+				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, !record.preserveCurrentPose);
+				restoreCachedPoses();
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
 				spdlog::debug(
@@ -1122,7 +1152,17 @@ namespace Smp
 					clearedCount);
 			}
 			if (hairSlotArmorBuild) {
-				ClearStaleHairSlotArmorGroupsLocked(actorState, record.bipedObject, 0, "pending-armor-rebuild-prebuild", rebuildObject, record.physicsXmlPath);
+				const auto staleHairBuildGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, record.bipedObject);
+				cacheCurrentPoseForGroups(staleHairBuildGroups);
+				ClearStaleHairSlotArmorGroupsLocked(
+					actorState,
+					record.bipedObject,
+					0,
+					"pending-armor-rebuild-prebuild",
+					rebuildObject,
+					record.physicsXmlPath,
+					!record.preserveCurrentPose);
+				restoreCachedPoses();
 				staleArmorBuildGroups.clear();
 			}
 			spdlog::debug(
@@ -1196,6 +1236,11 @@ namespace Smp
 					static_cast<void*>(rebuildObject),
 					record.cpuCopyRetryCount,
 					record.physicsXmlPath);
+			}
+			if (record.preserveCurrentPose) {
+				std::erase_if(actorState.attachmentBoneLocalPoses, [](const PrototypeAttachmentBoneLocalPose& a_pose) {
+					return a_pose.buildGroup == kPapyrusArmorPoseCacheBuildGroup;
+				});
 			}
 			it = a_pending.armorRecords.erase(it);
 		}

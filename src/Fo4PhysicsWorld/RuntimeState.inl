@@ -791,7 +791,8 @@ namespace Smp
 		const std::uint64_t a_preservedBuildGroup,
 		const std::string_view a_reason,
 		RE::NiAVObject* a_object,
-		const std::string_view a_physicsXmlPath)
+		const std::string_view a_physicsXmlPath,
+		const bool a_resetToStoredLocalPose)
 	{
 		if (!IsHairBipedObject(a_bipedObject)) {
 			return 0;
@@ -810,7 +811,7 @@ namespace Smp
 				a_reason);
 		}
 		if (!buildGroups.empty()) {
-			ClearPrototypeGroupsLocked(a_state, buildGroups);
+			ClearPrototypeGroupsLocked(a_state, buildGroups, a_resetToStoredLocalPose);
 		}
 
 		const auto removedRecords = PrunePrototypeRecordsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
@@ -1092,12 +1093,17 @@ namespace Smp
 			recordCount);
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(PrototypeActorState& a_state, const std::vector<std::uint64_t>& a_buildGroups)
+	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(
+		PrototypeActorState& a_state,
+		const std::vector<std::uint64_t>& a_buildGroups,
+		const bool a_resetToStoredLocalPose)
 	{
 		if (a_buildGroups.empty()) {
 			return;
 		}
-		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, a_buildGroups, "clear-groups");
+		if (a_resetToStoredLocalPose) {
+			ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, a_buildGroups, "clear-groups");
+		}
 
 		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
 			return std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();

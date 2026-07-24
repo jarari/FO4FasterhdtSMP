@@ -50,6 +50,8 @@ local function add_fo4_faster_hdt_smp_target(target_name, arch_flag, variant_def
         add_packages("bullet3-hdt", "tbb", "xbyak", "tinyxml2", "imgui", "spdlog")
         add_syslinks("d3d11", "dxgi", "windowscodecs", "ole32")
         add_installfiles("res/configs.xml", "res/defaultBBPs.xml", "res/prototype-sample.xml", { prefixdir = "F4SE/Plugins/FO4FasterHdtSMP" })
+        add_installfiles("res/Scripts/DynamicHDT.pex", { prefixdir = "Scripts" })
+        add_installfiles("res/Scripts/Source/User/DynamicHDT.psc", { prefixdir = "Scripts/Source/User" })
         set_pcxxheader("src/pch.h")
 end
 

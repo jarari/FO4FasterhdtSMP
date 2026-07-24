@@ -12,6 +12,7 @@
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
 #include "PhysicsXmlSelection.h"
+#include "PapyrusFunctions.h"
 #include "SmpConfig.h"
 #include "hdtSkinnedMesh/hdtDispatcher.h"
 #include "hdtSkinnedMesh/hdtSkinnedMeshBody.h"
@@ -77,6 +78,8 @@ namespace
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
+	constexpr std::uint64_t kPapyrusArmorPoseCacheBuildGroup = std::numeric_limits<std::uint64_t>::max();
+	constexpr std::uint64_t kPapyrusHeadPoseCacheBuildGroup = kPapyrusArmorPoseCacheBuildGroup - 1;
 	using Clock = std::chrono::steady_clock;
 
 	bool IsHairBipedObject(const RE::BIPED_OBJECT a_bipedObject)
@@ -2861,3 +2864,4 @@ namespace
 #include "Fo4PhysicsWorld/Rebuilds.inl"
 #include "Fo4PhysicsWorld/RuntimeState.inl"
 #include "Fo4PhysicsWorld/Build.inl"
+#include "Fo4PhysicsWorld/Papyrus.inl"

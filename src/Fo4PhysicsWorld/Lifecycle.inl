@@ -203,7 +203,17 @@ namespace Smp
 		const auto buildSelection = [&](const ArmorPhysicsXmlBuildCandidate& a_candidate) {
 			auto* a_object = a_candidate.object;
 			const auto& a_selection = a_candidate.selection;
-			const auto selectedXml = a_selection.path.string();
+			auto selectedXml = a_selection.path.string();
+			if (a_event.actor) {
+				if (auto overridePath = Papyrus::ResolvePhysicsFileOverride(a_event.actor->GetFormID(), selectedXml)) {
+					spdlog::debug(
+						"applying persistent DynamicHDT physics-file override actor={:08X} original='{}' override='{}'",
+						a_event.actor->GetFormID(),
+						selectedXml,
+						*overridePath);
+					selectedXml = std::move(*overridePath);
+				}
+			}
 			if (!a_object || selectedXml.empty()) {
 				return false;
 			}
@@ -438,6 +448,17 @@ namespace Smp
 		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(faceNode);
 
 		auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
+		struct PendingPoseCacheCleanup
+		{
+			std::vector<PrototypeAttachmentBoneLocalPose>& poses;
+
+			~PendingPoseCacheCleanup()
+			{
+				std::erase_if(poses, [](const PrototypeAttachmentBoneLocalPose& a_pose) {
+					return a_pose.buildGroup == kPapyrusHeadPoseCacheBuildGroup;
+				});
+			}
+		} pendingPoseCacheCleanup{ actorState.attachmentBoneLocalPoses };
 		const auto faceNodeChanged = actorState.faceNode && actorState.faceNode.get() != faceObject;
 		if (faceNodeChanged) {
 			ClearHeadPrototypeTrackingLocked(actorState, "face-node-replacement");
