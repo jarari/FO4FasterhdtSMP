@@ -125,14 +125,28 @@ namespace hdt
 	int SkinnedMeshWorld::stepReference(btScalar a_remainingTimeStep, const btScalar a_fixedTimeStep)
 	{
 		applyGravity();
-		while (a_remainingTimeStep > a_fixedTimeStep) {
-			internalSingleStepSimulation(a_fixedTimeStep);
-			a_remainingTimeStep -= a_fixedTimeStep;
-		}
-
 		constexpr auto minimumPeriod = btScalar(1.0F / 300.0F);
-		if (a_remainingTimeStep > minimumPeriod) {
-			internalSingleStepSimulation(a_remainingTimeStep);
+		if (a_remainingTimeStep >= minimumPeriod && a_fixedTimeStep > 0.0F) {
+			// Consume the complete interval. The reference implementation drops a
+			// final sub-1/300 s remainder, which makes the pose-read interval and
+			// the integrated interval disagree. Distribute that remainder over the
+			// completed steps instead, keeping every step above Bullet's minimum.
+			auto stepCount = std::max(
+				static_cast<int>(std::floor(a_remainingTimeStep / a_fixedTimeStep)),
+				1);
+			if (a_remainingTimeStep >= a_fixedTimeStep) {
+				const auto remainder =
+					a_remainingTimeStep -
+					a_fixedTimeStep * static_cast<btScalar>(stepCount);
+				if (remainder > minimumPeriod) {
+					++stepCount;
+				}
+			}
+
+			const auto timeStep = a_remainingTimeStep / static_cast<btScalar>(stepCount);
+			for (auto step = 0; step < stepCount; ++step) {
+				internalSingleStepSimulation(timeStep);
+			}
 		}
 		clearForces();
 		return 0;

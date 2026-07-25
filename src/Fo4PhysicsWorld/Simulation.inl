@@ -40,16 +40,23 @@ namespace Smp
 
 			accumulatedInterval_ += delta;
 			averageInterval_ += (delta - averageInterval_) * 0.125F;
-			currentStepSeconds_ = std::min(averageInterval_, fixedStepSeconds_);
+			currentStepSeconds_ = std::clamp(averageInterval_, kMinimumStepSeconds, fixedStepSeconds_);
 
-			if (accumulatedInterval_ * 2.0F <= currentStepSeconds_) {
+			// A scaled game clock can produce intervals that are too small for a
+			// stable Bullet step. Keep those intervals until there is enough game
+			// time to advance both the animation inputs and Bullet by the same
+			// amount.
+			if (accumulatedInterval_ < kMinimumStepSeconds) {
 				return;
 			}
 
 			remainingTimeStep = std::min(
 				accumulatedInterval_,
 				currentStepSeconds_ * static_cast<float>(std::max(maxSubSteps_, 1)));
-			accumulatedInterval_ = 0.0F;
+			accumulatedInterval_ -= remainingTimeStep;
+			if (accumulatedInterval_ <= std::numeric_limits<float>::epsilon()) {
+				accumulatedInterval_ = 0.0F;
+			}
 		}
 
 		const auto start = Clock::now();
@@ -62,6 +69,13 @@ namespace Smp
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 		if (!dynamicsWorld_ || a_deltaSeconds <= 0.0F) {
+			return;
+		}
+
+		const auto fixedStepSeconds = std::clamp(currentStepSeconds_, kMinimumStepSeconds, fixedStepSeconds_);
+		const auto maximumStepSeconds = std::max(fixedStepSeconds, fixedStepSeconds * static_cast<float>(std::max(maxSubSteps_, 1)));
+		const auto simulationDelta = std::min(a_deltaSeconds, maximumStepSeconds);
+		if (simulationDelta < kMinimumStepSeconds) {
 			return;
 		}
 
@@ -126,7 +140,7 @@ namespace Smp
 					PrototypeDomainName(runtime.domain),
 					std::to_underlying(runtime.bipedObject));
 			}
-			const auto preparation = PreparePrototypeActorForReadLocked(actorState, a_deltaSeconds);
+			const auto preparation = PreparePrototypeActorForReadLocked(actorState, simulationDelta);
 			readTasks.push_back({
 				.actorState = std::addressof(actorState),
 				.readDelta = preparation.timeStep,
@@ -154,17 +168,13 @@ namespace Smp
 		ApplyWindForcesLocked();
 		const auto windMs = ElapsedMs(phaseStart, Clock::now());
 
-		const auto fixedStepSeconds = std::clamp(currentStepSeconds_, kMinimumStepSeconds, fixedStepSeconds_);
-		const auto maximumStepSeconds = std::max(fixedStepSeconds, fixedStepSeconds * static_cast<float>(std::max(maxSubSteps_, 1)));
-		const auto clampedDelta = std::clamp(a_deltaSeconds, kMinimumStepSeconds, maximumStepSeconds);
-
 		pendingStepReadMs_ += readMs;
 		pendingStepWindMs_ += windMs;
 		if (!asyncStepState_) {
 			asyncStepState_ = std::make_unique<AsyncStepState>();
 		}
-		asyncStepState_->tasks.run([this, clampedDelta, fixedStepSeconds]() {
-			RunSecondStepLocked(clampedDelta, fixedStepSeconds);
+		asyncStepState_->tasks.run([this, simulationDelta, fixedStepSeconds]() {
+			RunSecondStepLocked(simulationDelta, fixedStepSeconds);
 		});
 	}
 
