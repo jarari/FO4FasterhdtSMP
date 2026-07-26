@@ -123,7 +123,7 @@ namespace Smp
 					flattened,
 					a_event.armorBoneReferences,
 					matchedBones)) {
-				spdlog::error(
+				spdlog::debug(
 					"aborting system armor physics build because a complete detached Havok reference pose is unavailable actor={} root={}",
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(actorRootNode));

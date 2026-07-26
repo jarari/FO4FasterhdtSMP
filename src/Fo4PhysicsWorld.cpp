@@ -2199,7 +2199,7 @@ namespace
 			requiredMatchedBones,
 			unresolvedRequiredBones.size());
 		for (const auto name : unresolvedRequiredBones) {
-			spdlog::warn(
+			spdlog::debug(
 				"skipping armor physics bone '{}' because it has neither an actor reference transform nor a captured NIF-local armor hierarchy actor={}",
 				name,
 				static_cast<void*>(a_actor));
