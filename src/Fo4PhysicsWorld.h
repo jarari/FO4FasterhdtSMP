@@ -99,7 +99,7 @@ namespace Smp
 		void ResetLocked();
 		void NoteLifecycleCandidate(const LifecycleEvent& a_event);
 		void BuildForEventLocked(const LifecycleEvent& a_event);
-		void BuildHeadForEventLocked(const LifecycleEvent& a_event);
+		bool BuildHeadForEventLocked(const LifecycleEvent& a_event);
 		bool IsBuildCandidateLocked(const LifecycleEvent& a_event, bool a_requireObject);
 
 		#include "Fo4PhysicsWorld.Types.h"

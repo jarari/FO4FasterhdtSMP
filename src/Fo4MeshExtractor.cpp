@@ -496,6 +496,10 @@ namespace
 		}
 		if (vertexBuffer->pendingCopy) {
 			++a_result.stats.pendingVertexCopies;
+			const auto meshName = ResolveGeometryName(a_geometry);
+			if (std::ranges::find(a_result.pendingCpuCopyMeshes, meshName) == a_result.pendingCpuCopyMeshes.end()) {
+				a_result.pendingCpuCopyMeshes.push_back(meshName);
+			}
 		}
 		if (!vertexBuffer->data) {
 			++a_result.stats.missingCpuVertexData;
@@ -665,6 +669,9 @@ namespace
 			}
 			if (indexBuffer->pendingCopy) {
 				++a_result.stats.pendingIndexCopies;
+				if (std::ranges::find(a_result.pendingCpuCopyMeshes, mesh.name) == a_result.pendingCpuCopyMeshes.end()) {
+					a_result.pendingCpuCopyMeshes.push_back(mesh.name);
+				}
 			}
 			if (!indexBuffer->data) {
 				++a_result.stats.missingCpuIndexData;

@@ -9,7 +9,8 @@ namespace Smp
 		const PhysicsXmlSummary& a_summary,
 		const DefaultBBP::NameMap& a_meshNameMap,
 		const BuildDomain a_domain,
-		const bool a_commitToBullet)
+		const bool a_commitToBullet,
+		const std::span<const RE::NiPointer<RE::NiAVObject>> a_meshSourceRoots)
 	{
 		struct BuildTiming
 		{
@@ -362,7 +363,7 @@ namespace Smp
 		}
 		std::vector<MeshRecord> stagedMeshes;
 		phaseStart = Clock::now();
-		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
+		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, a_meshSourceRoots, buildGroup, a_domain, stagedBodies, stagedMeshes);
 		timing.meshBuildMs += ElapsedMs(phaseStart, Clock::now());
 		const auto bodyOnlyArmorBuild = a_domain == BuildDomain::kArmor;
 		if (cpuCopyPending) {
@@ -704,6 +705,7 @@ namespace Smp
 		const PhysicsXmlSummary& a_summary,
 		const LifecycleEvent& a_event,
 		const DefaultBBP::NameMap& a_meshNameMap,
+		const std::span<const RE::NiPointer<RE::NiAVObject>> a_meshSourceRoots,
 		const std::uint64_t a_buildGroup,
 		const BuildDomain a_domain,
 		std::vector<BoneRecord>& a_stagedBodies,
@@ -720,8 +722,16 @@ namespace Smp
 		auto pendingMatchedGeometries = cpuCopyPending ? extraction.stats.matchedGeometries : 0U;
 		auto pendingVertexCopies = cpuCopyPending ? extraction.stats.pendingVertexCopies : 0U;
 		auto pendingIndexCopies = cpuCopyPending ? extraction.stats.pendingIndexCopies : 0U;
+		auto pendingCpuCopyMeshes = extraction.pendingCpuCopyMeshes;
+		auto appendPendingCpuCopyMeshes = [&pendingCpuCopyMeshes](const Smp::Fo4MeshExtractionResult& a_source) {
+			for (const auto& meshName : a_source.pendingCpuCopyMeshes) {
+				if (std::ranges::find(pendingCpuCopyMeshes, meshName) == pendingCpuCopyMeshes.end()) {
+					pendingCpuCopyMeshes.push_back(meshName);
+				}
+			}
+		};
 		const char* extractionSource = "attached-object";
-		if (a_domain != BuildDomain::kArmor && extraction.meshes.empty()) {
+		if (a_domain != BuildDomain::kArmor && a_meshSourceRoots.empty() && extraction.meshes.empty()) {
 			const auto attachedDynamicBones = CountDynamicDecodedSkinBones(extraction, a_summary);
 			const std::array fallbackRoots{
 				std::pair{ "source-object", a_event.sourceObject },
@@ -739,6 +749,7 @@ namespace Smp
 					pendingMatchedGeometries += fallbackExtraction.stats.matchedGeometries;
 					pendingVertexCopies += fallbackExtraction.stats.pendingVertexCopies;
 					pendingIndexCopies += fallbackExtraction.stats.pendingIndexCopies;
+					appendPendingCpuCopyMeshes(fallbackExtraction);
 				}
 				if (fallbackExtraction.meshes.empty()) {
 					spdlog::debug(
@@ -785,14 +796,86 @@ namespace Smp
 				break;
 			}
 		}
-		if (extraction.meshes.empty() && cpuCopyPending) {
+		std::unordered_set<RE::BSGeometry*> detachedSourceGeometries;
+		if (a_domain != BuildDomain::kArmor) {
+			for (const auto& sourceRoot : a_meshSourceRoots) {
+				auto* root = sourceRoot.get();
+				if (!root || root == a_event.object) {
+					continue;
+				}
+
+				auto sourceExtraction = ExtractSkinnedMeshes(root, meshNames);
+				if (HasPendingCpuCopyExtraction(sourceExtraction)) {
+					cpuCopyPending = true;
+					pendingMatchedGeometries += sourceExtraction.stats.matchedGeometries;
+					pendingVertexCopies += sourceExtraction.stats.pendingVertexCopies;
+					pendingIndexCopies += sourceExtraction.stats.pendingIndexCopies;
+					appendPendingCpuCopyMeshes(sourceExtraction);
+				}
+				spdlog::debug(
+					"headpart supplemental mesh source actor={} root={} name='{}' decodedMeshes={} geometries={} skinned={} matched={} pendingVertexCopies={} pendingIndexCopies={} missingRendererData={} missingCpuVertexData={} missingCpuIndexData={}",
+					static_cast<void*>(a_state.actor),
+					static_cast<void*>(root),
+					std::string_view(root->GetName()),
+					sourceExtraction.stats.decodedMeshes,
+					sourceExtraction.stats.geometries,
+					sourceExtraction.stats.skinnedGeometries,
+					sourceExtraction.stats.matchedGeometries,
+					sourceExtraction.stats.pendingVertexCopies,
+					sourceExtraction.stats.pendingIndexCopies,
+					sourceExtraction.stats.missingRendererData,
+					sourceExtraction.stats.missingCpuVertexData,
+					sourceExtraction.stats.missingCpuIndexData);
+
+				for (const auto& descriptor : a_summary.meshDescriptors) {
+					const auto alreadyResolved = std::ranges::any_of(extraction.meshes, [&](const auto& a_mesh) {
+						return MeshNameMatches(descriptor.name, a_mesh.name, a_meshNameMap);
+					});
+					if (alreadyResolved) {
+						continue;
+					}
+
+					for (auto& sourceMesh : sourceExtraction.meshes) {
+						if (!MeshNameMatches(descriptor.name, sourceMesh.name, a_meshNameMap)) {
+							continue;
+						}
+						detachedSourceGeometries.emplace(sourceMesh.geometry);
+						spdlog::debug(
+							"mesh descriptor '{}' resolved from headpart source root={} name='{}' geometry={} geometryName='{}'",
+							descriptor.name,
+							static_cast<void*>(root),
+							std::string_view(root->GetName()),
+							static_cast<void*>(sourceMesh.geometry),
+							sourceMesh.name);
+						extraction.meshes.push_back(std::move(sourceMesh));
+					}
+				}
+			}
+		}
+		if (!detachedSourceGeometries.empty()) {
+			extractionSource = "attached-object+headpart-sources";
+		}
+		const auto unresolvedCpuCopyPending = std::ranges::any_of(a_summary.meshDescriptors, [&](const auto& a_descriptor) {
+			const auto resolved = std::ranges::any_of(extraction.meshes, [&](const auto& a_mesh) {
+				return MeshNameMatches(a_descriptor.name, a_mesh.name, a_meshNameMap);
+			});
+			if (resolved) {
+				return false;
+			}
+			return std::ranges::any_of(pendingCpuCopyMeshes, [&](const auto& a_meshName) {
+				return MeshNameMatches(a_descriptor.name, a_meshName, a_meshNameMap);
+			});
+		});
+		if (cpuCopyPending && (extraction.meshes.empty() || unresolvedCpuCopyPending)) {
 			spdlog::debug(
-				"system mesh extraction delayed for pending CPU copy actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+				"system mesh extraction delayed for unresolved pending CPU copy actor={} object={} decodedMeshes={} matched={} pendingVertexCopies={} pendingIndexCopies={} pendingMeshes={}",
 				static_cast<void*>(a_state.actor),
 				static_cast<void*>(a_event.object),
+				extraction.stats.decodedMeshes,
 				pendingMatchedGeometries,
 				pendingVertexCopies,
-				pendingIndexCopies);
+				pendingIndexCopies,
+				pendingCpuCopyMeshes.size());
 			return true;
 		}
 		if (a_domain == BuildDomain::kArmor && cpuCopyPending) {
@@ -842,22 +925,48 @@ namespace Smp
 			}
 			return stagedBody != a_stagedBodies.end() ? std::addressof(*stagedBody) : nullptr;
 		};
-		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> BoneRecord* {
+		RE::BSFlattenedBoneTree* liveActorSkeleton = nullptr;
+		if (!a_meshSourceRoots.empty()) {
+			liveActorSkeleton = FindFlattenedBoneTreeInScene(a_event.destinationRoot);
+			if (!liveActorSkeleton && a_event.actor) {
+				liveActorSkeleton = FindFlattenedBoneTreeInScene(a_event.actor->Get3D(a_event.firstPerson));
+			}
+		}
+		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName, const bool a_detachedSource) -> BoneRecord* {
 			if (a_decodedBone.name.empty()) {
 				return nullptr;
 			}
 			auto* fallbackNode = a_decodedBone.node;
 			auto* fallbackTransform = a_domain == BuildDomain::kArmor ? a_decodedBone.worldTransform :
 				(fallbackNode ? std::addressof(fallbackNode->world) : nullptr);
+			if (a_detachedSource && a_domain != BuildDomain::kArmor) {
+				fallbackNode = nullptr;
+				fallbackTransform = nullptr;
+				if (auto* actorBone = FindFlattenedBoneByName(liveActorSkeleton, a_decodedBone.name)) {
+					fallbackNode = actorBone->node.get();
+					fallbackTransform = std::addressof(actorBone->world);
+				}
+			}
 			if (!fallbackTransform) {
-				spdlog::debug(
-					"skipping fallback kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because no vanilla world transform was resolved",
-					a_meshName,
-					static_cast<void*>(a_event.actor),
-					a_decodedBone.name,
-					static_cast<void*>(a_decodedBone.node),
-					a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
-					a_buildGroup);
+				if (a_detachedSource) {
+					spdlog::debug(
+						"skipping fallback kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because the detached headpart source bone has no live actor counterpart",
+						a_meshName,
+						static_cast<void*>(a_event.actor),
+						a_decodedBone.name,
+						static_cast<void*>(a_decodedBone.node),
+						a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
+						a_buildGroup);
+				} else {
+					spdlog::debug(
+						"skipping fallback kinematic skin bone for mesh '{}' actor={} bone='{}' node={} nodeName='{}' buildGroup={} because no vanilla world transform was resolved",
+						a_meshName,
+						static_cast<void*>(a_event.actor),
+						a_decodedBone.name,
+						static_cast<void*>(a_decodedBone.node),
+						a_decodedBone.node ? std::string_view(a_decodedBone.node->GetName()) : std::string_view{},
+						a_buildGroup);
+				}
 				return nullptr;
 			}
 
@@ -1038,7 +1147,10 @@ namespace Smp
 
 					if (!matchedBody || !matchedBody->bone) {
 						if (weightedBone) {
-							matchedBody = createFallbackSkinBody(decodedBone, decodedMesh.name);
+							matchedBody = createFallbackSkinBody(
+								decodedBone,
+								decodedMesh.name,
+								detachedSourceGeometries.contains(decodedMesh.geometry));
 							if (!matchedBody || !matchedBody->bone) {
 								++skippedMissingBones;
 								spdlog::warn(
@@ -1294,7 +1406,11 @@ namespace Smp
 
 			MeshRecord meshRecord;
 			meshRecord.name = meshDescriptor->name;
-			meshRecord.geometry = primaryMesh && IsProbablyValidNiObject(primaryMesh->geometry) ? primaryMesh->geometry : nullptr;
+			meshRecord.geometry = primaryMesh &&
+					!detachedSourceGeometries.contains(primaryMesh->geometry) &&
+					IsProbablyValidNiObject(primaryMesh->geometry) ?
+				primaryMesh->geometry :
+				nullptr;
 			meshRecord.buildGroup = a_buildGroup;
 			meshRecord.descriptorIndex = meshDescriptorIndex;
 			meshRecord.bipedObject = a_event.bipedObject;

@@ -230,6 +230,7 @@ namespace
 		RE::NiAVObject* object{ nullptr };
 		std::filesystem::path path;
 		Smp::DefaultBBP::NameMap meshNameMap;
+		std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
 		RE::NiPointer<RE::NiNode> destinationRoot;
@@ -368,16 +369,16 @@ namespace
 			nullptr;
 	}
 
-	void AddHairHeadpartKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
+	void AddHeadpartClosureKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
 	{
-		if (!a_headPart || a_headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
+		if (!a_headPart) {
 			return;
 		}
 
 		AddHeadpartKey(a_keys, GetHeadPartModelPath(a_headPart));
 		AddHeadpartKey(a_keys, std::string(std::string_view(a_headPart->formEditorID)));
 		for (auto* extraPart : a_headPart->extraParts) {
-			AddHairHeadpartKeys(extraPart, a_keys);
+			AddHeadpartClosureKeys(extraPart, a_keys);
 		}
 	}
 
@@ -390,7 +391,9 @@ namespace
 		}
 
 		for (auto* headPart : npc->GetHeadParts(true)) {
-			AddHairHeadpartKeys(headPart, keys);
+			if (headPart && headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair) {
+				AddHeadpartClosureKeys(headPart, keys);
+			}
 		}
 		return keys;
 	}
@@ -721,6 +724,9 @@ namespace
 		if (!a_object) {
 			return nullptr;
 		}
+		if (auto* triShape = a_object->IsTriShape()) {
+			return triShape;
+		}
 		if (auto* geometry = a_object->IsGeometry()) {
 			return geometry;
 		}
@@ -788,6 +794,8 @@ namespace
 		RE::NiNode* a_destinationRoot,
 		RE::BGSHeadPart* a_headPart,
 		std::unordered_set<RE::BGSHeadPart*>& a_visited,
+		Smp::DefaultBBP::NameMap& a_meshNameMap,
+		std::vector<RE::NiPointer<RE::NiAVObject>>& a_meshSourceRoots,
 		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
 	{
 		if (!a_actor || !a_faceObject || !a_destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
@@ -796,73 +804,110 @@ namespace
 
 		const auto* modelPath = GetHeadPartModelPath(a_headPart);
 		if (modelPath && *modelPath) {
-			// Matches BSFaceGenModel::LoadModelMesh: loadLevel 3 with FaceGen,
-			// process, and texture loading enabled.
-			RE::BSModelDB::DBTraits::ArgsType args{};
-			args.loadLevel = 3;
-			args.faceGenModel = true;
-			args.performProcess = true;
-			args.loadTextures = true;
-
-			RE::NiPointer<RE::NiNode> sourceRoot;
-			const auto error = RE::BSModelDB::Demand(modelPath, std::addressof(sourceRoot), args);
-			if (error != RE::BSResource::ErrorCode::kNone || !sourceRoot) {
+			// BSModelDB caches by the prepared resource ID. Load the complete model
+			// before requesting FaceGen processing so an uncached extra-part NIF
+			// does not enter the cache as a stripped FaceGen source.
+			RE::BSModelDB::DBTraits::ArgsType meshArgs{};
+			meshArgs.loadLevel = 3;
+			meshArgs.performProcess = true;
+			meshArgs.loadTextures = true;
+			RE::NiPointer<RE::NiNode> meshSourceRoot;
+			const auto meshError = RE::BSModelDB::Demand(modelPath, std::addressof(meshSourceRoot), meshArgs);
+			if (meshError != RE::BSResource::ErrorCode::kNone || !meshSourceRoot) {
 				spdlog::warn(
-					"failed to load current hair headpart model actor={} headPart={:08X} nif='{}' error={}",
+					"failed to load current hair headpart mesh source actor={} headPart={:08X} nif='{}' error={}",
 					static_cast<void*>(a_actor),
 					a_headPart->GetFormID(),
 					modelPath,
-					std::to_underlying(error));
-			} else if (auto selection = FindHeadPartSourceSelection(sourceRoot.get())) {
-				const auto sourceGeometryName = selection->geometry ?
-					std::string(std::string_view(selection->geometry->GetName())) :
+					std::to_underlying(meshError));
+			}
+
+			auto faceGenArgs = meshArgs;
+			faceGenArgs.faceGenModel = true;
+			RE::NiPointer<RE::NiNode> sourceRoot;
+			const auto faceGenError = RE::BSModelDB::Demand(modelPath, std::addressof(sourceRoot), faceGenArgs);
+			if (faceGenError != RE::BSResource::ErrorCode::kNone || !sourceRoot) {
+				if (meshSourceRoot) {
+					spdlog::warn(
+						"failed to load current hair headpart FaceGen source actor={} headPart={:08X} nif='{}' error={}; using complete model source",
+						static_cast<void*>(a_actor),
+						a_headPart->GetFormID(),
+						modelPath,
+						std::to_underlying(faceGenError));
+					sourceRoot = meshSourceRoot;
+				} else {
+					spdlog::warn(
+						"failed to load current hair headpart model actor={} headPart={:08X} nif='{}' error={}",
+						static_cast<void*>(a_actor),
+						a_headPart->GetFormID(),
+						modelPath,
+						std::to_underlying(faceGenError));
+				}
+			}
+			if (!meshSourceRoot) {
+				meshSourceRoot = sourceRoot;
+			}
+
+			if (sourceRoot && meshSourceRoot) {
+				auto selection = FindHeadPartSourceSelection(sourceRoot.get());
+				auto* sourceGeometry = selection && selection->geometry ?
+					selection->geometry :
+					FindFirstGeometry(meshSourceRoot.get());
+				if (std::ranges::none_of(a_meshSourceRoots, [&](const auto& a_root) {
+						return a_root.get() == meshSourceRoot.get();
+					})) {
+					a_meshSourceRoots.emplace_back(meshSourceRoot.get());
+				}
+				const auto sourceGeometryName = sourceGeometry ?
+					std::string(std::string_view(sourceGeometry->GetName())) :
 					std::string{};
 				auto* liveGeometry = ResolveLiveHeadPartGeometry(a_faceObject, a_headPart, sourceGeometryName);
 				if (!liveGeometry) {
 					spdlog::debug(
-						"could not pair current hair headpart model with live FaceGen geometry actor={} headPart={:08X} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}'",
+						"current hair headpart source has no live FaceGen geometry actor={} headPart={:08X} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}' supplementalMeshSource={}",
 						static_cast<void*>(a_actor),
 						a_headPart->GetFormID(),
 						std::string_view(a_headPart->formEditorID),
 						modelPath,
 						sourceGeometryName,
-						selection->path.string());
+						selection ? selection->path.string() : std::string{},
+						true);
 				} else {
-					auto references = Smp::CaptureArmorBoneReferences(sourceRoot.get(), a_destinationRoot, modelPath);
-					auto* actorBoneTree = FindFlattenedBoneTreeInScene(a_destinationRoot);
-					for (auto& reference : references) {
-						reference.isArmorOnly = FindFlattenedBoneByName(actorBoneTree, reference.name) == nullptr;
-					}
-
-					Smp::DefaultBBP::NameMap meshNameMap;
 					const auto liveGeometryName = std::string(std::string_view(liveGeometry->GetName()));
+					const auto selectedXml = selection ? selection->path.string() : std::string{};
 					if (!sourceGeometryName.empty() && !liveGeometryName.empty()) {
-						meshNameMap[sourceGeometryName].emplace(liveGeometryName);
+						a_meshNameMap[sourceGeometryName].emplace(liveGeometryName);
 					}
 
-					const auto previousCandidateCount = a_candidates.size();
-					AppendHeadCandidate(
-						a_candidates,
-						liveGeometry,
-						std::move(selection->path),
-						std::move(meshNameMap),
-						liveGeometry,
-						nullptr,
-						Smp::BuildDomain::kHair,
-						a_destinationRoot,
-						std::move(references));
-					if (a_candidates.size() != previousCandidateCount) {
-						spdlog::debug(
-							"resolved current hair headpart physics actor={} headPart={:08X} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}' references={}",
-							static_cast<void*>(a_actor),
-							a_headPart->GetFormID(),
-							modelPath,
-							a_candidates.back().path.string(),
-							sourceGeometryName,
-							static_cast<void*>(liveGeometry),
-							liveGeometryName,
-							a_candidates.back().boneReferences.size());
+					std::size_t referenceCount = 0;
+					if (selection) {
+						auto references = Smp::CaptureArmorBoneReferences(sourceRoot.get(), a_destinationRoot, modelPath);
+						auto* actorBoneTree = FindFlattenedBoneTreeInScene(a_destinationRoot);
+						for (auto& reference : references) {
+							reference.isArmorOnly = FindFlattenedBoneByName(actorBoneTree, reference.name) == nullptr;
+						}
+						referenceCount = references.size();
+						AppendHeadCandidate(
+							a_candidates,
+							liveGeometry,
+							std::move(selection->path),
+							{},
+							liveGeometry,
+							nullptr,
+							Smp::BuildDomain::kHair,
+							a_destinationRoot,
+							std::move(references));
 					}
+					spdlog::debug(
+						"resolved current hair headpart component actor={} headPart={:08X} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}' references={}",
+						static_cast<void*>(a_actor),
+						a_headPart->GetFormID(),
+						modelPath,
+						selectedXml,
+						sourceGeometryName,
+						static_cast<void*>(liveGeometry),
+						liveGeometryName,
+						referenceCount);
 				}
 			}
 		}
@@ -874,6 +919,8 @@ namespace
 				a_destinationRoot,
 				extraPart,
 				a_visited,
+				a_meshNameMap,
+				a_meshSourceRoots,
 				a_candidates);
 		}
 	}
@@ -890,18 +937,35 @@ namespace
 			return;
 		}
 
-		std::unordered_set<RE::BGSHeadPart*> visited;
 		for (auto* headPart : npc->GetHeadParts(true)) {
 			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
 				continue;
 			}
+
+			std::unordered_set<RE::BGSHeadPart*> visited;
+			Smp::DefaultBBP::NameMap meshNameMap;
+			std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
+			const auto firstCandidate = a_candidates.size();
 			AppendLiveHairHeadPartCandidates(
 				a_actor,
 				a_faceObject,
 				destinationRoot,
 				headPart,
 				visited,
+				meshNameMap,
+				meshSourceRoots,
 				a_candidates);
+
+			for (auto candidateIndex = firstCandidate; candidateIndex < a_candidates.size(); ++candidateIndex) {
+				auto& candidate = a_candidates[candidateIndex];
+				candidate.meshSourceRoots = meshSourceRoots;
+				for (const auto& [sourceName, liveNames] : meshNameMap) {
+					auto& candidateNames = candidate.meshNameMap[sourceName];
+					for (const auto& liveName : liveNames) {
+						candidateNames.emplace(liveName);
+					}
+				}
+			}
 		}
 	}
 

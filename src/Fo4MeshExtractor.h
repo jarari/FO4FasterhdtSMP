@@ -67,6 +67,7 @@ namespace Smp
 	{
 		Fo4MeshExtractionStats stats;
 		std::vector<Fo4DecodedSkinnedMesh> meshes;
+		std::vector<std::string> pendingCpuCopyMeshes;
 	};
 
 	Fo4MeshExtractionResult ExtractSkinnedMeshes(RE::NiAVObject* a_root, std::span<const std::string> a_meshNames = {});

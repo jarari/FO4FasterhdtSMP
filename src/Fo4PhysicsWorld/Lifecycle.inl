@@ -436,12 +436,12 @@ namespace Smp
 		});
 	}
 
-	void Fo4PhysicsWorld::BuildHeadForEventLocked(const LifecycleEvent& a_event)
+	bool Fo4PhysicsWorld::BuildHeadForEventLocked(const LifecycleEvent& a_event)
 	{
 		auto* faceNode = a_event.actor ? a_event.actor->GetFaceNodeSkinned() : nullptr;
 		if (!faceNode) {
 			spdlog::debug("skipping head physics candidate {} actor={} because no skinned face node is available", ToString(a_event.type), static_cast<void*>(a_event.actor));
-			return;
+			return false;
 		}
 		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(faceNode);
 
@@ -486,7 +486,7 @@ namespace Smp
 			std::erase_if(systems_, [](const auto& a_state) {
 				return !a_state->suspended && !a_state->HasPhysics();
 			});
-			return;
+			return false;
 		}
 
 		const auto touchedHeadGeometry = a_event.type == LifecycleEventType::kHeadSkinSingleGeometry;
@@ -535,13 +535,14 @@ namespace Smp
 			std::erase_if(systems_, [](const auto& a_state) {
 				return !a_state->suspended && !a_state->HasPhysics();
 			});
-			return;
+			return false;
 		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		std::uint32_t built = 0;
 		std::uint32_t skippedExisting = 0;
 		std::uint32_t skippedDuplicateXml = 0;
+		bool cpuCopyPending = false;
 		std::vector<std::pair<BuildDomain, std::string>> scannedPhysicsFiles;
 		for (auto& candidate : candidates) {
 			const auto selectedXml = candidate.path.string();
@@ -643,7 +644,15 @@ namespace Smp
 					candidate.boneReferences);
 				scopedEvent.armorBoneReferences = candidate.boneReferences;
 			}
-			const auto buildResult = BuildSystemObjectsLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
+			const auto buildResult = BuildSystemObjectsLocked(
+				actorState,
+				scopedEvent,
+				*selectedSummary,
+				candidate.meshNameMap,
+				candidate.domain,
+				true,
+				candidate.meshSourceRoots);
+			cpuCopyPending = cpuCopyPending || buildResult.cpuCopyPending;
 			if (buildResult.succeeded) {
 				actorState.headPartRecords.push_back({
 					.domain = candidate.domain,
@@ -658,7 +667,7 @@ namespace Smp
 		}
 
 		spdlog::debug(
-			"processed head physics candidate actor={} faceNode={} candidates={} built={} skippedExisting={} skippedDuplicateXml={} trackedHeadParts={} hairKeys={}",
+			"processed head physics candidate actor={} faceNode={} candidates={} built={} skippedExisting={} skippedDuplicateXml={} trackedHeadParts={} hairKeys={} pendingCpuCopy={}",
 			static_cast<void*>(a_event.actor),
 			static_cast<void*>(faceNode),
 			candidates.size(),
@@ -666,10 +675,12 @@ namespace Smp
 			skippedExisting,
 			skippedDuplicateXml,
 			actorState.headPartRecords.size(),
-			hairKeys.size());
+			hairKeys.size(),
+			cpuCopyPending);
 		std::erase_if(systems_, [](const auto& a_state) {
 			return !a_state->suspended && !a_state->HasPhysics();
 		});
+		return cpuCopyPending;
 	}
 
 	bool Fo4PhysicsWorld::IsBuildCandidateLocked(const LifecycleEvent& a_event, const bool a_requireObject)

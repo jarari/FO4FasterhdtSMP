@@ -726,6 +726,7 @@ namespace Smp
 			if (resolvedActor && resolvedActor.get() == a_event.actor && pending.type == a_event.type && pending.object.get() == a_event.object) {
 				pending.frameDelay = std::max(pending.frameDelay, kHeadInitializedRebuildDelayFrames);
 				pending.headPart = a_event.headPart;
+				pending.cpuCopyRetryCount = 0;
 				return;
 			}
 		}
@@ -1515,13 +1516,34 @@ namespace Smp
 				.headPart = it->headPart,
 				.firstPerson = false,
 			};
+			bool cpuCopyPending = false;
 			if (IsBuildCandidateLocked(headEvent, false)) {
 				spdlog::debug(
 					"processing pending head physics rebuild for actor={} root={} faceNode={}",
 					static_cast<void*>(actor),
 					static_cast<void*>(root),
 					static_cast<void*>(faceNode));
-				BuildHeadForEventLocked(headEvent);
+				cpuCopyPending = BuildHeadForEventLocked(headEvent);
+			}
+			if (cpuCopyPending) {
+				if (it->cpuCopyRetryCount < kCpuCopyPendingMaxRetries) {
+					++it->cpuCopyRetryCount;
+					it->frameDelay = std::max(it->frameDelay, kCpuCopyPendingRetryDelayTasks);
+					spdlog::debug(
+						"retrying pending head mesh CPU copy actor={} object={} attempt={}/{} delayTasks={}",
+						static_cast<void*>(actor),
+						static_cast<void*>(headEvent.object),
+						it->cpuCopyRetryCount,
+						kCpuCopyPendingMaxRetries,
+						it->frameDelay);
+					++it;
+					continue;
+				}
+				spdlog::warn(
+					"giving up pending head mesh CPU copy actor={} object={} attempts={}",
+					static_cast<void*>(actor),
+					static_cast<void*>(headEvent.object),
+					it->cpuCopyRetryCount);
 			}
 			it = pendingHeadRebuilds_.erase(it);
 		}
