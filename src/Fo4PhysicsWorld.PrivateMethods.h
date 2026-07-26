@@ -14,7 +14,6 @@
 		void DeactivateBuiltSystemIfInactiveLocked(Fo4SkinnedMeshSystem& a_state, const LifecycleEvent& a_event);
 		static void MergeArmorPhysicsRecord(std::vector<ArmorPhysicsRecord>& a_records, ArmorPhysicsRecord a_record);
 		static void StripQueuedArmorRuntimePointers(std::vector<ArmorPhysicsRecord>& a_records);
-		static bool ArmorPhysicsRecordsIncludeHairSlot(std::span<const ArmorPhysicsRecord> a_records);
 		static std::uint32_t PruneStalePendingHairSlotArmorRecords(std::vector<ArmorPhysicsRecord>& a_records);
 		PendingActorRebuild* FindPendingActorRebuildLocked(RE::Actor* a_actor, bool a_firstPerson);
 		std::vector<ArmorPhysicsRecord> CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event);

@@ -523,13 +523,6 @@ namespace Smp
 		return removed;
 	}
 
-	bool Fo4PhysicsWorld::ArmorPhysicsRecordsIncludeHairSlot(const std::span<const ArmorPhysicsRecord> a_records)
-	{
-		return std::ranges::any_of(a_records, [](const ArmorPhysicsRecord& a_record) {
-			return IsHairBipedObject(a_record.bipedObject);
-		});
-	}
-
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
 		if (!a_actor) {

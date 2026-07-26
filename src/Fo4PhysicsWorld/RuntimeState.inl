@@ -174,12 +174,9 @@ namespace Smp
 				record.cpuCopyRetryCount = 0;
 				MergeArmorPhysicsRecord(armorRecords, std::move(record));
 			}
-			if (actorState.HasPhysics()) {
-				ClearSystemLocked(actorState);
-				actorState.armorRecords = armorRecords;
-				actorState.faceNode = nullptr;
-				++clearedStates;
-			}
+			ClearSystemLocked(actorState);
+			actorState.armorRecords = armorRecords;
+			++clearedStates;
 		}
 
 		std::erase_if(systems_, [](const auto& a_state) {
@@ -188,36 +185,21 @@ namespace Smp
 
 		const auto queuedArmorRecordCount = armorRecords.size();
 		const auto actorDirty = characterCustomizationActorDirty_ || queuedArmorRecordCount > 0;
-		const auto headDirty = characterCustomizationHeadDirty_;
-		const auto hairSlotArmorQueued = ArmorPhysicsRecordsIncludeHairSlot(armorRecords);
+		const auto observedHeadDirty = characterCustomizationHeadDirty_;
 		if (actorDirty) {
 			MarkPendingActorRebuildLocked(target, false, std::move(armorRecords), true, true, true);
-			if (hairSlotArmorQueued) {
-				spdlog::debug(
-					"skipping customization head reload for actor={} because queued hair-slot armor owns the slot",
-					static_cast<void*>(target));
-			} else if (headDirty) {
-				MarkPendingHeadRebuildLocked(LifecycleEvent{
-					.type = LifecycleEventType::kActorHeadInitialized,
-					.actor = target,
-					.object = target->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(target->GetFaceNodeSkinned()) : nullptr,
-					.firstPerson = false,
-				});
-			}
-		} else if (headDirty) {
-			MarkPendingHeadRebuildLocked(LifecycleEvent{
-				.type = LifecycleEventType::kActorHeadInitialized,
-				.actor = target,
-				.object = target->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(target->GetFaceNodeSkinned()) : nullptr,
-				.firstPerson = false,
-			});
 		}
+		MarkPendingHeadRebuildLocked(LifecycleEvent{
+			.type = LifecycleEventType::kActorHeadInitialized,
+			.actor = target,
+			.firstPerson = false,
+		});
 		ResetStepClockLocked();
 		spdlog::debug(
-			"queued targeted system physics reload after character customization actor={} actorDirty={} headDirty={} armorRecords={} clearedStates={} skippedFirstPerson={}",
+			"queued targeted system physics reload after character customization actor={} actorDirty={} observedHeadDirty={} headReloadQueued=true armorRecords={} clearedStates={} skippedFirstPerson={}",
 			static_cast<void*>(target),
 			actorDirty,
-			headDirty,
+			observedHeadDirty,
 			queuedArmorRecordCount,
 			clearedStates,
 			skippedFirstPerson);
@@ -252,6 +234,13 @@ namespace Smp
 					buildGroups.push_back(body.buildGroup);
 				}
 			}
+		}
+		auto* actorRoot = a_state.actor ? a_state.actor->Get3D(a_state.firstPerson) : nullptr;
+		if (!actorRoot && a_state.actor && !a_state.firstPerson) {
+			actorRoot = a_state.actor->Get3D();
+		}
+		if (actorRoot) {
+			ResetBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "suspend");
 		}
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
