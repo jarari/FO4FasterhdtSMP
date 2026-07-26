@@ -6,7 +6,6 @@
 #include "LifecycleEvents.h"
 #include "PapyrusFunctions.h"
 #include "PhysicsXml.h"
-#include "PrototypePhysicsSystem.h"
 #include "SmpConfig.h"
 
 #include <version.h>
@@ -58,15 +57,9 @@ namespace
 		Smp::Config::GetSingleton()->Load();
 		Smp::Config::GetSingleton()->Log();
 		const auto& settings = Smp::Config::GetSingleton()->GetSettings();
-		if (!Smp::PhysicsXmlLoader::GetSingleton()->LoadPrototype(settings.smp.prototypePhysicsXml) && !settings.smp.prototypePhysicsXml.empty()) {
-			Smp::PhysicsXmlLoader::GetSingleton()->LoadPrototype({});
-		}
 		Smp::Fo4PhysicsWorld::GetSingleton()->ApplyConfig(settings);
 		Smp::ImguiLayer::SetEnabled(settings.smp.enableBulletVisualization);
 		Smp::ImguiLayer::SetDrawCallback(settings.smp.enableBulletVisualization ? &DrawBulletVisualization : nullptr);
-		if (settings.smp.enablePrototypeDiagnostics) {
-			Smp::PrototypePhysicsSystem::GetSingleton()->Register();
-		}
 	}
 
 	void ResetRuntimePhysics(std::string_view a_reason)

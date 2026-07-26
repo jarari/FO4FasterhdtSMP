@@ -1,9 +1,8 @@
 #pragma once
 
-#include "DefaultBBP.h"
-#include "Fo4SkinnedMeshBone.h"
+#include "Fo4SkinnedMeshSystem.h"
 #include "LifecycleEvents.h"
-#include "RE/N/NiTransform.h"
+#include "hdtSkinnedMesh/hdtSkinnedMeshWorld.h"
 
 #include <btBulletDynamicsCommon.h>
 
@@ -36,6 +35,7 @@ namespace RE
 
 namespace hdt
 {
+	class BoneScaleConstraint;
 	class CollisionDispatcher;
 	class SkinnedMeshBody;
 }
@@ -46,21 +46,6 @@ namespace Smp
 	enum class PhysicsConstraintKind;
 	struct PhysicsXmlSummary;
 	struct RuntimeSettings;
-
-	enum class WritebackSource
-	{
-		kUnknown,
-		kMainSync,
-		kCellJobs,
-		kPostAnimationGraph
-	};
-
-	enum class PrototypeBuildDomain
-	{
-		kArmor,
-		kHead,
-		kHair
-	};
 
 	class Fo4PhysicsWorld :
 		public RE::BSTEventSink<LifecycleEvent>,
@@ -87,8 +72,8 @@ namespace Smp
 		void ApplyWindForcesLocked();
 		void RecordFrameMetrics(float a_stepMs);
 		void RecordWritebackMetric(float a_writebackMs, WritebackSource a_source, bool a_wroteAny, bool a_skippedDuplicate);
-		void WriteBackPrototypeBodies(WritebackSource a_source = WritebackSource::kUnknown);
-		void WriteBackPrototypeBodies(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
+		void WriteBackSystems(WritebackSource a_source = WritebackSource::kUnknown);
+		void WriteBackSystems(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
 		void NoteCharacterCustomizationTarget(RE::Actor* a_actor, std::uint32_t a_editMode);
@@ -113,9 +98,9 @@ namespace Smp
 		bool InitializeLocked();
 		void ResetLocked();
 		void NoteLifecycleCandidate(const LifecycleEvent& a_event);
-		void BuildPrototypeForEventLocked(const LifecycleEvent& a_event);
-		void BuildHeadPrototypeForEventLocked(const LifecycleEvent& a_event);
-		bool IsPrototypeCandidateLocked(const LifecycleEvent& a_event, bool a_requireObject);
+		void BuildForEventLocked(const LifecycleEvent& a_event);
+		void BuildHeadForEventLocked(const LifecycleEvent& a_event);
+		bool IsBuildCandidateLocked(const LifecycleEvent& a_event, bool a_requireObject);
 
 		#include "Fo4PhysicsWorld.Types.h"
 		#include "Fo4PhysicsWorld.PrivateMethods.h"

@@ -1,5 +1,6 @@
 #include "hdtSkinnedMeshSystem.h"
 
+#include "hdtBoneScaleConstraint.h"
 #include "hdtSkinnedMeshBody.h"
 #include "hdtSkinnedMeshShape.h"
 
@@ -7,21 +8,21 @@ namespace hdt
 {
 	void SkinnedMeshSystem::readTransform(const float a_timeStep)
 	{
-		if (blockResetting) {
+		if (block_resetting) {
 			return;
 		}
 
-		for (const auto& bone : bones_) {
+		for (const auto& bone : m_bones) {
 			if (bone) {
 				bone->readTransform(a_timeStep);
 			}
 		}
-		for (const auto& constraint : constraints_) {
+		for (const auto& constraint : m_constraints) {
 			if (constraint) {
 				constraint->scaleConstraint();
 			}
 		}
-		for (const auto& group : constraintGroups_) {
+		for (const auto& group : m_constraintGroups) {
 			if (group) {
 				group->scaleConstraint();
 			}
@@ -30,7 +31,7 @@ namespace hdt
 
 	void SkinnedMeshSystem::writeTransform()
 	{
-		for (const auto& bone : bones_) {
+		for (const auto& bone : m_bones) {
 			if (!bone || bone->m_rig.isKinematicObject()) {
 				continue;
 			}
@@ -41,13 +42,12 @@ namespace hdt
 
 	void SkinnedMeshSystem::internalUpdate()
 	{
-
-		for (const auto& bone : bones_) {
+		for (const auto& bone : m_bones) {
 			if (bone) {
 				bone->internalUpdate();
 			}
 		}
-		for (const auto& mesh : meshes_) {
+		for (const auto& mesh : m_meshes) {
 			if (mesh) {
 				mesh->updateBoundingSphereAabb();
 			}
@@ -56,7 +56,7 @@ namespace hdt
 
 	void SkinnedMeshSystem::gather(std::vector<SkinnedMeshBody*>& a_bodies, std::vector<SkinnedMeshShape*>& a_shapes)
 	{
-		for (const auto& mesh : meshes_) {
+		for (const auto& mesh : m_meshes) {
 			if (!mesh) {
 				continue;
 			}
@@ -69,34 +69,6 @@ namespace hdt
 					}
 				}
 			}
-		}
-	}
-
-	void SkinnedMeshSystem::addBone(RE::BSTSmartPointer<SkinnedMeshBone> a_bone)
-	{
-		if (a_bone) {
-			bones_.push_back(std::move(a_bone));
-		}
-	}
-
-	void SkinnedMeshSystem::addMesh(RE::BSTSmartPointer<SkinnedMeshBody> a_mesh)
-	{
-		if (a_mesh) {
-			meshes_.push_back(std::move(a_mesh));
-		}
-	}
-
-	void SkinnedMeshSystem::addConstraint(RE::BSTSmartPointer<BoneScaleConstraint> a_constraint)
-	{
-		if (a_constraint) {
-			constraints_.push_back(std::move(a_constraint));
-		}
-	}
-
-	void SkinnedMeshSystem::addConstraintGroup(RE::BSTSmartPointer<ConstraintGroup> a_group)
-	{
-		if (a_group) {
-			constraintGroups_.push_back(std::move(a_group));
 		}
 	}
 }

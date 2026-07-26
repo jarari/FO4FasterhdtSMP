@@ -13,7 +13,7 @@ namespace Smp
 		dispatcher_ = std::make_unique<hdt::CollisionDispatcher>(collisionConfiguration_.get());
 		broadphase_ = std::make_unique<btDbvtBroadphase>();
 		solver_ = std::make_unique<btConstraintSolverPoolMt>(InitializeBulletTaskSchedulerAndGetThreadCount());
-		dynamicsWorld_ = std::make_unique<PrototypeDynamicsWorld>(
+		dynamicsWorld_ = std::make_unique<Fo4SkinnedMeshWorld>(
 			dispatcher_.get(),
 			broadphase_.get(),
 			solver_.get(),
@@ -38,7 +38,7 @@ namespace Smp
 
 	void Fo4PhysicsWorld::ResetLocked()
 	{
-		ClearAllPrototypeStatesLocked();
+		ClearAllSystemsLocked();
 
 		if (dynamicsWorld_) {
 			for (auto index = dynamicsWorld_->getNumCollisionObjects() - 1; index >= 0; --index) {
@@ -97,8 +97,8 @@ namespace Smp
 		}
 
 		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
-			if (const auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
-				actorState && actorState->HasActiveRuntime()) {
+			if (const auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
+				actorState && actorState->IsActive()) {
 				spdlog::debug(
 					"skipping generic {} rebuild for actor={} firstPerson={} because direct armor physics is already active",
 					ToString(a_event.type),
@@ -108,7 +108,7 @@ namespace Smp
 			}
 		}
 
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
 		const auto actorArmorAttach = armorAttach && a_event.actor && !a_event.firstPerson;
@@ -118,7 +118,7 @@ namespace Smp
 			MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::move(armorRecords), false, false);
 			ResetStepClockLocked();
 			spdlog::debug(
-				"queued scoped armor prototype physics resume for loading-screen attach {} actor={} object={} armorRecords={}",
+				"queued scoped armor system physics resume for loading-screen attach {} actor={} object={} armorRecords={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object),
@@ -129,14 +129,14 @@ namespace Smp
 		if (DeferCharacterCustomizationLifecycleLocked(a_event, true, false)) {
 			if (actorArmorAttach) {
 				spdlog::debug(
-					"deferred scoped armor prototype physics resume for customization target attach {} actor={} object={} armorRecords={}",
+					"deferred scoped armor system physics resume for customization target attach {} actor={} object={} armorRecords={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object),
 					characterCustomizationArmorRecords_.size());
 			} else {
 				spdlog::debug(
-					"deferred prototype physics attach candidate {} for customization target actor={} object={}",
+					"deferred system physics attach candidate {} for customization target actor={} object={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object));
@@ -157,11 +157,11 @@ namespace Smp
 			static_cast<void*>(a_event.actor),
 			static_cast<void*>(a_event.object));
 
-		if (!IsPrototypeCandidateLocked(a_event, true)) {
+		if (!IsBuildCandidateLocked(a_event, true)) {
 			auto armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 			if (!armorRecords.empty()) {
 				spdlog::debug(
-					"captured {} suspended armor records for skipped prototype physics candidate {} actor={}",
+					"captured {} suspended armor records for skipped system physics candidate {} actor={}",
 					armorRecords.size(),
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor));
@@ -170,11 +170,11 @@ namespace Smp
 			return;
 		}
 
-		BuildPrototypeForEventLocked(a_event);
+		BuildForEventLocked(a_event);
 		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
-			const auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
-			if (!actorState || !actorState->HasActiveRuntime()) {
-				auto armorRecords = actorState ? actorState->armorRecords : std::vector<PrototypeArmorRecord>{};
+			const auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
+			if (!actorState || !actorState->IsActive()) {
+				auto armorRecords = actorState ? actorState->armorRecords : std::vector<ArmorPhysicsRecord>{};
 				if (armorRecords.empty()) {
 					armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 				}
@@ -196,7 +196,7 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::BuildPrototypeForEventLocked(const LifecycleEvent& a_event)
+	void Fo4PhysicsWorld::BuildForEventLocked(const LifecycleEvent& a_event)
 	{
 		auto* loader = PhysicsXmlLoader::GetSingleton();
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
@@ -220,13 +220,13 @@ namespace Smp
 			}
 
 			spdlog::info(
-				"loading prototype physics XML {} for actor={} object={}",
+				"loading system physics XML {} for actor={} object={}",
 				selectedXml,
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_object));
 			const auto selectedSummary = loader->LoadSummary(selectedXml);
 			if (!selectedSummary) {
-				spdlog::warn("skipping prototype physics candidate because selected XML failed to load: {}", selectedXml);
+				spdlog::warn("skipping system physics candidate because selected XML failed to load: {}", selectedXml);
 				return false;
 			}
 
@@ -248,28 +248,28 @@ namespace Smp
 			if (!scopedEvent.biped) {
 				scopedEvent.biped = ResolveEventBiped(scopedEvent);
 			}
-			auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
+			auto& actorState = GetOrCreateSystemLocked(a_event.actor, a_event.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
 			const auto scopedArmorBuild = armorAttach || scopedEvent.bipedObject != RE::BIPED_OBJECT::kTotal;
 			const auto hairSlotArmorBuild = scopedArmorBuild && IsHairBipedObject(scopedEvent.bipedObject);
 			if (scopedArmorBuild) {
-				if (IsPrototypeAttachmentCurrentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
+				if (IsAttachmentCurrentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
 					spdlog::debug(
-						"skipping duplicate armor prototype attach actor={} bipedObject={} object={} xml='{}'",
+						"skipping duplicate armor system attach actor={} bipedObject={} object={} xml='{}'",
 						static_cast<void*>(a_event.actor),
 						std::to_underlying(scopedEvent.bipedObject),
 						static_cast<void*>(a_object),
 						selectedXml);
 					return false;
 				}
-				if (const auto* attachment = FindPrototypeAttachmentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
+				if (const auto* attachment = FindAttachmentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
 					for (const auto buildGroup : attachment->buildGroups) {
 						if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
 							staleArmorBuildGroups.push_back(buildGroup);
 						}
 					}
 				}
-				for (const auto buildGroup : CollectPrototypeGroupsForObjectLocked(actorState, a_object)) {
+				for (const auto buildGroup : CollectBuildGroupsForObjectLocked(actorState, a_object)) {
 					if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
 						staleArmorBuildGroups.push_back(buildGroup);
 					}
@@ -279,7 +279,7 @@ namespace Smp
 					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 					if (replacedHeadParts > 0) {
 						spdlog::debug(
-							"hair-slot armor attach is replacing tracked head/hair prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+							"hair-slot armor attach is replacing tracked head/hair system groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
 							static_cast<void*>(a_event.actor),
 							std::to_underlying(scopedEvent.bipedObject),
 							static_cast<void*>(a_object),
@@ -288,17 +288,17 @@ namespace Smp
 							staleHeadBuildGroups.size());
 					}
 					if (!staleHeadBuildGroups.empty()) {
-						ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups);
+						ClearBuildGroupsLocked(actorState, staleHeadBuildGroups);
 					}
 				}
 				if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
 					spdlog::debug(
-						"clearing stale armor prototype groups before rebuild actor={} bipedObject={} object={} count={}",
+						"clearing stale armor system groups before rebuild actor={} bipedObject={} object={} count={}",
 						static_cast<void*>(a_event.actor),
 						std::to_underlying(scopedEvent.bipedObject),
 						static_cast<void*>(a_object),
 						staleArmorBuildGroups.size());
-					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
+					ClearBuildGroupsLocked(actorState, staleArmorBuildGroups);
 					staleArmorBuildGroups.clear();
 				}
 				if (hairSlotArmorBuild) {
@@ -306,15 +306,15 @@ namespace Smp
 					staleArmorBuildGroups.clear();
 				}
 			}
-			auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
+			auto buildResult = BuildSystemObjectsLocked(actorState, scopedEvent, *selectedSummary, a_selection.meshNameMap, BuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
 				if (hairSlotArmorBuild) {
-					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
+					ActivateBuildGroupLocked(actorState, buildResult.buildGroup);
 					buildResult.committed = true;
-					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");
+					LogSystemBulletObjectsLocked(actorState, "after-system-build-commit");
 				}
-				RecordPrototypeAttachmentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml, buildResult.buildGroup);
-				RecordPrototypeArmorLocked(
+				RecordAttachmentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml, buildResult.buildGroup);
+				RecordArmorLocked(
 					actorState,
 					scopedEvent.bipedObject,
 					selectedXml,
@@ -324,7 +324,7 @@ namespace Smp
 					scopedEvent.armorBoneReferences,
 					buildResult.buildGroup);
 				if (hairSlotArmorBuild) {
-					const auto remainingHairSlotArmorGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, scopedEvent.bipedObject).size();
+					const auto remainingHairSlotArmorGroups = CollectArmorPhysicsGroupsForBipedObjectLocked(actorState, scopedEvent.bipedObject).size();
 					spdlog::debug(
 						"hair-slot armor ownership after attach commit actor={} bipedObject={} buildGroup={} object={} xml='{}' remainingArmorGroups={}",
 						static_cast<void*>(a_event.actor),
@@ -334,10 +334,10 @@ namespace Smp
 						selectedXml,
 						remainingHairSlotArmorGroups);
 				}
-			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
-				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
+			} else if (buildResult.buildGroup != 0 && BuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, BuildDomain::kArmor)) {
+				ClearBuildGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
 				spdlog::debug(
-					"rolled back incomplete armor prototype build group actor={} bipedObject={} object={} buildGroup={} xml='{}' pendingCpuCopy={}",
+					"rolled back incomplete armor system build group actor={} bipedObject={} object={} buildGroup={} xml='{}' pendingCpuCopy={}",
 					static_cast<void*>(a_event.actor),
 					std::to_underlying(scopedEvent.bipedObject),
 					static_cast<void*>(a_object),
@@ -346,8 +346,8 @@ namespace Smp
 					buildResult.cpuCopyPending);
 			}
 			if (scopedArmorBuild && buildResult.cpuCopyPending && a_event.actor) {
-				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::vector<PrototypeArmorRecord>{
-					PrototypeArmorRecord{
+				MarkPendingActorRebuildLocked(a_event.actor, a_event.firstPerson, std::vector<ArmorPhysicsRecord>{
+					ArmorPhysicsRecord{
 						.bipedObject = scopedEvent.bipedObject,
 						.physicsXmlPath = selectedXml,
 						.meshNameMap = a_selection.meshNameMap,
@@ -359,7 +359,7 @@ namespace Smp
 				});
 			}
 			if (scopedArmorBuild) {
-				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, scopedEvent);
+				DeactivateBuiltSystemIfInactiveLocked(actorState, scopedEvent);
 			}
 			return buildResult.succeeded;
 		};
@@ -368,7 +368,7 @@ namespace Smp
 		if (armorAttach && !a_event.physicsXmlPath.empty()) {
 			discoveredXml = ArmorPhysicsXmlSelection{ .path = a_event.physicsXmlPath };
 		}
-		const auto selectedXml = discoveredXml ? discoveredXml->path.string() : (armorAttach ? std::string{} : prototypePhysicsXml_);
+		const auto selectedXml = discoveredXml ? discoveredXml->path.string() : (armorAttach ? std::string{} : fallbackPhysicsXml_);
 		std::vector<ArmorPhysicsXmlBuildCandidate> equippedArmorCandidates;
 		if (!armorAttach) {
 			CollectEquippedArmorPhysicsXmlSelections(a_event, equippedArmorCandidates);
@@ -387,17 +387,14 @@ namespace Smp
 					static_cast<void*>(a_event.bipObject ? a_event.bipObject->armorAddon : nullptr),
 					a_event.physicsXmlPath);
 			}
-			if (loader->HasPrototype()) {
-				loader->LoadPrototype({});
-			}
 			return;
 		}
 
 		if (!armorAttach) {
-			if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
-				ClearPrototypeStateLocked(*actorState);
-				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			if (auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson)) {
+				ClearSystemLocked(*actorState);
+				std::erase_if(systems_, [](const auto& a_state) {
+					return !a_state->suspended && !a_state->HasPhysics();
 				});
 			}
 		}
@@ -410,12 +407,12 @@ namespace Smp
 				}
 			}
 			spdlog::debug(
-				"processed equipped armor prototype physics rescan actor={} candidates={} built={}",
+				"processed equipped armor system physics rescan actor={} candidates={} built={}",
 				static_cast<void*>(a_event.actor),
 				equippedArmorCandidates.size(),
 				builtEquipped);
-			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			std::erase_if(systems_, [](const auto& a_state) {
+				return !a_state->suspended && !a_state->HasPhysics();
 			});
 			if (selectedXml.empty()) {
 				return;
@@ -434,12 +431,12 @@ namespace Smp
 			.sourceObject = a_event.sourceObject,
 			.sourceRoot = a_event.sourceRoot,
 		});
-		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.runtimeSuspended && !a_state.HasRuntime();
+		std::erase_if(systems_, [](const auto& a_state) {
+			return !a_state->suspended && !a_state->HasPhysics();
 		});
 	}
 
-	void Fo4PhysicsWorld::BuildHeadPrototypeForEventLocked(const LifecycleEvent& a_event)
+	void Fo4PhysicsWorld::BuildHeadForEventLocked(const LifecycleEvent& a_event)
 	{
 		auto* faceNode = a_event.actor ? a_event.actor->GetFaceNodeSkinned() : nullptr;
 		if (!faceNode) {
@@ -448,23 +445,23 @@ namespace Smp
 		}
 		auto* faceObject = reinterpret_cast<RE::NiAVObject*>(faceNode);
 
-		auto& actorState = GetOrCreatePrototypeStateLocked(a_event.actor, a_event.firstPerson);
+		auto& actorState = GetOrCreateSystemLocked(a_event.actor, a_event.firstPerson);
 		struct PendingPoseCacheCleanup
 		{
-			std::vector<PrototypeAttachmentBoneLocalPose>& poses;
+			std::vector<AttachmentBoneLocalPose>& poses;
 
 			~PendingPoseCacheCleanup()
 			{
-				std::erase_if(poses, [](const PrototypeAttachmentBoneLocalPose& a_pose) {
+				std::erase_if(poses, [](const AttachmentBoneLocalPose& a_pose) {
 					return a_pose.buildGroup == kPapyrusHeadPoseCacheBuildGroup;
 				});
 			}
 		} pendingPoseCacheCleanup{ actorState.attachmentBoneLocalPoses };
 		const auto faceNodeChanged = actorState.faceNode && actorState.faceNode.get() != faceObject;
 		if (faceNodeChanged) {
-			ClearHeadPrototypeTrackingLocked(actorState, "face-node-replacement");
+			ClearHeadPhysicsTrackingLocked(actorState, "face-node-replacement");
 			spdlog::debug(
-				"cleared stale head/hair prototype physics after face node replacement actor={} oldFaceNode={} newFaceNode={}",
+				"cleared stale head/hair system physics after face node replacement actor={} oldFaceNode={} newFaceNode={}",
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(actorState.faceNode.get()),
 				static_cast<void*>(faceObject));
@@ -478,16 +475,16 @@ namespace Smp
 			std::vector<std::uint64_t> removedGroups;
 			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, removedGroups);
 			if (!removedGroups.empty()) {
-				ClearPrototypeGroupsLocked(actorState, removedGroups);
+				ClearBuildGroupsLocked(actorState, removedGroups);
 			}
 			spdlog::debug(
-				"skipping head/hair prototype rebuild while hair-slot armor is active actor={} faceNode={} removedHeadPartRecords={} removedGroups={}",
+				"skipping head/hair system rebuild while hair-slot armor is active actor={} faceNode={} removedHeadPartRecords={} removedGroups={}",
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(faceNode),
 				removedHeadParts,
 				removedGroups.size());
-			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			std::erase_if(systems_, [](const auto& a_state) {
+				return !a_state->suspended && !a_state->HasPhysics();
 			});
 			return;
 		}
@@ -495,7 +492,7 @@ namespace Smp
 		const auto touchedHeadGeometry = a_event.type == LifecycleEventType::kHeadSkinSingleGeometry;
 		const auto touchedObjectValid = !touchedHeadGeometry || !a_event.object || IsObjectInTree(faceObject, a_event.object);
 		if (touchedHeadGeometry && !touchedObjectValid) {
-			ClearHeadPrototypeTrackingLocked(actorState, "stale-touched-headpart");
+			ClearHeadPhysicsTrackingLocked(actorState, "stale-touched-headpart");
 			spdlog::debug(
 				"discarded stale touched headpart object for actor={} object={} faceNode={}; rebuilding full current face node",
 				static_cast<void*>(a_event.actor),
@@ -515,8 +512,8 @@ namespace Smp
 		if (candidates.empty()) {
 			if (!actorState.headPartRecords.empty()) {
 				if (!touchedHeadGeometry) {
-					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHead);
-					ClearPrototypeGroupsByDomainLocked(actorState, PrototypeBuildDomain::kHair);
+					ClearBuildGroupsByDomainLocked(actorState, BuildDomain::kHead);
+					ClearBuildGroupsByDomainLocked(actorState, BuildDomain::kHair);
 					actorState.headPartRecords.clear();
 				} else if (touchedObjectValid && a_event.object) {
 					std::vector<std::uint64_t> removedGroups;
@@ -525,7 +522,7 @@ namespace Smp
 							removedGroups.push_back(record.buildGroup);
 						}
 					}
-					ClearPrototypeGroupsLocked(actorState, removedGroups);
+					ClearBuildGroupsLocked(actorState, removedGroups);
 				}
 			}
 			spdlog::debug(
@@ -535,8 +532,8 @@ namespace Smp
 				static_cast<void*>(faceNode),
 				static_cast<void*>(a_event.object),
 				hairKeys.size());
-			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.runtimeSuspended && !a_state.HasRuntime();
+			std::erase_if(systems_, [](const auto& a_state) {
+				return !a_state->suspended && !a_state->HasPhysics();
 			});
 			return;
 		}
@@ -545,7 +542,7 @@ namespace Smp
 		std::uint32_t built = 0;
 		std::uint32_t skippedExisting = 0;
 		std::uint32_t skippedDuplicateXml = 0;
-		std::vector<std::pair<PrototypeBuildDomain, std::string>> scannedPhysicsFiles;
+		std::vector<std::pair<BuildDomain, std::string>> scannedPhysicsFiles;
 		for (auto& candidate : candidates) {
 			const auto selectedXml = candidate.path.string();
 			if (selectedXml.empty()) {
@@ -559,14 +556,14 @@ namespace Smp
 				++skippedDuplicateXml;
 				spdlog::debug(
 					"previous head part generated {} physics system for XML {}, skipping duplicate object={}",
-					PrototypeDomainName(candidate.domain),
+					BuildDomainName(candidate.domain),
 					selectedXml,
 					static_cast<void*>(candidate.object));
 				continue;
 			}
 			scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
 
-			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
+			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
 				return a_record.object.get() == candidate.object &&
 					a_record.sourceObject.get() == candidate.sourceObject.get() &&
 					a_record.domain == candidate.domain &&
@@ -576,7 +573,7 @@ namespace Smp
 				++skippedExisting;
 				spdlog::debug(
 					"geometry is already added as {} head part actor={} object={} XML={} buildGroup={}",
-					PrototypeDomainName(candidate.domain),
+					BuildDomainName(candidate.domain),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(candidate.object),
 					selectedXml,
@@ -584,7 +581,7 @@ namespace Smp
 				continue;
 			}
 
-			const auto duplicateTrackedXml = std::ranges::any_of(actorState.headPartRecords, [&](const PrototypeHeadPartRecord& a_record) {
+			const auto duplicateTrackedXml = std::ranges::any_of(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
 				return a_record.object.get() != candidate.object &&
 					a_record.domain == candidate.domain &&
 					!a_record.physicsXmlPath.empty() &&
@@ -595,7 +592,7 @@ namespace Smp
 				++skippedDuplicateXml;
 				spdlog::debug(
 					"previous tracked head part generated {} physics system for XML {}, skipping duplicate object={}",
-					PrototypeDomainName(candidate.domain),
+					BuildDomainName(candidate.domain),
 					selectedXml,
 					static_cast<void*>(candidate.object));
 				continue;
@@ -608,10 +605,10 @@ namespace Smp
 				}
 			}
 			if (!replacedGroups.empty()) {
-				ClearPrototypeGroupsLocked(actorState, replacedGroups);
+				ClearBuildGroupsLocked(actorState, replacedGroups);
 				spdlog::debug(
 					"cleared stale tracked {} headpart groups={} for actor={} object={} before rebuilding XML {}",
-					PrototypeDomainName(candidate.domain),
+					BuildDomainName(candidate.domain),
 					replacedGroups.size(),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(candidate.object),
@@ -619,14 +616,14 @@ namespace Smp
 			}
 
 			spdlog::info(
-				"loading {} prototype physics XML {} for actor={} object={}",
-				PrototypeDomainName(candidate.domain),
+				"loading {} system physics XML {} for actor={} object={}",
+				BuildDomainName(candidate.domain),
 				selectedXml,
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(candidate.object));
 			const auto selectedSummary = loader->LoadSummary(selectedXml);
 			if (!selectedSummary) {
-				spdlog::warn("skipping {} physics candidate because selected XML failed to load: {}", PrototypeDomainName(candidate.domain), selectedXml);
+				spdlog::warn("skipping {} physics candidate because selected XML failed to load: {}", BuildDomainName(candidate.domain), selectedXml);
 				continue;
 			}
 
@@ -646,7 +643,7 @@ namespace Smp
 					candidate.boneReferences);
 				scopedEvent.armorBoneReferences = candidate.boneReferences;
 			}
-			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
+			const auto buildResult = BuildSystemObjectsLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			if (buildResult.succeeded) {
 				actorState.headPartRecords.push_back({
 					.domain = candidate.domain,
@@ -670,26 +667,26 @@ namespace Smp
 			skippedDuplicateXml,
 			actorState.headPartRecords.size(),
 			hairKeys.size());
-		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.runtimeSuspended && !a_state.HasRuntime();
+		std::erase_if(systems_, [](const auto& a_state) {
+			return !a_state->suspended && !a_state->HasPhysics();
 		});
 	}
 
-	bool Fo4PhysicsWorld::IsPrototypeCandidateLocked(const LifecycleEvent& a_event, const bool a_requireObject)
+	bool Fo4PhysicsWorld::IsBuildCandidateLocked(const LifecycleEvent& a_event, const bool a_requireObject)
 	{
 		if (a_requireObject && !a_event.object) {
-			spdlog::trace("skipping prototype physics candidate {} with null object", ToString(a_event.type));
+			spdlog::trace("skipping system physics candidate {} with null object", ToString(a_event.type));
 			return false;
 		}
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!a_event.actor) {
-			spdlog::trace("skipping prototype physics candidate {} with null actor", ToString(a_event.type));
+			spdlog::trace("skipping system physics candidate {} with null actor", ToString(a_event.type));
 			return false;
 		}
 
 		if (IsIgnoredFirstPersonEvent(a_event, disableFirstPersonViewPhysics_)) {
-			spdlog::debug("skipping first-person prototype physics candidate {}", ToString(a_event.type));
+			spdlog::debug("skipping first-person system physics candidate {}", ToString(a_event.type));
 			return false;
 		}
 
@@ -698,25 +695,25 @@ namespace Smp
 		}
 
 		if (!enableNpcPhysics_) {
-			spdlog::trace("skipping prototype physics candidate {} for non-player actor={} because NPC physics is disabled", ToString(a_event.type), static_cast<void*>(a_event.actor));
+			spdlog::trace("skipping system physics candidate {} for non-player actor={} because NPC physics is disabled", ToString(a_event.type), static_cast<void*>(a_event.actor));
 			return false;
 		}
 
 		const auto buildSuspendedArmorCandidate = ShouldBuildSuspendedArmorCandidateLocked(a_event);
-		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return a_state.HasActiveRuntime();
+		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
+			return a_state->IsActive();
 		}));
-		if (FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) == nullptr && activeActors >= currentMaxActiveActors_) {
+		if (FindSystemLocked(a_event.actor, a_event.firstPerson) == nullptr && activeActors >= currentMaxActiveActors_) {
 			if (buildSuspendedArmorCandidate) {
 				spdlog::debug(
-					"allowing out-of-budget SMP armor candidate {} for actor={} to build directly into soft suspension ({}/{})",
+					"allowing out-of-budget SMP armor candidate {} for actor={} to build before inactive-system deactivation ({}/{})",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					activeActors,
 					currentMaxActiveActors_);
 			} else {
 				spdlog::debug(
-					"skipping prototype physics candidate {} for actor={} because active actor budget is full ({}/{})",
+					"skipping system physics candidate {} for actor={} because active actor budget is full ({}/{})",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					activeActors,
@@ -726,16 +723,34 @@ namespace Smp
 			}
 		}
 
+		if (!IsActorWithinDistanceLocked(a_event.actor)) {
+			if (buildSuspendedArmorCandidate) {
+				spdlog::debug(
+					"allowing out-of-range SMP armor candidate {} for actor={} to build before inactive-system deactivation maxActorDistance={}",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					maxActorDistance_);
+				return true;
+			}
+			spdlog::trace(
+				"skipping system physics candidate {} for actor={} beyond maxActorDistance={}",
+				ToString(a_event.type),
+				static_cast<void*>(a_event.actor),
+				maxActorDistance_);
+			SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);
+			return false;
+		}
+
 		if (!IsActorInReferenceCullView(a_event.actor, a_event.object, a_event.firstPerson)) {
 			if (buildSuspendedArmorCandidate) {
 				spdlog::debug(
-					"allowing inactive-view SMP armor candidate {} for actor={} to build directly into soft suspension",
+					"allowing inactive-view SMP armor candidate {} for actor={} to build before inactive-system deactivation",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor));
 				return true;
 			}
 			spdlog::trace(
-				"skipping prototype physics candidate {} for actor={} because reference view culler marks it inactive",
+				"skipping system physics candidate {} for actor={} because reference view culler marks it inactive",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor));
 			SuspendActorCandidateLocked(a_event.actor, a_event.firstPerson);

@@ -39,7 +39,6 @@
 #include "RE/M/Main.h"
 #include "RE/M/MenuOpenCloseEvent.h"
 #include "RE/N/NiStringExtraData.h"
-#include "RE/N/NiUpdateData.h"
 #include "RE/P/PlayerCamera.h"
 #include "RE/S/Sky.h"
 #include "RE/T/TESObjectCELL.h"
@@ -193,7 +192,7 @@ namespace
 		std::vector<std::unique_ptr<btCollisionShape>> children;
 	};
 
-	class PrototypeDynamicsWorld :
+	class Fo4SkinnedMeshWorld :
 		public hdt::SkinnedMeshWorld
 	{
 	public:
@@ -235,7 +234,7 @@ namespace
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
 		RE::NiPointer<RE::NiNode> destinationRoot;
 		std::vector<Smp::ArmorBoneReference> boneReferences;
-		Smp::PrototypeBuildDomain domain{ Smp::PrototypeBuildDomain::kHead };
+		Smp::BuildDomain domain{ Smp::BuildDomain::kHead };
 	};
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
@@ -314,14 +313,14 @@ namespace
 		return !obstacle;
 	}
 
-	const char* PrototypeDomainName(const Smp::PrototypeBuildDomain a_domain)
+	const char* BuildDomainName(const Smp::BuildDomain a_domain)
 	{
 		switch (a_domain) {
-		case Smp::PrototypeBuildDomain::kArmor:
+		case Smp::BuildDomain::kArmor:
 			return "armor";
-		case Smp::PrototypeBuildDomain::kHead:
+		case Smp::BuildDomain::kHead:
 			return "head";
-		case Smp::PrototypeBuildDomain::kHair:
+		case Smp::BuildDomain::kHair:
 			return "hair";
 		default:
 			return "unknown";
@@ -681,7 +680,7 @@ namespace
 		Smp::DefaultBBP::NameMap a_meshNameMap,
 		RE::NiAVObject* a_sourceObject,
 		RE::NiNode* a_sourceRoot,
-		const Smp::PrototypeBuildDomain a_domain,
+		const Smp::BuildDomain a_domain,
 		RE::NiNode* a_destinationRoot = nullptr,
 		std::vector<Smp::ArmorBoneReference> a_boneReferences = {})
 	{
@@ -849,7 +848,7 @@ namespace
 						std::move(meshNameMap),
 						liveGeometry,
 						nullptr,
-						Smp::PrototypeBuildDomain::kHair,
+						Smp::BuildDomain::kHair,
 						a_destinationRoot,
 						std::move(references));
 					if (a_candidates.size() != previousCandidateCount) {
@@ -1201,7 +1200,7 @@ namespace
 				{},
 				a_object,
 				a_object->IsNode(),
-				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
+				isHair ? Smp::BuildDomain::kHair : Smp::BuildDomain::kHead);
 			return;
 		}
 
@@ -1213,7 +1212,7 @@ namespace
 				std::move(defaultBbp->meshNameMap),
 				a_object,
 				a_object->IsNode(),
-				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
+				isHair ? Smp::BuildDomain::kHair : Smp::BuildDomain::kHead);
 			return;
 		}
 
@@ -1268,7 +1267,7 @@ namespace
 		return Smp::PhysicsXmlSelection::BuildMeshMatchNames(a_summary, a_meshNameMap);
 	}
 
-	bool IsNamedPrototypeMesh(const std::vector<std::string>& a_meshNames, RE::BSGeometry* a_geometry)
+	bool IsNamedPhysicsMesh(const std::vector<std::string>& a_meshNames, RE::BSGeometry* a_geometry)
 	{
 		if (a_meshNames.empty()) {
 			return true;
@@ -1530,10 +1529,10 @@ namespace
 	}
 
 	template <class Body>
-	void AddPrototypeBodyBuildGroup(
+	void AddBodyBuildGroup(
 		Body& a_body,
 		const std::uint64_t a_buildGroup,
-		const Smp::PrototypeBuildDomain a_domain,
+		const Smp::BuildDomain a_domain,
 		const RE::BIPED_OBJECT a_bipedObject)
 	{
 		if (a_buildGroup == 0) {
@@ -1554,7 +1553,7 @@ namespace
 	}
 
 	template <class Body>
-	bool PrototypeBodyHasBuildGroup(const Body& a_body, const std::uint64_t a_buildGroup)
+	bool BodyHasBuildGroup(const Body& a_body, const std::uint64_t a_buildGroup)
 	{
 		if (a_buildGroup == 0) {
 			return false;
@@ -1613,7 +1612,7 @@ namespace
 				return;
 			}
 
-			const auto meshMatched = IsNamedPrototypeMesh(a_meshNames, geometry);
+			const auto meshMatched = IsNamedPhysicsMesh(a_meshNames, geometry);
 			const auto includeAllSkinBones = !a_meshNames.empty() && meshMatched;
 			const auto includeAllWhenUnfiltered = a_boneNames.empty() && a_meshNames.empty();
 			if (!includeAllSkinBones && !includeAllWhenUnfiltered && a_boneNames.empty()) {
@@ -1742,28 +1741,6 @@ namespace
 				static_cast<void*>(node),
 				std::string_view(node->GetName()),
 				reference.createdByUs);
-		}
-	}
-
-	void UpdateTransformUpDown(RE::NiAVObject* a_object, const bool a_dirty)
-	{
-		if (!a_object) {
-			return;
-		}
-
-		RE::NiUpdateData updateData;
-		updateData.flags = a_dirty ? 1U : 0U;
-		a_object->UpdateWorldData(std::addressof(updateData));
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			if (child) {
-				UpdateTransformUpDown(child.get(), a_dirty);
-			}
 		}
 	}
 
@@ -1906,9 +1883,9 @@ namespace
 		}
 
 		if (applied > 0) {
-			UpdateTransformUpDown(a_root, true);
+			Smp::NiObject::UpdateWorldData(a_root, true);
 			spdlog::debug(
-				"applied Havok reference pose for prototype build actor={} root={} bones={} matched={}",
+				"applied Havok reference pose for system build actor={} root={} bones={} matched={}",
 				static_cast<void*>(a_actor),
 				static_cast<void*>(a_root),
 				count,
@@ -2143,7 +2120,7 @@ namespace
 		}
 
 		spdlog::debug(
-			"built detached armor reference pose for prototype actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
+			"built detached armor reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_flattened),
 			havokBoneCount,
@@ -2180,7 +2157,7 @@ namespace
 			}
 		}
 		a_savedPoses.clear();
-		UpdateTransformUpDown(a_updateRoot, true);
+		Smp::NiObject::UpdateWorldData(a_updateRoot, true);
 	}
 
 	bool IsDynamicXmlBone(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
@@ -2653,15 +2630,6 @@ namespace
 		return btVector3(a_value.x, a_value.y, a_value.z);
 	}
 
-	float CurrentBoneScale(const Smp::Fo4SkinnedMeshBone* a_bone)
-	{
-		if (!a_bone) {
-			return 1.0F;
-		}
-		const auto scale = a_bone->m_currentTransform.getScale();
-		return std::isfinite(scale) && scale > FLT_EPSILON ? scale : 1.0F;
-	}
-
 	void IncrementWritebackCounter(
 		const Smp::WritebackSource a_source,
 		std::uint32_t& a_cellJobsCounter,
@@ -2790,7 +2758,7 @@ namespace
 		return { frameA, frameB };
 	}
 
-	std::unique_ptr<btTypedConstraint> CreatePrototypeConstraint(
+	RE::BSTSmartPointer<hdt::BoneScaleConstraint> CreateConstraint(
 		const Smp::PhysicsConstraintDescriptor& a_descriptor,
 		hdt::SkinnedMeshBone* a_boneA,
 		hdt::SkinnedMeshBone* a_boneB,
@@ -2806,7 +2774,7 @@ namespace
 		switch (a_descriptor.kind) {
 		case Smp::PhysicsConstraintKind::kConeTwist:
 		{
-			auto constraint = std::make_unique<hdt::ConeTwistConstraint>(
+			auto constraint = RE::make_smart<hdt::ConeTwistConstraint>(
 				a_boneA,
 				a_boneB,
 				nodeFrameA,
@@ -2822,7 +2790,7 @@ namespace
 		}
 		case Smp::PhysicsConstraintKind::kStiffSpring:
 		{
-			auto constraint = std::make_unique<hdt::StiffSpringConstraint>(a_boneA, a_boneB);
+			auto constraint = RE::make_smart<hdt::StiffSpringConstraint>(a_boneA, a_boneB);
 			const auto initialDistance = a_nodeTransformA.getOrigin().distance(a_nodeTransformB.getOrigin());
 			constraint->m_minDistance = initialDistance * std::max(a_descriptor.minDistanceFactor, 0.0F);
 			constraint->m_maxDistance = initialDistance * std::max(a_descriptor.maxDistanceFactor, 0.0F);
@@ -2839,8 +2807,8 @@ namespace
 		{
 			const bool swapBodies = a_descriptor.useLinearReferenceFrameA;
 			auto constraint = swapBodies ?
-				std::make_unique<hdt::Generic6DofConstraint>(a_boneB, a_boneA, nodeFrameB, nodeFrameA) :
-				std::make_unique<hdt::Generic6DofConstraint>(a_boneA, a_boneB, nodeFrameA, nodeFrameB);
+				RE::make_smart<hdt::Generic6DofConstraint>(a_boneB, a_boneA, nodeFrameB, nodeFrameA) :
+				RE::make_smart<hdt::Generic6DofConstraint>(a_boneA, a_boneB, nodeFrameA, nodeFrameB);
 			constraint->setLinearLowerLimit(ToBulletVector(a_descriptor.linearLowerLimit));
 			constraint->setLinearUpperLimit(ToBulletVector(a_descriptor.linearUpperLimit));
 			constraint->setAngularLowerLimit(ToBulletVector(a_descriptor.angularLowerLimit));

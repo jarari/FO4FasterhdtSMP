@@ -3,12 +3,12 @@
 
 namespace Smp
 {
-	Fo4PhysicsWorld::PrototypeBuildResult Fo4PhysicsWorld::BuildPrototypeBodiesLocked(
-		PrototypeActorState& a_state,
+	BuildResult Fo4PhysicsWorld::BuildSystemObjectsLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const LifecycleEvent& a_event,
 		const PhysicsXmlSummary& a_summary,
 		const DefaultBBP::NameMap& a_meshNameMap,
-		const PrototypeBuildDomain a_domain,
+		const BuildDomain a_domain,
 		const bool a_commitToBullet)
 	{
 		struct BuildTiming
@@ -25,9 +25,9 @@ namespace Smp
 		BuildTiming timing;
 		auto logBuildTiming = [&](const char* a_reason, const std::uint64_t a_buildGroup = 0) {
 			spdlog::debug(
-				"prototype build timing actor={} domain={} bipedObject={} buildGroup={} reason={} totalMs={:.3f} actorTreePrepMs={:.3f} referencePoseMs={:.3f} xmlSkinResolveMs={:.3f} bulletBodyMs={:.3f} meshBuildMs={:.3f} bindCommitConstraintMs={:.3f}",
+				"system build timing actor={} domain={} bipedObject={} buildGroup={} reason={} totalMs={:.3f} actorTreePrepMs={:.3f} referencePoseMs={:.3f} xmlSkinResolveMs={:.3f} bulletBodyMs={:.3f} meshBuildMs={:.3f} bindCommitConstraintMs={:.3f}",
 				static_cast<void*>(a_state.actor),
-				PrototypeDomainName(a_domain),
+				BuildDomainName(a_domain),
 				std::to_underlying(a_event.bipedObject),
 				a_buildGroup,
 				a_reason,
@@ -40,11 +40,10 @@ namespace Smp
 				timing.bindCommitConstraintMs);
 		};
 
-		a_state.runtimeSuspended = false;
-		a_state.runtimeSoftSuspended = false;
+		a_state.suspended = false;
 		auto meshNames = BuildMeshMatchNames(a_summary, a_meshNameMap);
 		if (a_summary.boneNames.empty() && meshNames.empty()) {
-			spdlog::debug("prototype physics XML has no named bones or mesh descriptors to match");
+			spdlog::debug("system physics XML has no named bones or mesh descriptors to match");
 			logBuildTiming("empty-xml");
 			return {};
 		}
@@ -52,7 +51,7 @@ namespace Smp
 		std::vector<MatchedSkinBone> matchedBones;
 		// Armor may be added while other groups are simulating. Build its
 		// canonical pose out-of-band so their live writeback targets stay intact.
-		const auto detachedArmorBuild = a_domain == PrototypeBuildDomain::kArmor;
+		const auto detachedArmorBuild = a_domain == BuildDomain::kArmor;
 		auto phaseStart = Clock::now();
 		const auto actorSkeletonSearchExclusions = BuildBipedPartExclusions(a_event);
 		const auto knownAttachmentNodes = BuildKnownAttachmentNodeSet(a_event);
@@ -62,10 +61,10 @@ namespace Smp
 		}
 		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
 		if (actorRootNode && !detachedArmorBuild) {
-			UpdateTransformUpDown(actorRootNode, true);
+			NiObject::UpdateWorldData(actorRootNode, true);
 		}
 		timing.actorTreePrepMs += ElapsedMs(phaseStart, Clock::now());
-		if (a_domain == PrototypeBuildDomain::kArmor && !a_summary.meshDescriptors.empty()) {
+		if (a_domain == BuildDomain::kArmor && !a_summary.meshDescriptors.empty()) {
 			auto preflightExtraction = ExtractSkinnedMeshes(a_event.object, meshNames);
 			auto preflightCpuCopyPending = HasPendingCpuCopyExtraction(preflightExtraction);
 			auto preflightPendingMatchedGeometries = preflightCpuCopyPending ? preflightExtraction.stats.matchedGeometries : 0U;
@@ -73,13 +72,13 @@ namespace Smp
 			auto preflightPendingIndexCopies = preflightCpuCopyPending ? preflightExtraction.stats.pendingIndexCopies : 0U;
 			if (preflightCpuCopyPending) {
 				spdlog::debug(
-					"prototype armor mesh extraction preflight delayed for pending CPU copy before reference pose actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+					"system armor mesh extraction preflight delayed for pending CPU copy before reference pose actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
 					static_cast<void*>(a_state.actor),
 					static_cast<void*>(a_event.object),
 					preflightPendingMatchedGeometries,
 					preflightPendingVertexCopies,
 					preflightPendingIndexCopies);
-				PrototypeBuildResult result;
+				BuildResult result;
 				result.cpuCopyPending = true;
 				logBuildTiming("cpu-copy-pending-preflight");
 				return result;
@@ -95,7 +94,7 @@ namespace Smp
 					knownAttachmentNodes,
 					savedBuildPoses)) {
 				spdlog::debug(
-					"prototype physics build used current actor pose because Havok reference pose was unavailable actor={} root={}",
+					"system physics build used current actor pose because Havok reference pose was unavailable actor={} root={}",
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(actorRootNode));
 			}
@@ -124,7 +123,7 @@ namespace Smp
 					a_event.armorBoneReferences,
 					matchedBones)) {
 				spdlog::error(
-					"aborting prototype armor physics build because a complete detached Havok reference pose is unavailable actor={} root={}",
+					"aborting system armor physics build because a complete detached Havok reference pose is unavailable actor={} root={}",
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(actorRootNode));
 				timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
@@ -135,7 +134,7 @@ namespace Smp
 		}
 		if (matchedBones.empty()) {
 			spdlog::debug(
-				"prototype physics XML matched no skin bones for {} actor={} object={}",
+				"system physics XML matched no skin bones for {} actor={} object={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
@@ -150,7 +149,7 @@ namespace Smp
 		std::uint32_t matchedUnderActorRoot = 0;
 		std::uint32_t matchedUnderAttachedObject = 0;
 		std::uint64_t buildGroup = 0;
-		const auto hadActorRuntimeBeforeBuild = a_state.HasRuntime();
+		const auto hadActorRuntimeBeforeBuild = a_state.HasPhysics();
 		for (const auto& matchedBone : matchedBones) {
 			if (IsNodeInTree(actorRoot, matchedBone.node)) {
 				++matchedUnderActorRoot;
@@ -159,22 +158,22 @@ namespace Smp
 				++matchedUnderAttachedObject;
 			}
 		}
-		if (a_domain != PrototypeBuildDomain::kArmor) {
-			for (const auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.domain == a_domain && prototypeMesh.geometry && IsObjectInTree(a_event.object, prototypeMesh.geometry)) {
-					buildGroup = prototypeMesh.buildGroup;
+		if (a_domain != BuildDomain::kArmor) {
+			for (const auto& meshRecord : a_state.meshes) {
+				if (meshRecord.domain == a_domain && meshRecord.geometry && IsObjectInTree(a_event.object, meshRecord.geometry)) {
+					buildGroup = meshRecord.buildGroup;
 					break;
 				}
 			}
-			for (const auto& prototypeBody : a_state.bodies) {
+			for (const auto& boneRecord : a_state.bodies) {
 				if (buildGroup != 0) {
 					break;
 				}
-				if (prototypeBody.node && IsNodeInTree(a_event.object, prototypeBody.node)) {
-					const auto existingGroup = std::ranges::find_if(prototypeBody.buildGroupDomains, [a_domain](const auto& a_entry) {
+				if (boneRecord.node && IsNodeInTree(a_event.object, boneRecord.node)) {
+					const auto existingGroup = std::ranges::find_if(boneRecord.buildGroupDomains, [a_domain](const auto& a_entry) {
 						return a_entry.second == a_domain;
 					});
-					if (existingGroup != prototypeBody.buildGroupDomains.end()) {
+					if (existingGroup != boneRecord.buildGroupDomains.end()) {
 						buildGroup = existingGroup->first;
 						break;
 					}
@@ -184,7 +183,7 @@ namespace Smp
 				if (buildGroup != 0) {
 					break;
 				}
-				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const PrototypeBody& a_body) {
+				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const BoneRecord& a_body) {
 					return a_body.node == matchedBone.node;
 				});
 				if (existing == a_state.bodies.end()) {
@@ -203,12 +202,12 @@ namespace Smp
 			buildGroup = ++a_state.nextBuildGroup;
 			createdBuildGroup = true;
 		}
-		PrototypeBuildResult result;
+		BuildResult result;
 		result.buildGroup = buildGroup;
 		struct BuildGroupRollbackGuard
 		{
 			Fo4PhysicsWorld* world{ nullptr };
-			PrototypeActorState* state{ nullptr };
+			Fo4SkinnedMeshSystem* state{ nullptr };
 			std::uint64_t buildGroup{ 0 };
 			bool active{ false };
 
@@ -218,7 +217,7 @@ namespace Smp
 					return;
 				}
 
-				world->ClearPrototypeGroupsLocked(*state, std::vector<std::uint64_t>{ buildGroup });
+				world->ClearBuildGroupsLocked(*state, std::vector<std::uint64_t>{ buildGroup });
 			}
 
 			void Dismiss()
@@ -232,20 +231,20 @@ namespace Smp
 			.buildGroup = buildGroup,
 			.active = createdBuildGroup,
 		};
-		std::vector<PrototypeBody> stagedBodies;
+		std::vector<BoneRecord> stagedBodies;
 
 		phaseStart = Clock::now();
 		for (auto& matchedBone : matchedBones) {
-			const auto sameBuildBody = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
+			const auto sameBuildBody = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
 					((matchedBone.node && a_body.node == matchedBone.node) ||
 					 (!matchedBone.node && !a_body.node && PhysicsNamesEqual(a_body.boneName, matchedBone.name)));
 			});
 			if (sameBuildBody != a_state.bodies.end()) {
 				continue;
 			}
-			const auto sameStagedBody = std::ranges::find_if(stagedBodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
+			const auto sameStagedBody = std::ranges::find_if(stagedBodies, [&matchedBone, buildGroup](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
 					((matchedBone.node && a_body.node == matchedBone.node) ||
 					 (!matchedBone.node && !a_body.node && PhysicsNamesEqual(a_body.boneName, matchedBone.name)));
 			});
@@ -253,7 +252,7 @@ namespace Smp
 				continue;
 			}
 
-			if (a_domain == PrototypeBuildDomain::kArmor && matchedBone.meshOnlySkinBoneCandidate) {
+			if (a_domain == BuildDomain::kArmor && matchedBone.meshOnlySkinBoneCandidate) {
 				if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
 					spdlog::debug(
 						"deferring armor mesh-only skin bone '{}' actor={} node={} nodeName='{}' buildGroup={} to mesh deformer fallback",
@@ -266,19 +265,19 @@ namespace Smp
 				continue;
 			}
 
-			if (a_domain != PrototypeBuildDomain::kArmor) {
-				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const PrototypeBody& a_body) {
+			if (a_domain != BuildDomain::kArmor) {
+				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const BoneRecord& a_body) {
 					return a_body.node == matchedBone.node && a_body.bone;
 				});
 				if (existing != a_state.bodies.end()) {
-					AddPrototypeBodyBuildGroup(*existing, buildGroup, a_domain, a_event.bipedObject);
+					AddBodyBuildGroup(*existing, buildGroup, a_domain, a_event.bipedObject);
 					continue;
 				}
 			}
 
 			const auto* descriptor = FindBoneDescriptor(a_summary, matchedBone.name);
 			if (!matchedBone.transform) {
-				spdlog::warn("skipping prototype bone '{}' because vanilla provided no world transform", matchedBone.name);
+				spdlog::warn("skipping system bone '{}' because vanilla provided no world transform", matchedBone.name);
 				continue;
 			}
 			auto fallbackDescriptor = a_summary.defaultBoneDescriptor.value_or(PhysicsBoneDescriptor{});
@@ -300,7 +299,7 @@ namespace Smp
 			const auto& initialWorld = matchedBone.hasCanonicalWorld ? matchedBone.canonicalWorld : *matchedBone.transform;
 			auto motionState = std::make_unique<btDefaultMotionState>(Smp::Fo4Transform::ToBulletTransform(initialWorld) * localToRig);
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(mass, motionState.get(), shape.get(), localInertia);
-			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, matchedBone.transform, constructionInfo);
+			auto bone = RE::make_smart<Fo4SkinnedMeshBone>(RE::BSFixedString(matchedBone.name), matchedBone.node, matchedBone.transform, constructionInfo);
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();
 			bone->m_marginMultipler = boneDescriptor.marginMultiplier;
@@ -326,7 +325,7 @@ namespace Smp
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
 				spdlog::debug(
-					"staged prototype body writeback target actor={} bone='{}' node={} nodeName='{}' sourceNode={} sourceName='{}' buildGroup={} mass={:.4f}",
+					"staged system body writeback target actor={} bone='{}' node={} nodeName='{}' sourceNode={} sourceName='{}' buildGroup={} mass={:.4f}",
 					static_cast<void*>(a_event.actor),
 					matchedBone.name,
 					static_cast<void*>(matchedBone.node),
@@ -337,38 +336,38 @@ namespace Smp
 					mass);
 			}
 
-			PrototypeBody prototypeBody;
-			prototypeBody.actor = a_event.actor;
-			prototypeBody.node = matchedBone.node;
-			prototypeBody.buildGroup = buildGroup;
-			prototypeBody.bipedObject = a_event.bipedObject;
-			AddPrototypeBodyBuildGroup(prototypeBody, buildGroup, a_domain, a_event.bipedObject);
-			prototypeBody.boneName = std::move(matchedBone.name);
-			prototypeBody.shape = std::move(shape);
-			prototypeBody.motionState = std::move(motionState);
-			prototypeBody.bone = std::move(bone);
-			stagedBodies.push_back(std::move(prototypeBody));
+			BoneRecord boneRecord;
+			boneRecord.actor = a_event.actor;
+			boneRecord.node = matchedBone.node;
+			boneRecord.buildGroup = buildGroup;
+			boneRecord.bipedObject = a_event.bipedObject;
+			AddBodyBuildGroup(boneRecord, buildGroup, a_domain, a_event.bipedObject);
+			boneRecord.boneName = std::move(matchedBone.name);
+			boneRecord.shape = std::move(shape);
+			boneRecord.motionState = std::move(motionState);
+			boneRecord.bone = std::move(bone);
+			stagedBodies.push_back(std::move(boneRecord));
 			++created;
 		}
 		timing.bulletBodyMs += ElapsedMs(phaseStart, Clock::now());
 
-		std::ranges::stable_sort(stagedBodies, [](const PrototypeBody& a_lhs, const PrototypeBody& a_rhs) {
+		std::ranges::stable_sort(stagedBodies, [](const BoneRecord& a_lhs, const BoneRecord& a_rhs) {
 			const auto lhsDepth = a_lhs.bone ? a_lhs.bone->GetDepth() : 0x7fffffff;
 			const auto rhsDepth = a_rhs.bone ? a_rhs.bone->GetDepth() : 0x7fffffff;
 			return lhsDepth < rhsDepth;
 		});
 
 		if (!detachedArmorBuild) {
-			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
+			ResetBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
 		}
-		std::vector<PrototypeMesh> stagedMeshes;
+		std::vector<MeshRecord> stagedMeshes;
 		phaseStart = Clock::now();
-		const auto cpuCopyPending = BuildPrototypeMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
+		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, buildGroup, a_domain, stagedBodies, stagedMeshes);
 		timing.meshBuildMs += ElapsedMs(phaseStart, Clock::now());
-		const auto bodyOnlyArmorBuild = a_domain == PrototypeBuildDomain::kArmor;
+		const auto bodyOnlyArmorBuild = a_domain == BuildDomain::kArmor;
 		if (cpuCopyPending) {
 			spdlog::debug(
-				"prototype build group actor={} buildGroup={} is waiting for mesh CPU copy; staged Bullet rigid bodies were not committed",
+				"system build group actor={} buildGroup={} is waiting for mesh CPU copy; staged Bullet rigid bodies were not committed",
 				static_cast<void*>(a_state.actor),
 				buildGroup);
 			result.cpuCopyPending = true;
@@ -376,9 +375,9 @@ namespace Smp
 			logBuildTiming("cpu-copy-pending", buildGroup);
 			return result;
 		}
-		if (bodyOnlyArmorBuild && stagedMeshes.empty() && !PrototypeBuildGroupHasMeshLocked(a_state, buildGroup)) {
+		if (bodyOnlyArmorBuild && stagedMeshes.empty() && !BuildGroupHasMeshLocked(a_state, buildGroup)) {
 			spdlog::debug(
-				"allowing body-only armor prototype build actor={} bipedObject={} buildGroup={} because no skinned mesh body was decoded",
+				"allowing body-only armor system build actor={} bipedObject={} buildGroup={} because no skinned mesh body was decoded",
 				static_cast<void*>(a_state.actor),
 				std::to_underlying(a_event.bipedObject),
 				buildGroup);
@@ -387,7 +386,7 @@ namespace Smp
 		for (auto& stagedBody : stagedBodies) {
 			a_state.bodies.push_back(std::move(stagedBody));
 		}
-		std::ranges::stable_sort(a_state.bodies, [](const PrototypeBody& a_lhs, const PrototypeBody& a_rhs) {
+		std::ranges::stable_sort(a_state.bodies, [](const BoneRecord& a_lhs, const BoneRecord& a_rhs) {
 			const auto lhsDepth = a_lhs.bone ? a_lhs.bone->GetDepth() : 0x7fffffff;
 			const auto rhsDepth = a_rhs.bone ? a_rhs.bone->GetDepth() : 0x7fffffff;
 			return lhsDepth < rhsDepth;
@@ -399,10 +398,10 @@ namespace Smp
 			if (!matchedBone.node || matchedBone.isSharedActorBone) {
 				continue;
 			}
-			const auto cachedNodePose = std::ranges::find_if(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+			const auto cachedNodePose = std::ranges::find_if(a_state.attachmentBoneLocalPoses, [&](const AttachmentBoneLocalPose& a_pose) {
 				return a_pose.node.get() == matchedBone.node;
 			});
-			const auto alreadyCachedForGroup = std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+			const auto alreadyCachedForGroup = std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const AttachmentBoneLocalPose& a_pose) {
 				return a_pose.buildGroup == buildGroup && a_pose.node.get() == matchedBone.node;
 			});
 			if (!alreadyCachedForGroup) {
@@ -414,14 +413,14 @@ namespace Smp
 			}
 		}
 		for (auto& matchedBone : matchedBones) {
-			auto body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
+			auto body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, buildGroup) && a_body.bone &&
 					((matchedBone.node && a_body.node == matchedBone.node) ||
 					 (!matchedBone.node && !a_body.node && PhysicsNamesEqual(a_body.boneName, matchedBone.name)));
 			});
 			if (body == a_state.bodies.end() && !matchedBone.name.empty()) {
-				body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, buildGroup) && PhysicsNamesEqual(a_body.boneName, matchedBone.name) && a_body.bone;
+				body = std::ranges::find_if(a_state.bodies, [&matchedBone, buildGroup](const BoneRecord& a_body) {
+					return BodyHasBuildGroup(a_body, buildGroup) && PhysicsNamesEqual(a_body.boneName, matchedBone.name) && a_body.bone;
 				});
 			}
 			if (body == a_state.bodies.end()) {
@@ -438,44 +437,44 @@ namespace Smp
 					skinWorld.originalRootNode);
 			}
 		}
-		std::vector<PrototypeConstraint> stagedConstraints;
-		BuildPrototypeConstraintsLocked(a_state, a_summary, buildGroup, a_domain, {}, stagedConstraints);
+		std::vector<ConstraintRecord> stagedConstraints;
+		BuildConstraintsLocked(a_state, a_summary, buildGroup, a_domain, {}, stagedConstraints);
 		for (auto& stagedConstraint : stagedConstraints) {
 			a_state.constraints.push_back(std::move(stagedConstraint));
 		}
 		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
 		if (!detachedArmorBuild) {
-			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
+			ResetBuildGroupToCurrentPoseLocked(a_state, buildGroup);
 		}
 		if (a_commitToBullet) {
-			CommitPrototypeBuildGroupToBulletLocked(a_state, buildGroup);
+			ActivateBuildGroupLocked(a_state, buildGroup);
 			result.committed = true;
 		} else {
 			spdlog::debug(
-				"staged prototype build group for delayed Bullet commit actor={} buildGroup={} domain={} bipedObject={}",
+				"staged system build group for delayed Bullet commit actor={} buildGroup={} domain={} bipedObject={}",
 				static_cast<void*>(a_state.actor),
 				buildGroup,
-				PrototypeDomainName(a_domain),
+				BuildDomainName(a_domain),
 				std::to_underlying(a_event.bipedObject));
 		}
 		timing.bindCommitConstraintMs += ElapsedMs(phaseStart, Clock::now());
 		if (a_commitToBullet && actorRoot && spdlog::default_logger_raw() && spdlog::default_logger_raw()->should_log(spdlog::level::trace)) {
-			LogObjectHierarchy(actorRoot, "actor-skeleton-after-prototype-build");
+			LogObjectHierarchy(actorRoot, "actor-skeleton-after-system-build");
 		}
 		if (a_commitToBullet) {
-			LogPrototypeActorBulletObjectsLocked(a_state, "after-prototype-build-commit");
+			LogSystemBulletObjectsLocked(a_state, "after-system-build-commit");
 		}
-		result.recordable = PrototypeBuildGroupIsRecordableLocked(a_state, buildGroup, a_domain, a_event.bipedObject);
+		result.recordable = BuildGroupIsRecordableLocked(a_state, buildGroup, a_domain, a_event.bipedObject);
 		result.succeeded = result.recordable;
 		rollbackGuard.Dismiss();
-		if (a_domain == PrototypeBuildDomain::kArmor && hadActorRuntimeBeforeBuild) {
+		if (a_domain == BuildDomain::kArmor && hadActorRuntimeBeforeBuild) {
 			spdlog::debug(
-				"hot armor build committed with localized reset read actor={} buildGroup={} because existing prototype runtime is active",
+				"hot armor build committed with localized reset read actor={} buildGroup={} because existing system runtime is active",
 				static_cast<void*>(a_state.actor),
 				buildGroup);
 		}
 		spdlog::debug(
-			"prototype matched bone placement actorRoot={} attachedObject={} underActorRoot={} underAttachedObject={} matchedXMLBones={}",
+			"system matched bone placement actorRoot={} attachedObject={} underActorRoot={} underAttachedObject={} matchedXMLBones={}",
 			static_cast<void*>(actorRoot),
 			static_cast<void*>(a_event.object),
 			matchedUnderActorRoot,
@@ -485,7 +484,7 @@ namespace Smp
 		return result;
 	}
 
-	void Fo4PhysicsWorld::LogPrototypeActorBulletObjectsLocked(const PrototypeActorState& a_state, const std::string_view a_reason) const
+	void Fo4PhysicsWorld::LogSystemBulletObjectsLocked(const Fo4SkinnedMeshSystem& a_state, const std::string_view a_reason) const
 	{
 		auto* logger = spdlog::default_logger_raw();
 		if (!logger || !logger->should_log(spdlog::level::debug)) {
@@ -566,8 +565,12 @@ namespace Smp
 				continue;
 			}
 
-			const auto& bodyA = constraint.constraint->getRigidBodyA();
-			const auto& bodyB = constraint.constraint->getRigidBodyB();
+			const auto* bulletConstraint = constraint.GetConstraint();
+			if (!bulletConstraint) {
+				continue;
+			}
+			const auto& bodyA = bulletConstraint->getRigidBodyA();
+			const auto& bodyB = bulletConstraint->getRigidBodyB();
 			const auto transformA = bodyA.getWorldTransform();
 			const auto transformB = bodyB.getWorldTransform();
 			const auto originA = transformA.getOrigin();
@@ -575,12 +578,12 @@ namespace Smp
 			spdlog::debug(
 				"actor bullet constraint actor={} constraint={} buildGroup={} kind={} bodyA='{}' bodyB='{}' enabled={} bodyAkin={} bodyBkin={} bodyApos=({:.3f},{:.3f},{:.3f}) bodyBpos=({:.3f},{:.3f},{:.3f})",
 				static_cast<void*>(a_state.actor),
-				static_cast<const void*>(constraint.constraint.get()),
+				static_cast<const void*>(bulletConstraint),
 				constraint.buildGroup,
 				std::to_underlying(constraint.kind),
 				constraint.bodyA,
 				constraint.bodyB,
-				constraint.constraint->isEnabled(),
+				bulletConstraint->isEnabled(),
 				bodyA.isStaticOrKinematicObject(),
 				bodyB.isStaticOrKinematicObject(),
 				originA.x(),
@@ -598,16 +601,16 @@ namespace Smp
 			a_reason);
 	}
 
-	void Fo4PhysicsWorld::ResetPrototypeBuildGroupToCurrentPoseLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::ResetBuildGroupToCurrentPoseLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const std::uint64_t a_buildGroup,
-		const std::span<PrototypeBody> a_stagedBodies)
+		const std::span<BoneRecord> a_stagedBodies)
 	{
-		auto isInBuildGroup = [a_buildGroup](const PrototypeBody& a_body) {
-			return PrototypeBodyHasBuildGroup(a_body, a_buildGroup);
+		auto isInBuildGroup = [a_buildGroup](const BoneRecord& a_body) {
+			return BodyHasBuildGroup(a_body, a_buildGroup);
 		};
 
-		auto resetBodyToCurrentPose = [](PrototypeBody& a_body) {
+		auto resetBodyToCurrentPose = [](BoneRecord& a_body) {
 			a_body.bone->readTransform(0.0F);
 			a_body.bone->RefreshSkinWorldTransforms();
 		};
@@ -628,8 +631,8 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::ResetPrototypeBuildGroupsToStoredLocalPoseLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::ResetBuildGroupsToStoredLocalPoseLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const std::span<const std::uint64_t> a_buildGroups,
 		const std::string_view a_reason)
 	{
@@ -644,12 +647,12 @@ namespace Smp
 			if (!a_node) {
 				return false;
 			}
-			if (std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_pose) {
+			if (std::ranges::any_of(a_state.attachmentBoneLocalPoses, [&](const AttachmentBoneLocalPose& a_pose) {
 					return a_pose.node.get() == a_node && a_pose.buildGroup != 0 && !containsGroup(a_pose.buildGroup);
 				})) {
 				return true;
 			}
-			return std::ranges::any_of(a_state.bodies, [&](const PrototypeBody& a_body) {
+			return std::ranges::any_of(a_state.bodies, [&](const BoneRecord& a_body) {
 				if (a_body.node != a_node) {
 					return false;
 				}
@@ -680,31 +683,31 @@ namespace Smp
 		}
 		for (auto* node : restoredNodes) {
 			if (!node->parent || std::ranges::find(restoredNodes, node->parent) == restoredNodes.end()) {
-				UpdateTransformUpDown(node, true);
+				NiObject::UpdateWorldData(node, true);
 			}
 		}
 
 		for (const auto buildGroup : a_buildGroups) {
-			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, buildGroup);
+			ResetBuildGroupToCurrentPoseLocked(a_state, buildGroup);
 		}
 
 		spdlog::debug(
-			"reset prototype build groups to cached attachment-bone local pose actor={} groups={} restoredBones={} reason={}",
+			"reset system build groups to cached attachment-bone local pose actor={} groups={} restoredBones={} reason={}",
 			static_cast<void*>(a_state.actor),
 			a_buildGroups.size(),
 			restoredNodes.size(),
 			a_reason);
 	}
 
-	bool Fo4PhysicsWorld::BuildPrototypeMeshesLocked(
-		PrototypeActorState& a_state,
+	bool Fo4PhysicsWorld::BuildMeshesLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const PhysicsXmlSummary& a_summary,
 		const LifecycleEvent& a_event,
 		const DefaultBBP::NameMap& a_meshNameMap,
 		const std::uint64_t a_buildGroup,
-		const PrototypeBuildDomain a_domain,
-		std::vector<PrototypeBody>& a_stagedBodies,
-		std::vector<PrototypeMesh>& a_stagedMeshes)
+		const BuildDomain a_domain,
+		std::vector<BoneRecord>& a_stagedBodies,
+		std::vector<MeshRecord>& a_stagedMeshes)
 	{
 		if (!dynamicsWorld_ || a_summary.meshDescriptors.empty()) {
 			return false;
@@ -718,7 +721,7 @@ namespace Smp
 		auto pendingVertexCopies = cpuCopyPending ? extraction.stats.pendingVertexCopies : 0U;
 		auto pendingIndexCopies = cpuCopyPending ? extraction.stats.pendingIndexCopies : 0U;
 		const char* extractionSource = "attached-object";
-		if (a_domain != PrototypeBuildDomain::kArmor && extraction.meshes.empty()) {
+		if (a_domain != BuildDomain::kArmor && extraction.meshes.empty()) {
 			const auto attachedDynamicBones = CountDynamicDecodedSkinBones(extraction, a_summary);
 			const std::array fallbackRoots{
 				std::pair{ "source-object", a_event.sourceObject },
@@ -739,7 +742,7 @@ namespace Smp
 				}
 				if (fallbackExtraction.meshes.empty()) {
 					spdlog::debug(
-						"prototype mesh extraction fallback {} root={} produced no meshes for actor={} geometries={} skinned={} matched={} missingCpuVertexData={} missingPositionData={} splitPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} pendingIndexCopies={}",
+						"system mesh extraction fallback {} root={} produced no meshes for actor={} geometries={} skinned={} matched={} missingCpuVertexData={} missingPositionData={} splitPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} pendingIndexCopies={}",
 						sourceName,
 						static_cast<void*>(root),
 						static_cast<void*>(a_state.actor),
@@ -759,7 +762,7 @@ namespace Smp
 				const auto fallbackDynamicBones = CountDynamicDecodedSkinBones(fallbackExtraction, a_summary);
 				if (!extraction.meshes.empty() && fallbackDynamicBones <= attachedDynamicBones) {
 					spdlog::debug(
-						"prototype mesh extraction kept attached-object over {} root={} for actor={} attachedDynamicBones={} fallbackDynamicBones={} decodedMeshes={}",
+						"system mesh extraction kept attached-object over {} root={} for actor={} attachedDynamicBones={} fallbackDynamicBones={} decodedMeshes={}",
 						sourceName,
 						static_cast<void*>(root),
 						static_cast<void*>(a_state.actor),
@@ -772,7 +775,7 @@ namespace Smp
 				extraction = std::move(fallbackExtraction);
 				extractionSource = sourceName;
 				spdlog::debug(
-					"prototype mesh extraction using {} root={} for actor={} decodedMeshes={} attachedDynamicBones={} fallbackDynamicBones={}",
+					"system mesh extraction using {} root={} for actor={} decodedMeshes={} attachedDynamicBones={} fallbackDynamicBones={}",
 					sourceName,
 					static_cast<void*>(root),
 					static_cast<void*>(a_state.actor),
@@ -784,7 +787,7 @@ namespace Smp
 		}
 		if (extraction.meshes.empty() && cpuCopyPending) {
 			spdlog::debug(
-				"prototype mesh extraction delayed for pending CPU copy actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+				"system mesh extraction delayed for pending CPU copy actor={} object={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
 				static_cast<void*>(a_state.actor),
 				static_cast<void*>(a_event.object),
 				pendingMatchedGeometries,
@@ -792,9 +795,9 @@ namespace Smp
 				pendingIndexCopies);
 			return true;
 		}
-		if (a_domain == PrototypeBuildDomain::kArmor && cpuCopyPending) {
+		if (a_domain == BuildDomain::kArmor && cpuCopyPending) {
 			spdlog::debug(
-				"prototype armor mesh extraction delayed for partial pending CPU copy actor={} object={} decodedMeshes={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
+				"system armor mesh extraction delayed for partial pending CPU copy actor={} object={} decodedMeshes={} matched={} pendingVertexCopies={} pendingIndexCopies={}",
 				static_cast<void*>(a_state.actor),
 				static_cast<void*>(a_event.object),
 				extraction.stats.decodedMeshes,
@@ -816,35 +819,35 @@ namespace Smp
 		std::uint32_t unresolvedCanCollideBones = 0;
 		std::uint32_t unresolvedNoCollideBones = 0;
 		std::uint32_t unresolvedWeightThresholds = 0;
-		auto findPrototypeBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone) -> PrototypeBody* {
-			auto committedBody = std::ranges::find_if(a_state.bodies, [&a_decodedBone, a_buildGroup](const PrototypeBody& a_body) {
-				return a_decodedBone.node && PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && a_body.node == a_decodedBone.node;
+		auto findBoneRecord = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone) -> BoneRecord* {
+			auto committedBody = std::ranges::find_if(a_state.bodies, [&a_decodedBone, a_buildGroup](const BoneRecord& a_body) {
+				return a_decodedBone.node && BodyHasBuildGroup(a_body, a_buildGroup) && a_body.node == a_decodedBone.node;
 			});
 			if (committedBody == a_state.bodies.end() && !a_decodedBone.name.empty()) {
-				committedBody = std::ranges::find_if(a_state.bodies, [&a_decodedBone, a_buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_decodedBone.name);
+				committedBody = std::ranges::find_if(a_state.bodies, [&a_decodedBone, a_buildGroup](const BoneRecord& a_body) {
+					return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_decodedBone.name);
 				});
 			}
 			if (committedBody != a_state.bodies.end()) {
 				return std::addressof(*committedBody);
 			}
 
-			auto stagedBody = std::ranges::find_if(a_stagedBodies, [&a_decodedBone, a_buildGroup](const PrototypeBody& a_body) {
-				return a_decodedBone.node && PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && a_body.node == a_decodedBone.node;
+			auto stagedBody = std::ranges::find_if(a_stagedBodies, [&a_decodedBone, a_buildGroup](const BoneRecord& a_body) {
+				return a_decodedBone.node && BodyHasBuildGroup(a_body, a_buildGroup) && a_body.node == a_decodedBone.node;
 			});
 			if (stagedBody == a_stagedBodies.end() && !a_decodedBone.name.empty()) {
-				stagedBody = std::ranges::find_if(a_stagedBodies, [&a_decodedBone, a_buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_decodedBone.name);
+				stagedBody = std::ranges::find_if(a_stagedBodies, [&a_decodedBone, a_buildGroup](const BoneRecord& a_body) {
+					return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_decodedBone.name);
 				});
 			}
 			return stagedBody != a_stagedBodies.end() ? std::addressof(*stagedBody) : nullptr;
 		};
-		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> PrototypeBody* {
+		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName) -> BoneRecord* {
 			if (a_decodedBone.name.empty()) {
 				return nullptr;
 			}
 			auto* fallbackNode = a_decodedBone.node;
-			auto* fallbackTransform = a_domain == PrototypeBuildDomain::kArmor ? a_decodedBone.worldTransform :
+			auto* fallbackTransform = a_domain == BuildDomain::kArmor ? a_decodedBone.worldTransform :
 				(fallbackNode ? std::addressof(fallbackNode->world) : nullptr);
 			if (!fallbackTransform) {
 				spdlog::debug(
@@ -864,7 +867,7 @@ namespace Smp
 			const auto& initialWorld = *fallbackTransform;
 			auto motionState = std::make_unique<btDefaultMotionState>(Smp::Fo4Transform::ToBulletTransform(initialWorld) * localToRig);
 			btRigidBody::btRigidBodyConstructionInfo constructionInfo(0.0F, motionState.get(), shape.get(), localInertia);
-			auto bone = std::make_unique<Fo4SkinnedMeshBone>(RE::BSFixedString(a_decodedBone.name), fallbackNode, fallbackTransform, constructionInfo);
+			auto bone = RE::make_smart<Fo4SkinnedMeshBone>(RE::BSFixedString(a_decodedBone.name), fallbackNode, fallbackTransform, constructionInfo);
 			bone->m_localToRig = localToRig;
 			bone->m_rigToLocal = localToRig.inverse();
 			bone->m_marginMultipler = 1.0F;
@@ -874,18 +877,18 @@ namespace Smp
 			bone->readTransform(0.0F);
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 
-			PrototypeBody prototypeBody;
-			prototypeBody.actor = a_event.actor;
-			prototypeBody.node = fallbackNode;
-			prototypeBody.buildGroup = a_buildGroup;
-			prototypeBody.bipedObject = a_event.bipedObject;
-			AddPrototypeBodyBuildGroup(prototypeBody, a_buildGroup, a_domain, a_event.bipedObject);
-			prototypeBody.boneName = a_decodedBone.name;
-			prototypeBody.shape = std::move(shape);
-			prototypeBody.motionState = std::move(motionState);
-			prototypeBody.bone = std::move(bone);
-			prototypeBody.meshOnlySkinBone = true;
-			a_stagedBodies.push_back(std::move(prototypeBody));
+			BoneRecord boneRecord;
+			boneRecord.actor = a_event.actor;
+			boneRecord.node = fallbackNode;
+			boneRecord.buildGroup = a_buildGroup;
+			boneRecord.bipedObject = a_event.bipedObject;
+			AddBodyBuildGroup(boneRecord, a_buildGroup, a_domain, a_event.bipedObject);
+			boneRecord.boneName = a_decodedBone.name;
+			boneRecord.shape = std::move(shape);
+			boneRecord.motionState = std::move(motionState);
+			boneRecord.bone = std::move(bone);
+			boneRecord.meshOnlySkinBone = true;
+			a_stagedBodies.push_back(std::move(boneRecord));
 			++createdFallbackSkinBones;
 			if (auto* logger = spdlog::default_logger_raw(); logger && logger->should_log(spdlog::level::debug)) {
 				spdlog::debug(
@@ -938,14 +941,14 @@ namespace Smp
 
 		for (std::size_t meshDescriptorIndex = 0; meshDescriptorIndex < a_summary.meshDescriptors.size(); ++meshDescriptorIndex) {
 			const auto* meshDescriptor = std::addressof(a_summary.meshDescriptors[meshDescriptorIndex]);
-			const auto existingMesh = std::ranges::find_if(a_state.meshes, [a_buildGroup, meshDescriptorIndex](const PrototypeMesh& a_mesh) {
+			const auto existingMesh = std::ranges::find_if(a_state.meshes, [a_buildGroup, meshDescriptorIndex](const MeshRecord& a_mesh) {
 				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingMesh != a_state.meshes.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [a_buildGroup, meshDescriptorIndex](const PrototypeMesh& a_mesh) {
+			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [a_buildGroup, meshDescriptorIndex](const MeshRecord& a_mesh) {
 				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingStagedMesh != a_stagedMeshes.end()) {
@@ -1023,7 +1026,7 @@ namespace Smp
 				const auto& decodedMesh = *matchedMesh.mesh;
 				for (std::size_t boneIndex = 0; boneIndex < decodedMesh.bones.size(); ++boneIndex) {
 					const auto& decodedBone = decodedMesh.bones[boneIndex];
-					PrototypeBody* matchedBody = findPrototypeBody(decodedBone);
+					BoneRecord* matchedBody = findBoneRecord(decodedBone);
 					const auto weightedBone = std::ranges::any_of(decodedMesh.vertices, [boneIndex](const hdt::Vertex& a_vertex) {
 						for (int influence = 0; influence < 4; ++influence) {
 							if (a_vertex.weight_[influence] > FLT_EPSILON && a_vertex.getBoneIdx(influence) == boneIndex) {
@@ -1096,13 +1099,13 @@ namespace Smp
 			meshBody->disableTag_ = meshDescriptor->disableTag;
 			meshBody->disablePriority_ = meshDescriptor->disablePriority;
 			for (const auto& boneName : meshDescriptor->canCollideWithBones) {
-				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const BoneRecord& a_body) {
+					return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 				});
-				PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
+				BoneRecord* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
 				if (!resolvedBody) {
-					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-						return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const BoneRecord& a_body) {
+						return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 					});
 					if (stagedBody != a_stagedBodies.end()) {
 						resolvedBody = std::addressof(*stagedBody);
@@ -1116,13 +1119,13 @@ namespace Smp
 				}
 			}
 			for (const auto& boneName : meshDescriptor->noCollideWithBones) {
-				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-					return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+				auto matchedBody = std::ranges::find_if(a_state.bodies, [&boneName, a_buildGroup](const BoneRecord& a_body) {
+					return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 				});
-				PrototypeBody* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
+				BoneRecord* resolvedBody = matchedBody != a_state.bodies.end() ? std::addressof(*matchedBody) : nullptr;
 				if (!resolvedBody) {
-					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const PrototypeBody& a_body) {
-						return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
+					const auto stagedBody = std::ranges::find_if(a_stagedBodies, [&boneName, a_buildGroup](const BoneRecord& a_body) {
+						return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, boneName);
 					});
 					if (stagedBody != a_stagedBodies.end()) {
 						resolvedBody = std::addressof(*stagedBody);
@@ -1159,23 +1162,23 @@ namespace Smp
 					}
 				}
 				if (!appliedThreshold) {
-					for (const auto& prototypeBody : a_state.bodies) {
-						if (!prototypeBody.bone || !PhysicsNamesEqual(prototypeBody.boneName, boneName)) {
+					for (const auto& boneRecord : a_state.bodies) {
+						if (!boneRecord.bone || !PhysicsNamesEqual(boneRecord.boneName, boneName)) {
 							continue;
 						}
 						for (auto& skinnedBone : meshBody->skinnedBones_) {
-							if (skinnedBone.ptr == prototypeBody.bone.get()) {
+							if (skinnedBone.ptr == boneRecord.bone.get()) {
 								skinnedBone.weightThreshold = threshold;
 								appliedThreshold = true;
 							}
 						}
 					}
-					for (const auto& prototypeBody : a_stagedBodies) {
-						if (!prototypeBody.bone || !PhysicsNamesEqual(prototypeBody.boneName, boneName)) {
+					for (const auto& boneRecord : a_stagedBodies) {
+						if (!boneRecord.bone || !PhysicsNamesEqual(boneRecord.boneName, boneName)) {
 							continue;
 						}
 						for (auto& skinnedBone : meshBody->skinnedBones_) {
-							if (skinnedBone.ptr == prototypeBody.bone.get()) {
+							if (skinnedBone.ptr == boneRecord.bone.get()) {
 								skinnedBone.weightThreshold = threshold;
 								appliedThreshold = true;
 							}
@@ -1244,7 +1247,7 @@ namespace Smp
 				static_cast<void*>(a_state.actor),
 				meshDescriptor->name,
 				a_buildGroup,
-				PrototypeDomainName(a_domain),
+				BuildDomainName(a_domain),
 				rawVertexStats.samples,
 				skinnedVertexStats.samples,
 				skinnedBoneStats.samples,
@@ -1289,23 +1292,23 @@ namespace Smp
 				meshBody->getWorldTransform().getOrigin().y(),
 				meshBody->getWorldTransform().getOrigin().z());
 
-			PrototypeMesh prototypeMesh;
-			prototypeMesh.name = meshDescriptor->name;
-			prototypeMesh.geometry = primaryMesh && IsProbablyValidNiObject(primaryMesh->geometry) ? primaryMesh->geometry : nullptr;
-			prototypeMesh.buildGroup = a_buildGroup;
-			prototypeMesh.descriptorIndex = meshDescriptorIndex;
-			prototypeMesh.bipedObject = a_event.bipedObject;
-			prototypeMesh.domain = a_domain;
-			prototypeMesh.body = std::move(meshBody);
-			a_stagedMeshes.push_back(std::move(prototypeMesh));
+			MeshRecord meshRecord;
+			meshRecord.name = meshDescriptor->name;
+			meshRecord.geometry = primaryMesh && IsProbablyValidNiObject(primaryMesh->geometry) ? primaryMesh->geometry : nullptr;
+			meshRecord.buildGroup = a_buildGroup;
+			meshRecord.descriptorIndex = meshDescriptorIndex;
+			meshRecord.bipedObject = a_event.bipedObject;
+			meshRecord.domain = a_domain;
+			meshRecord.body = std::move(meshBody);
+			a_stagedMeshes.push_back(std::move(meshRecord));
 			++created;
 		}
 
-		if (a_domain != PrototypeBuildDomain::kArmor) {
+		if (a_domain != BuildDomain::kArmor) {
 			spdlog::info(
-				"created {} {} prototype skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} fallbackSkinBones={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} missingPositionData={} splitPositionData={} faceGenPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
+				"created {} {} system skinned mesh bodies for actor={} extractionSource={} from decodedMeshes={} geometries={} skinnedGeometries={} matchedGeometries={} decodedVertices={} decodedTriangles={} skippedExisting={} skippedEmpty={} skippedMissingBones={} skippedMissingBoneData={} sanitizedBadBoneMeshes={} skippedMissingTriangleIndices={} skippedInvalidTriangleIndices={} skippedNoColliders={} fallbackSkinBones={} unresolvedCanCollideBones={} unresolvedNoCollideBones={} unresolvedWeightThresholds={} nullBones={} nonNodeBones={} missingBoneData={} unsupportedGeometryClasses={} missingRendererData={} missingVertexBuffer={} missingIndexBuffer={} missingCpuVertexData={} missingPositionData={} splitPositionData={} faceGenPositionData={} nonFinitePositions={} invalidCpuVertexData={} pendingVertexCopies={} missingCpuIndexData={} invalidCpuIndexData={} pendingIndexCopies={} undersizedVertexBuffers={} undersizedIndexBuffers={} badBoneIndices={}",
 				created,
-				PrototypeDomainName(a_domain),
+				BuildDomainName(a_domain),
 				static_cast<void*>(a_state.actor),
 				extractionSource,
 				extraction.stats.decodedMeshes,
@@ -1350,13 +1353,13 @@ namespace Smp
 		return false;
 	}
 
-	void Fo4PhysicsWorld::BuildPrototypeConstraintsLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::BuildConstraintsLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const PhysicsXmlSummary& a_summary,
 		const std::uint64_t a_buildGroup,
-		const PrototypeBuildDomain a_domain,
-		const std::span<PrototypeBody> a_stagedBodies,
-		std::vector<PrototypeConstraint>& a_stagedConstraints)
+		const BuildDomain a_domain,
+		const std::span<BoneRecord> a_stagedBodies,
+		std::vector<ConstraintRecord>& a_stagedConstraints)
 	{
 		std::uint32_t created = 0;
 		std::uint32_t skippedMissingBodies = 0;
@@ -1365,14 +1368,14 @@ namespace Smp
 		std::uint32_t kinematicPairsAllowed = 0;
 		std::uint32_t skippedInvalid = 0;
 		const auto findBodyForConstraint = [&](const std::string_view a_name) {
-			auto body = std::ranges::find_if(a_state.bodies, [a_buildGroup, a_name](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_name);
+			auto body = std::ranges::find_if(a_state.bodies, [a_buildGroup, a_name](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_name);
 			});
 			if (body != a_state.bodies.end()) {
 				return std::addressof(*body);
 			}
-			const auto stagedBody = std::ranges::find_if(a_stagedBodies, [a_buildGroup, a_name](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_name);
+			const auto stagedBody = std::ranges::find_if(a_stagedBodies, [a_buildGroup, a_name](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, a_buildGroup) && PhysicsNamesEqual(a_body.boneName, a_name);
 			});
 			return stagedBody != a_stagedBodies.end() ? std::addressof(*stagedBody) : nullptr;
 		};
@@ -1398,14 +1401,14 @@ namespace Smp
 					descriptor.bodyA,
 					descriptor.bodyB);
 			}
-			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup](const PrototypeConstraint& a_constraint) {
+			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup](const ConstraintRecord& a_constraint) {
 				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existing != a_state.constraints.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [descriptorIndex, a_buildGroup](const PrototypeConstraint& a_constraint) {
+			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [descriptorIndex, a_buildGroup](const ConstraintRecord& a_constraint) {
 				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existingStaged != a_stagedConstraints.end()) {
@@ -1413,7 +1416,7 @@ namespace Smp
 				continue;
 			}
 
-			auto constraint = CreatePrototypeConstraint(
+			auto constraint = CreateConstraint(
 				descriptor,
 				bodyA->bone.get(),
 				bodyB->bone.get(),
@@ -1424,26 +1427,26 @@ namespace Smp
 				continue;
 			}
 
-			PrototypeConstraint prototypeConstraint;
-			prototypeConstraint.buildGroup = a_buildGroup;
-			prototypeConstraint.domain = a_domain;
-			prototypeConstraint.descriptorIndex = descriptorIndex;
-			prototypeConstraint.bodyA = descriptor.bodyA;
-			prototypeConstraint.bodyB = descriptor.bodyB;
-			prototypeConstraint.kind = descriptor.kind;
+			ConstraintRecord constraintRecord;
+			constraintRecord.buildGroup = a_buildGroup;
+			constraintRecord.domain = a_domain;
+			constraintRecord.descriptorIndex = descriptorIndex;
+			constraintRecord.bodyA = descriptor.bodyA;
+			constraintRecord.bodyB = descriptor.bodyB;
+			constraintRecord.kind = descriptor.kind;
 			const auto reversedGeneric = descriptor.kind == PhysicsConstraintKind::kGeneric && descriptor.useLinearReferenceFrameA;
-			prototypeConstraint.boneA = reversedGeneric ? bodyB->bone.get() : bodyA->bone.get();
-			prototypeConstraint.boneB = reversedGeneric ? bodyA->bone.get() : bodyB->bone.get();
-			prototypeConstraint.constraint = std::move(constraint);
-			a_stagedConstraints.push_back(std::move(prototypeConstraint));
+			constraintRecord.boneA = reversedGeneric ? bodyB->bone.get() : bodyA->bone.get();
+			constraintRecord.boneB = reversedGeneric ? bodyA->bone.get() : bodyB->bone.get();
+			constraintRecord.constraint = std::move(constraint);
+			a_stagedConstraints.push_back(std::move(constraintRecord));
 			++created;
 		}
 
 		if (created > 0 || skippedMissingBodies > 0 || skippedExisting > 0 || skippedSelfConstraints > 0 || kinematicPairsAllowed > 0 || skippedInvalid > 0) {
 			spdlog::info(
-				"created {} {} prototype Bullet constraints for actor={} buildGroup={}; actor constraints={} skippedMissingBodies={} skippedExisting={} skippedSelfConstraints={} kinematicPairsAllowed={} skippedInvalid={}",
+				"created {} {} system Bullet constraints for actor={} buildGroup={}; actor constraints={} skippedMissingBodies={} skippedExisting={} skippedSelfConstraints={} kinematicPairsAllowed={} skippedInvalid={}",
 				created,
-				PrototypeDomainName(a_domain),
+				BuildDomainName(a_domain),
 				static_cast<void*>(a_state.actor),
 				a_buildGroup,
 				a_state.constraints.size(),
@@ -1455,81 +1458,4 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::ScalePrototypeConstraintsLocked(PrototypeActorState& a_state)
-	{
-		if (!a_state.runtimes.empty()) {
-			for (const auto& runtime : a_state.runtimes) {
-				ScalePrototypeConstraintsLocked(a_state, runtime);
-			}
-			return;
-		}
-
-		for (auto& prototypeConstraint : a_state.constraints) {
-			if (!prototypeConstraint.constraint || !prototypeConstraint.boneA || !prototypeConstraint.boneB) {
-				continue;
-			}
-
-			const auto newScaleA = CurrentBoneScale(prototypeConstraint.boneA);
-			const auto newScaleB = CurrentBoneScale(prototypeConstraint.boneB);
-			if (btFuzzyZero(newScaleA - prototypeConstraint.scaleA) && btFuzzyZero(newScaleB - prototypeConstraint.scaleB)) {
-				continue;
-			}
-
-			switch (prototypeConstraint.kind) {
-			case PhysicsConstraintKind::kConeTwist:
-				static_cast<hdt::ConeTwistConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
-				break;
-			case PhysicsConstraintKind::kStiffSpring:
-				static_cast<hdt::StiffSpringConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
-				break;
-			case PhysicsConstraintKind::kGeneric:
-			default:
-				static_cast<hdt::Generic6DofConstraint*>(prototypeConstraint.constraint.get())->scaleConstraint();
-				break;
-			}
-
-			prototypeConstraint.scaleA = newScaleA;
-			prototypeConstraint.scaleB = newScaleB;
-		}
-	}
-
-	void Fo4PhysicsWorld::ScalePrototypeConstraintsLocked(PrototypeActorState& a_state, const PrototypeBuildGroupRuntime& a_runtime)
-	{
-		for (auto* constraint : a_runtime.constraints) {
-			if (!constraint) {
-				continue;
-			}
-			auto prototypeConstraint = std::ranges::find_if(a_state.constraints, [constraint](const PrototypeConstraint& a_constraint) {
-				return a_constraint.constraint.get() == constraint;
-			});
-			if (prototypeConstraint == a_state.constraints.end() ||
-				!prototypeConstraint->constraint ||
-				!prototypeConstraint->boneA ||
-				!prototypeConstraint->boneB) {
-				continue;
-			}
-
-			const auto newScaleA = CurrentBoneScale(prototypeConstraint->boneA);
-			const auto newScaleB = CurrentBoneScale(prototypeConstraint->boneB);
-			if (btFuzzyZero(newScaleA - prototypeConstraint->scaleA) && btFuzzyZero(newScaleB - prototypeConstraint->scaleB)) {
-				continue;
-			}
-
-			switch (prototypeConstraint->kind) {
-			case PhysicsConstraintKind::kConeTwist:
-				static_cast<hdt::ConeTwistConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
-				break;
-			case PhysicsConstraintKind::kStiffSpring:
-				static_cast<hdt::StiffSpringConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
-				break;
-			case PhysicsConstraintKind::kGeneric:
-			default:
-				static_cast<hdt::Generic6DofConstraint*>(prototypeConstraint->constraint.get())->scaleConstraint();
-				break;
-			}
-
-			prototypeConstraint->scaleA = newScaleA;
-			prototypeConstraint->scaleB = newScaleB;
-		}
-	}
 }

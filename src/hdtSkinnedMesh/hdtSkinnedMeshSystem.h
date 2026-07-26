@@ -1,19 +1,20 @@
 #pragma once
 
+#include "hdtBulletHelper.h"
 #include "hdtConstraintGroup.h"
-#include "hdtSkinnedMeshBone.h"
 
 namespace hdt
 {
-	class BoneScaleConstraint;
+	struct SkinnedMeshBone;
 	class SkinnedMeshBody;
 	class SkinnedMeshShape;
 	class SkinnedMeshWorld;
+	class BoneScaleConstraint;
 
 	class SkinnedMeshSystem :
 		public RE::BSIntrusiveRefCounted
 	{
-		friend class SkinnedMeshWorld;
+		friend class hdt::SkinnedMeshWorld;
 
 	public:
 		virtual ~SkinnedMeshSystem() = default;
@@ -24,25 +25,17 @@ namespace hdt
 
 		void internalUpdate();
 		void gather(std::vector<SkinnedMeshBody*>& a_bodies, std::vector<SkinnedMeshShape*>& a_shapes);
-		bool valid() const { return !bones_.empty(); }
-		void addBone(RE::BSTSmartPointer<SkinnedMeshBone> a_bone);
-		void addMesh(RE::BSTSmartPointer<SkinnedMeshBody> a_mesh);
-		void addConstraint(RE::BSTSmartPointer<BoneScaleConstraint> a_constraint);
-		void addConstraintGroup(RE::BSTSmartPointer<ConstraintGroup> a_group);
+		bool valid() const { return !m_bones.empty(); }
 
-		std::vector<RE::BSTSmartPointer<SkinnedMeshBone>>& getBones() { return bones_; }
-		const std::vector<RE::BSTSmartPointer<SkinnedMeshBone>>& getBones() const { return bones_; }
-		std::vector<RE::BSTSmartPointer<SkinnedMeshBody>>& getMeshes() { return meshes_; }
-		const std::vector<RE::BSTSmartPointer<SkinnedMeshBody>>& getMeshes() const { return meshes_; }
+		std::vector<std::shared_ptr<btCollisionShape>> m_shapeRefs;
+		SkinnedMeshWorld* m_world{ nullptr };
+		bool block_resetting{ false };
+		std::vector<RE::BSTSmartPointer<SkinnedMeshBone>>& getBones() { return m_bones; }
 
-		std::vector<std::shared_ptr<btCollisionShape>> shapeRefs_;
-		SkinnedMeshWorld* world_{ nullptr };
-		bool blockResetting{ false };
-
-	private:
-		std::vector<RE::BSTSmartPointer<SkinnedMeshBone>> bones_;
-		std::vector<RE::BSTSmartPointer<SkinnedMeshBody>> meshes_;
-		std::vector<RE::BSTSmartPointer<BoneScaleConstraint>> constraints_;
-		std::vector<RE::BSTSmartPointer<ConstraintGroup>> constraintGroups_;
+	protected:
+		std::vector<RE::BSTSmartPointer<SkinnedMeshBone>> m_bones;
+		std::vector<RE::BSTSmartPointer<SkinnedMeshBody>> m_meshes;
+		std::vector<RE::BSTSmartPointer<BoneScaleConstraint>> m_constraints;
+		std::vector<RE::BSTSmartPointer<ConstraintGroup>> m_constraintGroups;
 	};
 }

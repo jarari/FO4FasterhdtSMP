@@ -7,7 +7,7 @@
 		std::unique_ptr<hdt::CollisionDispatcher> dispatcher_;
 		std::unique_ptr<btBroadphaseInterface> broadphase_;
 		std::unique_ptr<btConstraintSolverPoolMt> solver_;
-		std::unique_ptr<btDiscreteDynamicsWorld> dynamicsWorld_;
+		std::unique_ptr<hdt::SkinnedMeshWorld> dynamicsWorld_;
 		std::uint64_t candidateEvents_{ 0 };
 		std::uint64_t simulationFrame_{ 1 };
 		int maxSubSteps_{ 4 };
@@ -67,8 +67,8 @@
 		btVector3 currentWind_{ 0.0F, 0.0F, 0.0F };
 		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };
 		float windTime_{ 0.0F };
-		std::string prototypePhysicsXml_;
-		std::vector<PrototypeActorState> prototypeActors_;
+		std::string fallbackPhysicsXml_;
+		std::vector<RE::BSTSmartPointer<Fo4SkinnedMeshSystem>> systems_;
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
@@ -77,7 +77,7 @@
 		std::uint32_t characterCustomizationEditMode_{ 0 };
 		bool characterCustomizationActorDirty_{ false };
 		bool characterCustomizationHeadDirty_{ false };
-		std::vector<PrototypeArmorRecord> characterCustomizationArmorRecords_;
+		std::vector<ArmorPhysicsRecord> characterCustomizationArmorRecords_;
 		std::uint32_t loadingMenuDepth_{ 0 };
 		bool loadingPhysicsSuspended_{ false };
 		bool registered_{ false };

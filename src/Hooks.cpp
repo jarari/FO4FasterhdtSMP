@@ -687,7 +687,7 @@ namespace Hooks
 	void HookedMainSwap(RE::Main* a_main)
 	{
 		Smp::Fo4PhysicsWorld::GetSingleton()->StepFrame();
-		Smp::Fo4PhysicsWorld::GetSingleton()->WriteBackPrototypeBodies(Smp::WritebackSource::kMainSync);
+		Smp::Fo4PhysicsWorld::GetSingleton()->WriteBackSystems(Smp::WritebackSource::kMainSync);
 		Smp::ImguiLayer::RenderFrame();
 		OriginalMainSwap(a_main);
 	}

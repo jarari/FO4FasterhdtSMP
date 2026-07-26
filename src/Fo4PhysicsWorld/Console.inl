@@ -28,34 +28,34 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 
 		auto* console = RE::ConsoleLog::GetSingleton();
 		if (!console) {
 			return;
 		}
 
-		std::vector<const PrototypeActorState*> orderedStates;
-		orderedStates.reserve(prototypeActors_.size());
-		for (const auto& actorState : prototypeActors_) {
-			orderedStates.push_back(std::addressof(actorState));
+		std::vector<const Fo4SkinnedMeshSystem*> orderedStates;
+		orderedStates.reserve(systems_.size());
+		for (const auto& actorState : systems_) {
+			orderedStates.push_back(actorState.get());
 		}
 		std::ranges::stable_sort(orderedStates, [](const auto* a_lhs, const auto* a_rhs) {
-			return a_lhs->HasActiveRuntime() < a_rhs->HasActiveRuntime();
+			return a_lhs->IsActive() < a_rhs->IsActive();
 		});
 
 		for (const auto* actorState : orderedStates) {
 			const auto* actor = actorState->actor;
 			const auto* baseObject = actor ? actor->GetNPC() : nullptr;
 			const auto ownerName = baseObject ? RE::TESFullName::GetFullName(*baseObject) : std::string_view{};
-			const auto active = actorState->HasActiveRuntime();
+			const auto active = actorState->IsActive();
 
 			const char* state = "Unseen by player";
 			if (active) {
 				state = actor && actor->IsPlayerRef() ? "Is player character" : "Is near player";
-			} else if (actorState->runtimeSoftSuspended) {
+			} else if (actorState->IsInactive()) {
 				state = "Deactivated for performance";
-			} else if (actorState->runtimeSuspended) {
+			} else if (actorState->suspended) {
 				state = "Not in scene";
 			}
 
@@ -74,7 +74,7 @@ namespace Smp
 			const auto groupIsActive = [&](const std::uint64_t a_buildGroup) {
 				return active &&
 					a_buildGroup != 0 &&
-					std::ranges::any_of(actorState->runtimes, [&](const PrototypeBuildGroupRuntime& a_runtime) {
+					std::ranges::any_of(actorState->buildGroups, [&](const BuildGroupRecord& a_runtime) {
 						return a_runtime.buildGroup == a_buildGroup;
 					});
 			};
@@ -119,7 +119,7 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 
 		std::size_t activeSkeletons = 0;
 		std::size_t armors = 0;
@@ -128,8 +128,9 @@ namespace Smp
 		std::size_t activeHeadParts = 0;
 		std::size_t activeCollisionMeshes = 0;
 
-		for (const auto& actorState : prototypeActors_) {
-			const auto active = actorState.HasActiveRuntime();
+		for (const auto& actorStatePointer : systems_) {
+			const auto& actorState = *actorStatePointer;
+			const auto active = actorState.IsActive();
 			if (active) {
 				++activeSkeletons;
 			}
@@ -137,7 +138,7 @@ namespace Smp
 			const auto groupIsActive = [&](const std::uint64_t a_buildGroup) {
 				return active &&
 					a_buildGroup != 0 &&
-					std::ranges::any_of(actorState.runtimes, [&](const PrototypeBuildGroupRuntime& a_runtime) {
+					std::ranges::any_of(actorState.buildGroups, [&](const BuildGroupRecord& a_runtime) {
 						return a_runtime.buildGroup == a_buildGroup;
 					});
 			};
@@ -159,14 +160,14 @@ namespace Smp
 			if (active) {
 				activeCollisionMeshes += static_cast<std::size_t>(std::ranges::count_if(
 					actorState.meshes,
-					[](const PrototypeMesh& a_mesh) {
-						return a_mesh.inBulletWorld && a_mesh.body;
+					[&actorState](const MeshRecord& a_mesh) {
+						return actorState.m_world != nullptr && a_mesh.body;
 					}));
 			}
 		}
 
 		if (auto* console = RE::ConsoleLog::GetSingleton()) {
-			console->Log("[HDT-SMP] tracked skeletons: {}", prototypeActors_.size());
+			console->Log("[HDT-SMP] tracked skeletons: {}", systems_.size());
 			console->Log("[HDT-SMP] active skeletons: {}", activeSkeletons);
 			console->Log("[HDT-SMP] tracked armor addons: {}", armors);
 			console->Log("[HDT-SMP] tracked head parts: {}", headParts);

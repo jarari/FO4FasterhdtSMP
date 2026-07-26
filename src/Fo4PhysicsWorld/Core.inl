@@ -69,12 +69,12 @@ namespace Smp
 		maxActiveActors_ = static_cast<std::size_t>(std::max(a_settings.smp.maxActiveActors, 1));
 		currentMaxActiveActors_ = maxActiveActors_;
 		maxActorDistance_ = std::max(a_settings.smp.maxActorDistance, 0.0F);
-		prototypePhysicsXml_.clear();
-		if (!a_settings.smp.prototypePhysicsXml.empty()) {
-			if (auto resolved = ConfigPaths::ResolveExistingConfigPath(a_settings.smp.prototypePhysicsXml, true)) {
-				prototypePhysicsXml_ = resolved->string();
+		fallbackPhysicsXml_.clear();
+		if (!a_settings.smp.fallbackPhysicsXml.empty()) {
+			if (auto resolved = ConfigPaths::ResolveExistingConfigPath(a_settings.smp.fallbackPhysicsXml, true)) {
+				fallbackPhysicsXml_ = resolved->string();
 			} else {
-				spdlog::warn("prototype physics XML fallback disabled because configured path is missing or not XML: {}", a_settings.smp.prototypePhysicsXml);
+				spdlog::warn("physics XML fallback disabled because configured path is missing or not XML: {}", a_settings.smp.fallbackPhysicsXml);
 			}
 		}
 		windEnabled_ = a_settings.wind.enabled;
@@ -121,8 +121,9 @@ namespace Smp
 		std::vector<std::pair<RE::Actor*, RE::ActorHandle>> actors;
 		{
 			std::scoped_lock lock(lock_);
-			for (auto& actorState : prototypeActors_) {
-				for (auto& runtime : actorState.runtimes) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
+				for (auto& runtime : actorState.buildGroups) {
 					runtime.pendingResetPhysicsRead = true;
 					runtime.pendingResetPhysicsWriteback = true;
 				}

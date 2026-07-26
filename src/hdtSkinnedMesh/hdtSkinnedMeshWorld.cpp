@@ -8,34 +8,34 @@ namespace hdt
 {
 	SkinnedMeshWorld::~SkinnedMeshWorld()
 	{
-		while (!systems_.empty()) {
-			removeSkinnedMeshSystem(systems_.back().get());
+		while (!m_systems.empty()) {
+			removeSkinnedMeshSystem(m_systems.back().get());
 		}
 	}
 
 	void SkinnedMeshWorld::addSkinnedMeshSystem(SkinnedMeshSystem* a_system)
 	{
 		if (!a_system ||
-			std::ranges::find_if(systems_, [a_system](const auto& a_entry) {
+			std::ranges::find_if(m_systems, [a_system](const auto& a_entry) {
 				return a_entry.get() == a_system;
-			}) != systems_.end()) {
+			}) != m_systems.end()) {
 			return;
 		}
 
-		systems_.emplace_back(a_system);
-		for (const auto& mesh : a_system->meshes_) {
+		m_systems.emplace_back(a_system);
+		for (const auto& mesh : a_system->m_meshes) {
 			if (mesh) {
 				addCollisionObject(mesh.get(), 1, 1);
 			}
 		}
-		for (const auto& bone : a_system->bones_) {
+		for (const auto& bone : a_system->m_bones) {
 			if (!bone) {
 				continue;
 			}
 			bone->m_rig.setActivationState(DISABLE_DEACTIVATION);
 			addRigidBody(std::addressof(bone->m_rig), 0, 0);
 		}
-		for (const auto& group : a_system->constraintGroups_) {
+		for (const auto& group : a_system->m_constraintGroups) {
 			if (!group) {
 				continue;
 			}
@@ -45,26 +45,26 @@ namespace hdt
 				}
 			}
 		}
-		for (const auto& constraint : a_system->constraints_) {
+		for (const auto& constraint : a_system->m_constraints) {
 			if (constraint && constraint->getConstraint()) {
 				addConstraint(constraint->getConstraint(), true);
 			}
 		}
 
 		a_system->readTransform(a_system->prepareForRead(-10.0F));
-		a_system->world_ = this;
+		a_system->m_world = this;
 	}
 
 	void SkinnedMeshWorld::removeSkinnedMeshSystem(SkinnedMeshSystem* a_system)
 	{
-		const auto found = std::ranges::find_if(systems_, [a_system](const auto& a_entry) {
+		const auto found = std::ranges::find_if(m_systems, [a_system](const auto& a_entry) {
 			return a_entry.get() == a_system;
 		});
-		if (found == systems_.end()) {
+		if (found == m_systems.end()) {
 			return;
 		}
 
-		for (const auto& group : a_system->constraintGroups_) {
+		for (const auto& group : a_system->m_constraintGroups) {
 			if (!group) {
 				continue;
 			}
@@ -74,25 +74,25 @@ namespace hdt
 				}
 			}
 		}
-		for (const auto& mesh : a_system->meshes_) {
+		for (const auto& mesh : a_system->m_meshes) {
 			if (mesh) {
 				removeCollisionObject(mesh.get());
 			}
 		}
-		for (const auto& constraint : a_system->constraints_) {
+		for (const auto& constraint : a_system->m_constraints) {
 			if (constraint && constraint->getConstraint()) {
 				removeConstraint(constraint->getConstraint());
 			}
 		}
-		for (const auto& bone : a_system->bones_) {
+		for (const auto& bone : a_system->m_bones) {
 			if (bone) {
 				removeRigidBody(std::addressof(bone->m_rig));
 			}
 		}
 
-		*found = std::move(systems_.back());
-		systems_.pop_back();
-		a_system->world_ = nullptr;
+		*found = std::move(m_systems.back());
+		m_systems.pop_back();
+		a_system->m_world = nullptr;
 	}
 
 	void SkinnedMeshWorld::updateConstraintsForBone(SkinnedMeshBone* a_bone)
@@ -155,29 +155,9 @@ namespace hdt
 	void SkinnedMeshWorld::performDiscreteCollisionDetection()
 	{
 		BT_PROFILE("performDiscreteCollisionDetection");
-		for (const auto& system : systems_) {
+		for (const auto& system : m_systems) {
 			if (system) {
 				system->internalUpdate();
-			}
-		}
-
-		// FO4 owns bones and meshes per actor/build group rather than exclusively
-		// through SkinnedMeshSystem, so update directly registered objects too.
-		if (systems_.empty()) {
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				if (auto* rigidBody = btRigidBody::upcast(m_collisionObjects[index])) {
-					if (auto* bone = static_cast<SkinnedMeshBone*>(rigidBody->getUserPointer())) {
-						bone->internalUpdate();
-					}
-				}
-			}
-			for (int index = 0; index < m_collisionObjects.size(); ++index) {
-				auto* object = m_collisionObjects[index];
-				if (!object || !object->getCollisionShape() ||
-					object->getCollisionShape()->getShapeType() != CUSTOM_CONCAVE_SHAPE_TYPE) {
-					continue;
-				}
-				static_cast<SkinnedMeshBody*>(object)->updateBoundingSphereAabb();
 			}
 		}
 

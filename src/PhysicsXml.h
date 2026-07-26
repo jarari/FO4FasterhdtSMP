@@ -210,10 +210,7 @@ namespace Smp
 		static PhysicsXmlLoader* GetSingleton();
 
 		void ClearCache();
-		bool LoadPrototype(const std::string& a_path);
 		std::optional<PhysicsXmlSummary> LoadSummary(const std::string& a_path);
-		const PhysicsXmlSummary& GetPrototypeSummary() const { return prototype_; }
-		bool HasPrototype() const { return hasPrototype_; }
 
 	private:
 		struct CachedSummary
@@ -223,7 +220,5 @@ namespace Smp
 		};
 
 		std::unordered_map<std::string, CachedSummary> summaryCache_;
-		PhysicsXmlSummary prototype_;
-		bool hasPrototype_{ false };
 	};
 }

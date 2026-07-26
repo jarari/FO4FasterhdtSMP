@@ -85,7 +85,7 @@ namespace Smp
 				for (auto& record : CollectQueuedArmorRecordsForAttachLocked(a_event)) {
 					record.buildGroups.clear();
 					record.cpuCopyRetryCount = 0;
-					MergePrototypeArmorRecord(characterCustomizationArmorRecords_, std::move(record));
+					MergeArmorPhysicsRecord(characterCustomizationArmorRecords_, std::move(record));
 				}
 			}
 		}
@@ -112,14 +112,15 @@ namespace Smp
 		}
 
 		std::uint32_t suspendedStates = 0;
-		for (auto& actorState : prototypeActors_) {
-			if (actorState.actor != target || actorState.firstPerson || !actorState.HasRuntime()) {
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
+			if (actorState.actor != target || actorState.firstPerson || !actorState.HasPhysics()) {
 				continue;
 			}
-			if (actorState.runtimeSuspended) {
+			if (actorState.suspended) {
 				continue;
 			}
-			SuspendPrototypeRuntimeLocked(actorState);
+			SuspendSystemLocked(actorState);
 			++suspendedStates;
 		}
 
@@ -127,10 +128,10 @@ namespace Smp
 			ResetStepClockLocked();
 		}
 		spdlog::debug(
-			"suspended {} target prototype actor states for character customization actor={} trackedStates={}",
+			"suspended {} target system actor states for character customization actor={} trackedStates={}",
 			suspendedStates,
 			static_cast<void*>(target),
-			prototypeActors_.size());
+			systems_.size());
 	}
 
 	void Fo4PhysicsWorld::ReloadCharacterCustomizationTargetLocked()
@@ -148,17 +149,18 @@ namespace Smp
 			return;
 		}
 
-		std::vector<PrototypeArmorRecord> armorRecords;
+		std::vector<ArmorPhysicsRecord> armorRecords;
 		for (auto& record : characterCustomizationArmorRecords_) {
 			record.buildGroups.clear();
 			record.cpuCopyRetryCount = 0;
-			MergePrototypeArmorRecord(armorRecords, std::move(record));
+			MergeArmorPhysicsRecord(armorRecords, std::move(record));
 		}
 		characterCustomizationArmorRecords_.clear();
 
 		std::uint32_t clearedStates = 0;
 		std::uint32_t skippedFirstPerson = 0;
-		for (auto& actorState : prototypeActors_) {
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
 			if (actorState.actor != target) {
 				continue;
 			}
@@ -170,24 +172,24 @@ namespace Smp
 			for (auto record : actorState.armorRecords) {
 				record.buildGroups.clear();
 				record.cpuCopyRetryCount = 0;
-				MergePrototypeArmorRecord(armorRecords, std::move(record));
+				MergeArmorPhysicsRecord(armorRecords, std::move(record));
 			}
-			if (actorState.HasRuntime()) {
-				ClearPrototypeStateLocked(actorState);
+			if (actorState.HasPhysics()) {
+				ClearSystemLocked(actorState);
 				actorState.armorRecords = armorRecords;
 				actorState.faceNode = nullptr;
 				++clearedStates;
 			}
 		}
 
-		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
+		std::erase_if(systems_, [](const auto& a_state) {
+			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
 
 		const auto queuedArmorRecordCount = armorRecords.size();
 		const auto actorDirty = characterCustomizationActorDirty_ || queuedArmorRecordCount > 0;
 		const auto headDirty = characterCustomizationHeadDirty_;
-		const auto hairSlotArmorQueued = PrototypeArmorRecordsIncludeHairSlot(armorRecords);
+		const auto hairSlotArmorQueued = ArmorPhysicsRecordsIncludeHairSlot(armorRecords);
 		if (actorDirty) {
 			MarkPendingActorRebuildLocked(target, false, std::move(armorRecords), true, true, true);
 			if (hairSlotArmorQueued) {
@@ -212,7 +214,7 @@ namespace Smp
 		}
 		ResetStepClockLocked();
 		spdlog::debug(
-			"queued targeted prototype physics reload after character customization actor={} actorDirty={} headDirty={} armorRecords={} clearedStates={} skippedFirstPerson={}",
+			"queued targeted system physics reload after character customization actor={} actorDirty={} headDirty={} armorRecords={} clearedStates={} skippedFirstPerson={}",
 			static_cast<void*>(target),
 			actorDirty,
 			headDirty,
@@ -231,10 +233,10 @@ namespace Smp
 		characterCustomizationArmorRecords_.clear();
 	}
 
-	void Fo4PhysicsWorld::SuspendPrototypeRuntimeLocked(PrototypeActorState& a_state)
+	void Fo4PhysicsWorld::SuspendSystemLocked(Fo4SkinnedMeshSystem& a_state)
 	{
 		std::vector<std::uint64_t> buildGroups;
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
 				buildGroups.push_back(runtime.buildGroup);
 			}
@@ -255,51 +257,34 @@ namespace Smp
 			dispatcher_->clearAllManifold();
 		}
 
-		if (dynamicsWorld_) {
-			for (auto& prototypeConstraint : a_state.constraints) {
-				if (prototypeConstraint.constraint && prototypeConstraint.inBulletWorld) {
-					dynamicsWorld_->removeConstraint(prototypeConstraint.constraint.get());
-					prototypeConstraint.inBulletWorld = false;
-				}
-			}
-
-			for (auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.body && prototypeMesh.inBulletWorld) {
-					dynamicsWorld_->removeCollisionObject(prototypeMesh.body.get());
-					prototypeMesh.inBulletWorld = false;
-				}
-			}
-
-			for (auto& prototypeBody : a_state.bodies) {
-				if (prototypeBody.bone && prototypeBody.inBulletWorld) {
-					dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
-					prototypeBody.inBulletWorld = false;
-				}
-			}
+		if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+			dynamicsWorld_->removeSkinnedMeshSystem(std::addressof(a_state));
 		}
 
 		const auto meshCount = a_state.meshes.size();
 		const auto constraintCount = a_state.constraints.size();
 		const auto bodyCount = a_state.bodies.size();
 		std::uint32_t capturedSkinSlots = 0;
-		for (auto& prototypeBody : a_state.bodies) {
-			if (!prototypeBody.bone) {
+		for (auto& boneRecord : a_state.bodies) {
+			if (!boneRecord.bone) {
 				continue;
 			}
 			const auto before = a_state.suspendedSkinSlots.size();
-			prototypeBody.bone->CollectSkinWorldTransformRestoreSlots(a_state.suspendedSkinSlots);
+			boneRecord.bone->CollectSkinWorldTransformRestoreSlots(a_state.suspendedSkinSlots);
 			capturedSkinSlots += static_cast<std::uint32_t>(a_state.suspendedSkinSlots.size() - before);
 		}
+		// BoneRecord owns each rigid body's shape and motion state. Destroy the
+		// system-owned Bullet objects before releasing those record dependencies.
+		a_state.ClearSystemObjects();
 		a_state.meshes.clear();
 		a_state.constraints.clear();
 		a_state.bodies.clear();
-		a_state.runtimes.clear();
+		a_state.buildGroups.clear();
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
-		a_state.runtimeSuspended = true;
-		a_state.runtimeSoftSuspended = false;
+		a_state.suspended = true;
 		spdlog::debug(
-			"suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={} capturedSkinSlots={} cachedAttachmentBonePoses={} armorRecords={}",
+			"suspended system runtime for actor={} buildGroups={} bodies={} meshes={} constraints={} capturedSkinSlots={} cachedAttachmentBonePoses={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
 			buildGroups.size(),
 			bodyCount,
@@ -310,56 +295,34 @@ namespace Smp
 			a_state.armorRecords.size());
 	}
 
-	void Fo4PhysicsWorld::SoftSuspendPrototypeRuntimeLocked(PrototypeActorState& a_state)
+	void Fo4PhysicsWorld::DeactivateSystemLocked(Fo4SkinnedMeshSystem& a_state)
 	{
-		if (!a_state.HasRuntime() || a_state.runtimeSoftSuspended) {
+		if (!a_state.HasPhysics() || a_state.IsInactive()) {
 			return;
 		}
 
 		std::vector<std::uint64_t> buildGroups;
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
 				buildGroups.push_back(runtime.buildGroup);
 			}
 		}
-		ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "soft-suspend");
+		ResetBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "deactivate");
 
-		std::uint32_t removedConstraints = 0;
-		std::uint32_t removedMeshes = 0;
-		std::uint32_t removedBodies = 0;
-		if (dynamicsWorld_) {
-			for (auto& prototypeConstraint : a_state.constraints) {
-				if (prototypeConstraint.constraint && prototypeConstraint.inBulletWorld) {
-					dynamicsWorld_->removeConstraint(prototypeConstraint.constraint.get());
-					prototypeConstraint.inBulletWorld = false;
-					++removedConstraints;
-				}
-			}
-
-			for (auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.body && prototypeMesh.inBulletWorld) {
-					dynamicsWorld_->removeCollisionObject(prototypeMesh.body.get());
-					prototypeMesh.inBulletWorld = false;
-					++removedMeshes;
-				}
-			}
-
-			for (auto& prototypeBody : a_state.bodies) {
-				if (prototypeBody.bone && prototypeBody.inBulletWorld) {
-					dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
-					prototypeBody.inBulletWorld = false;
-					++removedBodies;
-				}
-			}
+		const auto wasActive = a_state.m_world == dynamicsWorld_.get();
+		const auto removedConstraints = wasActive ? static_cast<std::uint32_t>(a_state.constraints.size()) : 0U;
+		const auto removedMeshes = wasActive ? static_cast<std::uint32_t>(a_state.meshes.size()) : 0U;
+		const auto removedBodies = wasActive ? static_cast<std::uint32_t>(a_state.bodies.size()) : 0U;
+		if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+			dynamicsWorld_->removeSkinnedMeshSystem(std::addressof(a_state));
 		}
 
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.currentWindFactor = 0.0F;
-		a_state.runtimeSuspended = false;
-		a_state.runtimeSoftSuspended = true;
+		a_state.suspended = false;
 		spdlog::debug(
-			"soft-suspended prototype runtime for actor={} buildGroups={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} runtimes={} armorRecords={}",
+			"deactivated system actor={} buildGroups={} removedBodies={} removedMeshes={} removedConstraints={} retainedBodies={} retainedMeshes={} retainedConstraints={} trackedBuildGroups={} armorRecords={}",
 			static_cast<void*>(a_state.actor),
 			buildGroups.size(),
 			removedBodies,
@@ -368,18 +331,18 @@ namespace Smp
 			a_state.bodies.size(),
 			a_state.meshes.size(),
 			a_state.constraints.size(),
-			a_state.runtimes.size(),
+			a_state.buildGroups.size(),
 			a_state.armorRecords.size());
 	}
 
-	bool Fo4PhysicsWorld::ResumeSoftSuspendedPrototypeRuntimeLocked(PrototypeActorState& a_state)
+	bool Fo4PhysicsWorld::ReactivateSystemLocked(Fo4SkinnedMeshSystem& a_state)
 	{
-		if (!a_state.runtimeSoftSuspended || !dynamicsWorld_) {
+		if (!a_state.IsInactive() || !dynamicsWorld_) {
 			return false;
 		}
 
 		std::vector<std::uint64_t> buildGroups;
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
 				buildGroups.push_back(runtime.buildGroup);
 			}
@@ -388,35 +351,18 @@ namespace Smp
 			return false;
 		}
 
-		for (const auto buildGroup : buildGroups) {
-			CommitPrototypeBuildGroupToBulletLocked(a_state, buildGroup);
-		}
+		dynamicsWorld_->addSkinnedMeshSystem(std::addressof(a_state));
 
-		const auto hasResumedObject = [&a_state, &buildGroups](const auto& a_collection) {
-			return std::ranges::any_of(a_collection, [&buildGroups](const auto& a_object) {
-				if (!a_object.inBulletWorld) {
-					return false;
-				}
-				if constexpr (requires { a_object.buildGroup; }) {
-					return std::ranges::find(buildGroups, a_object.buildGroup) != buildGroups.end();
-				} else {
-					return std::ranges::any_of(a_object.buildGroups, [&buildGroups](const std::uint64_t a_buildGroup) {
-						return std::ranges::find(buildGroups, a_buildGroup) != buildGroups.end();
-					});
-				}
-			});
-		};
-		if (!hasResumedObject(a_state.bodies) && !hasResumedObject(a_state.meshes) && !hasResumedObject(a_state.constraints)) {
+		if (a_state.m_world != dynamicsWorld_.get()) {
 			return false;
 		}
 
-		a_state.runtimeSoftSuspended = false;
-		a_state.runtimeSuspended = false;
+		a_state.suspended = false;
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.currentWindFactor = 1.0F;
 		spdlog::debug(
-			"resumed soft-suspended prototype runtime for actor={} buildGroups={} bodies={} meshes={} constraints={}",
+			"reactivated system actor={} buildGroups={} bodies={} meshes={} constraints={}",
 			static_cast<void*>(a_state.actor),
 			buildGroups.size(),
 			a_state.bodies.size(),
@@ -426,7 +372,7 @@ namespace Smp
 	}
 
 	std::uint32_t Fo4PhysicsWorld::RestoreSuspendedSkinSlotsLocked(
-		PrototypeActorState& a_state,
+		Fo4SkinnedMeshSystem& a_state,
 		const std::span<const std::uint64_t> a_buildGroups,
 		const std::span<const Fo4SkinnedMeshBone::ActiveSkinSlot> a_activeSlots)
 	{
@@ -498,7 +444,7 @@ namespace Smp
 		});
 		if (restored > 0 || erased > 0) {
 			spdlog::debug(
-				"restored {} suspended prototype skin slot fields and erased {} cached slots for actor={}",
+				"restored {} suspended system skin slot fields and erased {} cached slots for actor={}",
 				restored,
 				erased,
 				static_cast<void*>(a_state.actor));
@@ -506,7 +452,7 @@ namespace Smp
 		return restored;
 	}
 
-	std::uint32_t Fo4PhysicsWorld::RestoreAllSuspendedSkinSlotsLocked(PrototypeActorState& a_state)
+	std::uint32_t Fo4PhysicsWorld::RestoreAllSuspendedSkinSlotsLocked(Fo4SkinnedMeshSystem& a_state)
 	{
 		std::vector<std::uint64_t> buildGroups;
 		for (const auto& slot : a_state.suspendedSkinSlots) {
@@ -517,7 +463,7 @@ namespace Smp
 		return RestoreSuspendedSkinSlotsLocked(a_state, buildGroups);
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeStateLocked(PrototypeActorState& a_state, const bool a_restoreSkinSlots)
+	void Fo4PhysicsWorld::ClearSystemLocked(Fo4SkinnedMeshSystem& a_state, const bool a_restoreSkinSlots)
 	{
 		if (a_restoreSkinSlots && !a_state.attachmentBoneLocalPoses.empty()) {
 			std::vector<std::uint64_t> buildGroups;
@@ -526,70 +472,52 @@ namespace Smp
 					buildGroups.push_back(localPose.buildGroup);
 				}
 			}
-			ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "clear-state");
+			ResetBuildGroupsToStoredLocalPoseLocked(a_state, buildGroups, "clear-state");
 		}
 		if (dispatcher_) {
 			dispatcher_->clearAllManifold();
 		}
 
-		if (dynamicsWorld_) {
-			for (auto& prototypeConstraint : a_state.constraints) {
-				if (prototypeConstraint.constraint && prototypeConstraint.inBulletWorld) {
-					dynamicsWorld_->removeConstraint(prototypeConstraint.constraint.get());
-					prototypeConstraint.inBulletWorld = false;
-				}
-			}
-
-			for (auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.body && prototypeMesh.inBulletWorld) {
-					dynamicsWorld_->removeCollisionObject(prototypeMesh.body.get());
-					prototypeMesh.inBulletWorld = false;
-				}
-			}
+		if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+			dynamicsWorld_->removeSkinnedMeshSystem(std::addressof(a_state));
 		}
 		if (!a_state.meshes.empty()) {
-			spdlog::debug("cleared {} prototype physics mesh bodies for actor={}", a_state.meshes.size(), static_cast<void*>(a_state.actor));
+			spdlog::debug("cleared {} system physics mesh bodies for actor={}", a_state.meshes.size(), static_cast<void*>(a_state.actor));
 		}
-		a_state.meshes.clear();
 
 		if (!a_state.constraints.empty()) {
-			spdlog::debug("cleared {} prototype physics constraints for actor={}", a_state.constraints.size(), static_cast<void*>(a_state.actor));
+			spdlog::debug("cleared {} system physics constraints for actor={}", a_state.constraints.size(), static_cast<void*>(a_state.actor));
 		}
-		a_state.constraints.clear();
-		a_state.runtimes.clear();
-
-		if (dynamicsWorld_) {
-			for (auto& prototypeBody : a_state.bodies) {
-				if (prototypeBody.bone && prototypeBody.inBulletWorld) {
-					dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
-					prototypeBody.inBulletWorld = false;
-				}
-			}
-		}
+		a_state.buildGroups.clear();
 
 		if (a_restoreSkinSlots) {
-			for (auto& prototypeBody : a_state.bodies) {
-				if (!prototypeBody.bone) {
+			for (auto& boneRecord : a_state.bodies) {
+				if (!boneRecord.bone) {
 					continue;
 				}
-				for (const auto buildGroup : prototypeBody.buildGroups) {
-					prototypeBody.bone->RemoveSkinWorldTransformsForBuildGroup(buildGroup);
+				for (const auto buildGroup : boneRecord.buildGroups) {
+					boneRecord.bone->RemoveSkinWorldTransformsForBuildGroup(buildGroup);
 				}
-				if (prototypeBody.buildGroup != 0) {
-					prototypeBody.bone->RemoveSkinWorldTransformsForBuildGroup(prototypeBody.buildGroup);
+				if (boneRecord.buildGroup != 0) {
+					boneRecord.bone->RemoveSkinWorldTransformsForBuildGroup(boneRecord.buildGroup);
 				}
 			}
 			RestoreAllSuspendedSkinSlotsLocked(a_state);
 		} else if (!a_state.bodies.empty()) {
 			spdlog::debug(
-				"skipped restoring prototype skin slots while clearing actor={} for model rebuild",
+				"skipped restoring system skin slots while clearing actor={} for model rebuild",
 				static_cast<void*>(a_state.actor));
 			a_state.suspendedSkinSlots.clear();
 		}
 
 		if (!a_state.bodies.empty()) {
-			spdlog::debug("cleared {} prototype physics bodies for actor={}", a_state.bodies.size(), static_cast<void*>(a_state.actor));
+			spdlog::debug("cleared {} system physics bodies for actor={}", a_state.bodies.size(), static_cast<void*>(a_state.actor));
 		}
+		// Keep record-owned collision shapes and motion states alive until the
+		// system-owned constraints, meshes, and bones have been destroyed.
+		a_state.ClearSystemObjects();
+		a_state.meshes.clear();
+		a_state.constraints.clear();
 		a_state.bodies.clear();
 		a_state.attachmentBoneLocalPoses.clear();
 		a_state.nextBuildGroup = 0;
@@ -601,17 +529,16 @@ namespace Smp
 		a_state.lastWritebackFrame = 0;
 		a_state.lastWritebackSource = WritebackSource::kUnknown;
 		a_state.currentWindFactor = 1.0F;
-		a_state.runtimeSuspended = false;
-		a_state.runtimeSoftSuspended = false;
+		a_state.suspended = false;
 		a_state.faceNode = nullptr;
 		a_state.armorRecords.clear();
 		a_state.attachmentRecords.clear();
 		a_state.headPartRecords.clear();
-		a_state.runtimes.clear();
+		a_state.buildGroups.clear();
 		a_state.suspendedSkinSlots.clear();
 	}
 
-	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectPrototypeGroupsForObjectLocked(const PrototypeActorState& a_state, RE::NiAVObject* a_object) const
+	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectBuildGroupsForObjectLocked(const Fo4SkinnedMeshSystem& a_state, RE::NiAVObject* a_object) const
 	{
 		std::vector<std::uint64_t> buildGroups;
 		if (!a_object) {
@@ -623,7 +550,7 @@ namespace Smp
 			auto* firstPersonRoot = a_state.actor->Get3D(true);
 			if (a_object == primaryRoot || a_object == thirdPersonRoot || a_object == firstPersonRoot || a_object == a_state.faceNode.get()) {
 				spdlog::debug(
-					"refusing object-scoped prototype clear from broad actor object={} actor={}; waiting for attachment/biped scoped clear",
+					"refusing object-scoped system clear from broad actor object={} actor={}; waiting for attachment/biped scoped clear",
 					static_cast<void*>(a_object),
 					static_cast<void*>(a_state.actor));
 				return buildGroups;
@@ -655,31 +582,31 @@ namespace Smp
 			return buildGroups;
 		}
 
-		for (const auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.buildGroup == 0 || !prototypeMesh.geometry || !IsObjectInTree(a_object, prototypeMesh.geometry)) {
+		for (const auto& meshRecord : a_state.meshes) {
+			if (meshRecord.buildGroup == 0 || !meshRecord.geometry || !IsObjectInTree(a_object, meshRecord.geometry)) {
 				continue;
 			}
 
-			if (std::ranges::find(buildGroups, prototypeMesh.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(prototypeMesh.buildGroup);
+			if (std::ranges::find(buildGroups, meshRecord.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(meshRecord.buildGroup);
 			}
 		}
 
-		for (const auto& prototypeBody : a_state.bodies) {
-			if (prototypeBody.buildGroup == 0 || !prototypeBody.node || !IsNodeInTree(a_object, prototypeBody.node)) {
+		for (const auto& boneRecord : a_state.bodies) {
+			if (boneRecord.buildGroup == 0 || !boneRecord.node || !IsNodeInTree(a_object, boneRecord.node)) {
 				continue;
 			}
 
-			if (std::ranges::find(buildGroups, prototypeBody.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(prototypeBody.buildGroup);
+			if (std::ranges::find(buildGroups, boneRecord.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(boneRecord.buildGroup);
 			}
 		}
 
 		return buildGroups;
 	}
 
-	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectArmorPrototypeGroupsForBipedObjectLocked(
-		const PrototypeActorState& a_state,
+	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectArmorPhysicsGroupsForBipedObjectLocked(
+		const Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		const std::uint64_t a_preservedBuildGroup) const
 	{
@@ -703,8 +630,8 @@ namespace Smp
 			}
 
 			bool foundCurrentOwner = false;
-			for (const auto& runtime : a_state.runtimes) {
-				if (runtime.buildGroup != a_buildGroup || runtime.domain != PrototypeBuildDomain::kArmor) {
+			for (const auto& runtime : a_state.buildGroups) {
+				if (runtime.buildGroup != a_buildGroup || runtime.domain != BuildDomain::kArmor) {
 					continue;
 				}
 				foundCurrentOwner = true;
@@ -712,12 +639,12 @@ namespace Smp
 					return true;
 				}
 			}
-			for (const auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.buildGroup != a_buildGroup || prototypeMesh.domain != PrototypeBuildDomain::kArmor) {
+			for (const auto& meshRecord : a_state.meshes) {
+				if (meshRecord.buildGroup != a_buildGroup || meshRecord.domain != BuildDomain::kArmor) {
 					continue;
 				}
 				foundCurrentOwner = true;
-				if (prototypeMesh.bipedObject == a_bipedObject) {
+				if (meshRecord.bipedObject == a_bipedObject) {
 					return true;
 				}
 			}
@@ -747,23 +674,23 @@ namespace Smp
 			}
 		}
 
-		for (const auto& runtime : a_state.runtimes) {
-			if (runtime.domain == PrototypeBuildDomain::kArmor && runtime.bipedObject == a_bipedObject) {
+		for (const auto& runtime : a_state.buildGroups) {
+			if (runtime.domain == BuildDomain::kArmor && runtime.bipedObject == a_bipedObject) {
 				appendGroup(runtime.buildGroup);
 			}
 		}
 
-		for (const auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.domain == PrototypeBuildDomain::kArmor && prototypeMesh.bipedObject == a_bipedObject) {
-				appendGroup(prototypeMesh.buildGroup);
+		for (const auto& meshRecord : a_state.meshes) {
+			if (meshRecord.domain == BuildDomain::kArmor && meshRecord.bipedObject == a_bipedObject) {
+				appendGroup(meshRecord.buildGroup);
 			}
 		}
 
 		return buildGroups;
 	}
 
-	std::uint32_t Fo4PhysicsWorld::PrunePrototypeRecordsForBipedObjectLocked(
-		PrototypeActorState& a_state,
+	std::uint32_t Fo4PhysicsWorld::PrunePhysicsRecordsForBipedObjectLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		const std::uint64_t a_preservedBuildGroup)
 	{
@@ -775,10 +702,10 @@ namespace Smp
 			return a_preservedBuildGroup != 0 &&
 				std::ranges::find(a_buildGroups, a_preservedBuildGroup) != a_buildGroups.end();
 		};
-		const auto removedAttachments = std::erase_if(a_state.attachmentRecords, [a_bipedObject, &hasPreservedGroup](const PrototypeAttachmentRecord& a_record) {
+		const auto removedAttachments = std::erase_if(a_state.attachmentRecords, [a_bipedObject, &hasPreservedGroup](const AttachmentPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject && !hasPreservedGroup(a_record.buildGroups);
 		});
-		const auto removedArmorRecords = std::erase_if(a_state.armorRecords, [a_bipedObject, &hasPreservedGroup](const PrototypeArmorRecord& a_record) {
+		const auto removedArmorRecords = std::erase_if(a_state.armorRecords, [a_bipedObject, &hasPreservedGroup](const ArmorPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject && !hasPreservedGroup(a_record.buildGroups);
 		});
 
@@ -786,7 +713,7 @@ namespace Smp
 	}
 
 	std::uint32_t Fo4PhysicsWorld::ClearStaleHairSlotArmorGroupsLocked(
-		PrototypeActorState& a_state,
+		Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		const std::uint64_t a_preservedBuildGroup,
 		const std::string_view a_reason,
@@ -798,10 +725,10 @@ namespace Smp
 			return 0;
 		}
 
-		auto buildGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
+		auto buildGroups = CollectArmorPhysicsGroupsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
 		for (const auto buildGroup : buildGroups) {
 			spdlog::debug(
-				"clearing stale hair-slot armor prototype group actor={} bipedObject={} buildGroup={} preservedBuildGroup={} object={} xml='{}' reason={}",
+				"clearing stale hair-slot armor system group actor={} bipedObject={} buildGroup={} preservedBuildGroup={} object={} xml='{}' reason={}",
 				static_cast<void*>(a_state.actor),
 				std::to_underlying(a_bipedObject),
 				buildGroup,
@@ -811,10 +738,10 @@ namespace Smp
 				a_reason);
 		}
 		if (!buildGroups.empty()) {
-			ClearPrototypeGroupsLocked(a_state, buildGroups, a_resetToStoredLocalPose);
+			ClearBuildGroupsLocked(a_state, buildGroups, a_resetToStoredLocalPose);
 		}
 
-		const auto removedRecords = PrunePrototypeRecordsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
+		const auto removedRecords = PrunePhysicsRecordsForBipedObjectLocked(a_state, a_bipedObject, a_preservedBuildGroup);
 		if (!buildGroups.empty() || removedRecords > 0) {
 			spdlog::debug(
 				"cleared stale hair-slot armor ownership actor={} bipedObject={} groups={} records={} preservedBuildGroup={} object={} xml='{}' reason={}",
@@ -832,7 +759,7 @@ namespace Smp
 	}
 
 	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsLocked(
-		const PrototypeActorState& a_state,
+		const Fo4SkinnedMeshSystem& a_state,
 		std::vector<std::uint64_t>& a_buildGroups) const
 	{
 		std::uint32_t matchedRecords = 0;
@@ -849,23 +776,23 @@ namespace Smp
 		return matchedRecords;
 	}
 
-	bool Fo4PhysicsWorld::HasActiveHairSlotArmorLocked(const PrototypeActorState& a_state) const
+	bool Fo4PhysicsWorld::HasActiveHairSlotArmorLocked(const Fo4SkinnedMeshSystem& a_state) const
 	{
-		if (std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+		if (std::ranges::any_of(a_state.armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 				return IsHairBipedObject(a_record.bipedObject) &&
 					std::ranges::any_of(a_record.buildGroups, [&](const std::uint64_t a_buildGroup) {
-						return PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup) || PrototypeBuildGroupHasMeshLocked(a_state, a_buildGroup);
+						return BuildGroupHasBodyLocked(a_state, a_buildGroup) || BuildGroupHasMeshLocked(a_state, a_buildGroup);
 					});
 			})) {
 			return true;
 		}
-		return std::ranges::any_of(a_state.runtimes, [](const PrototypeBuildGroupRuntime& a_runtime) {
-			return a_runtime.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
+		return std::ranges::any_of(a_state.buildGroups, [](const BuildGroupRecord& a_runtime) {
+			return a_runtime.domain == BuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
 		});
 	}
 
-	bool Fo4PhysicsWorld::PrototypeBuildGroupsIncludeHairSlotArmorLocked(
-		const PrototypeActorState& a_state,
+	bool Fo4PhysicsWorld::BuildGroupsIncludeHairSlotArmorLocked(
+		const Fo4SkinnedMeshSystem& a_state,
 		const std::span<const std::uint64_t> a_buildGroups) const
 	{
 		if (a_buildGroups.empty()) {
@@ -876,30 +803,30 @@ namespace Smp
 			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
 		};
 
-		if (std::ranges::any_of(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+		if (std::ranges::any_of(a_state.armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
 			})) {
 			return true;
 		}
-		if (std::ranges::any_of(a_state.attachmentRecords, [&](const PrototypeAttachmentRecord& a_record) {
+		if (std::ranges::any_of(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
 				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
 			})) {
 			return true;
 		}
-		if (std::ranges::any_of(a_state.runtimes, [&](const PrototypeBuildGroupRuntime& a_runtime) {
-				return containsGroup(a_runtime.buildGroup) && a_runtime.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
+		if (std::ranges::any_of(a_state.buildGroups, [&](const BuildGroupRecord& a_runtime) {
+				return containsGroup(a_runtime.buildGroup) && a_runtime.domain == BuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
 			})) {
 			return true;
 		}
-		if (std::ranges::any_of(a_state.meshes, [&](const PrototypeMesh& a_mesh) {
-				return containsGroup(a_mesh.buildGroup) && a_mesh.domain == PrototypeBuildDomain::kArmor && IsHairBipedObject(a_mesh.bipedObject);
+		if (std::ranges::any_of(a_state.meshes, [&](const MeshRecord& a_mesh) {
+				return containsGroup(a_mesh.buildGroup) && a_mesh.domain == BuildDomain::kArmor && IsHairBipedObject(a_mesh.bipedObject);
 			})) {
 			return true;
 		}
-		return std::ranges::any_of(a_state.bodies, [&](const PrototypeBody& a_body) {
+		return std::ranges::any_of(a_state.bodies, [&](const BoneRecord& a_body) {
 			if (!a_body.buildGroupDomains.empty() || !a_body.buildGroupBipedObjects.empty()) {
 				for (const auto& [buildGroup, domain] : a_body.buildGroupDomains) {
-					if (containsGroup(buildGroup) && domain == PrototypeBuildDomain::kArmor) {
+					if (containsGroup(buildGroup) && domain == BuildDomain::kArmor) {
 						const auto biped = std::ranges::find_if(a_body.buildGroupBipedObjects, [buildGroup](const auto& a_entry) {
 							return a_entry.first == buildGroup;
 						});
@@ -914,32 +841,32 @@ namespace Smp
 		});
 	}
 
-	bool Fo4PhysicsWorld::ClearPrototypeGroupsForObjectLocked(PrototypeActorState& a_state, RE::NiAVObject* a_object)
+	bool Fo4PhysicsWorld::ClearBuildGroupsForObjectLocked(Fo4SkinnedMeshSystem& a_state, RE::NiAVObject* a_object)
 	{
-		auto buildGroups = CollectPrototypeGroupsForObjectLocked(a_state, a_object);
+		auto buildGroups = CollectBuildGroupsForObjectLocked(a_state, a_object);
 		if (buildGroups.empty()) {
 			return false;
 		}
 
-		ClearPrototypeGroupsLocked(a_state, buildGroups);
+		ClearBuildGroupsLocked(a_state, buildGroups);
 		return true;
 	}
 
-	bool Fo4PhysicsWorld::ClearPrototypeGroupsForBipedObjectLocked(PrototypeActorState& a_state, const RE::BIPED_OBJECT a_bipedObject)
+	bool Fo4PhysicsWorld::ClearBuildGroupsForBipedObjectLocked(Fo4SkinnedMeshSystem& a_state, const RE::BIPED_OBJECT a_bipedObject)
 	{
 		if (a_bipedObject == RE::BIPED_OBJECT::kTotal) {
 			return false;
 		}
 
-		const auto attachmentCount = static_cast<std::size_t>(std::ranges::count_if(a_state.attachmentRecords, [a_bipedObject](const PrototypeAttachmentRecord& a_record) {
+		const auto attachmentCount = static_cast<std::size_t>(std::ranges::count_if(a_state.attachmentRecords, [a_bipedObject](const AttachmentPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject && !a_record.buildGroups.empty();
 		}));
-		const auto armorRecordCount = static_cast<std::size_t>(std::ranges::count_if(a_state.armorRecords, [a_bipedObject](const PrototypeArmorRecord& a_record) {
+		const auto armorRecordCount = static_cast<std::size_t>(std::ranges::count_if(a_state.armorRecords, [a_bipedObject](const ArmorPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject;
 		}));
 		if (attachmentCount > 1 || armorRecordCount > 1) {
 			spdlog::warn(
-				"refusing biped-wide prototype clear actor={} bipedObject={} attachments={} armorRecords={} because multiple same-slot systems are tracked",
+				"refusing biped-wide system clear actor={} bipedObject={} attachments={} armorRecords={} because multiple same-slot systems are tracked",
 				static_cast<void*>(a_state.actor),
 				std::to_underlying(a_bipedObject),
 				attachmentCount,
@@ -959,27 +886,27 @@ namespace Smp
 			}
 		};
 
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.bipedObject == a_bipedObject) {
 				appendGroup(runtime.buildGroup);
 			}
 		}
 
-		for (const auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.bipedObject == a_bipedObject) {
-				appendGroup(prototypeMesh.buildGroup);
+		for (const auto& meshRecord : a_state.meshes) {
+			if (meshRecord.bipedObject == a_bipedObject) {
+				appendGroup(meshRecord.buildGroup);
 			}
 		}
 
-		for (const auto& prototypeBody : a_state.bodies) {
-			if (!prototypeBody.buildGroupBipedObjects.empty()) {
-				for (const auto& [buildGroup, bipedObject] : prototypeBody.buildGroupBipedObjects) {
+		for (const auto& boneRecord : a_state.bodies) {
+			if (!boneRecord.buildGroupBipedObjects.empty()) {
+				for (const auto& [buildGroup, bipedObject] : boneRecord.buildGroupBipedObjects) {
 					if (bipedObject == a_bipedObject) {
 						appendGroup(buildGroup);
 					}
 				}
-			} else if (prototypeBody.bipedObject == a_bipedObject) {
-				appendGroup(prototypeBody.buildGroup);
+			} else if (boneRecord.bipedObject == a_bipedObject) {
+				appendGroup(boneRecord.buildGroup);
 			}
 		}
 
@@ -987,21 +914,21 @@ namespace Smp
 			return false;
 		}
 
-		ClearPrototypeGroupsLocked(a_state, buildGroups);
-		std::erase_if(a_state.armorRecords, [a_bipedObject](const PrototypeArmorRecord& a_record) {
+		ClearBuildGroupsLocked(a_state, buildGroups);
+		std::erase_if(a_state.armorRecords, [a_bipedObject](const ArmorPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject;
 		});
 		return true;
 	}
 
-	bool Fo4PhysicsWorld::ClearPrototypeGroupsForBoneNamesLocked(PrototypeActorState& a_state, const std::span<const std::string> a_boneNames, const PrototypeBuildDomain a_domain)
+	bool Fo4PhysicsWorld::ClearBuildGroupsForBoneNamesLocked(Fo4SkinnedMeshSystem& a_state, const std::span<const std::string> a_boneNames, const BuildDomain a_domain)
 	{
 		if (a_boneNames.empty()) {
 			return false;
 		}
-		if (a_domain == PrototypeBuildDomain::kArmor) {
+		if (a_domain == BuildDomain::kArmor) {
 			spdlog::warn(
-				"refusing to clear armor prototype groups by bone names actor={} names={} because actor skeleton bones may be shared across armor XMLs",
+				"refusing to clear armor system groups by bone names actor={} names={} because actor skeleton bones may be shared across armor XMLs",
 				static_cast<void*>(a_state.actor),
 				a_boneNames.size());
 			return false;
@@ -1013,25 +940,25 @@ namespace Smp
 				buildGroups.push_back(a_buildGroup);
 			}
 		};
-		for (const auto& prototypeBody : a_state.bodies) {
-			if (prototypeBody.boneName.empty()) {
+		for (const auto& boneRecord : a_state.bodies) {
+			if (boneRecord.boneName.empty()) {
 				continue;
 			}
-			const auto nameMatched = std::ranges::any_of(a_boneNames, [&prototypeBody](const std::string& a_boneName) {
-				return PhysicsNamesEqual(prototypeBody.boneName, a_boneName);
+			const auto nameMatched = std::ranges::any_of(a_boneNames, [&boneRecord](const std::string& a_boneName) {
+				return PhysicsNamesEqual(boneRecord.boneName, a_boneName);
 			});
 			if (!nameMatched) {
 				continue;
 			}
 
-			if (!prototypeBody.buildGroupDomains.empty()) {
-				for (const auto& [buildGroup, domain] : prototypeBody.buildGroupDomains) {
+			if (!boneRecord.buildGroupDomains.empty()) {
+				for (const auto& [buildGroup, domain] : boneRecord.buildGroupDomains) {
 					if (domain == a_domain) {
 						appendGroup(buildGroup);
 					}
 				}
-			} else if (prototypeBody.buildGroup != 0) {
-				appendGroup(prototypeBody.buildGroup);
+			} else if (boneRecord.buildGroup != 0) {
+				appendGroup(boneRecord.buildGroup);
 			}
 		}
 
@@ -1039,30 +966,30 @@ namespace Smp
 			return false;
 		}
 
-		ClearPrototypeGroupsLocked(a_state, buildGroups);
+		ClearBuildGroupsLocked(a_state, buildGroups);
 		return true;
 	}
 
-	bool Fo4PhysicsWorld::ClearPrototypeGroupsByDomainLocked(PrototypeActorState& a_state, const PrototypeBuildDomain a_domain)
+	bool Fo4PhysicsWorld::ClearBuildGroupsByDomainLocked(Fo4SkinnedMeshSystem& a_state, const BuildDomain a_domain)
 	{
 		std::vector<std::uint64_t> buildGroups;
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.buildGroup != 0 && runtime.domain == a_domain && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
 				buildGroups.push_back(runtime.buildGroup);
 			}
 		}
-		for (const auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.buildGroup != 0 && prototypeMesh.domain == a_domain && std::ranges::find(buildGroups, prototypeMesh.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(prototypeMesh.buildGroup);
+		for (const auto& meshRecord : a_state.meshes) {
+			if (meshRecord.buildGroup != 0 && meshRecord.domain == a_domain && std::ranges::find(buildGroups, meshRecord.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(meshRecord.buildGroup);
 			}
 		}
-		for (const auto& prototypeConstraint : a_state.constraints) {
-			if (prototypeConstraint.buildGroup != 0 && prototypeConstraint.domain == a_domain && std::ranges::find(buildGroups, prototypeConstraint.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(prototypeConstraint.buildGroup);
+		for (const auto& constraintRecord : a_state.constraints) {
+			if (constraintRecord.buildGroup != 0 && constraintRecord.domain == a_domain && std::ranges::find(buildGroups, constraintRecord.buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(constraintRecord.buildGroup);
 			}
 		}
-		for (const auto& prototypeBody : a_state.bodies) {
-			for (const auto& [buildGroup, domain] : prototypeBody.buildGroupDomains) {
+		for (const auto& boneRecord : a_state.bodies) {
+			for (const auto& [buildGroup, domain] : boneRecord.buildGroupDomains) {
 				if (buildGroup != 0 && domain == a_domain && std::ranges::find(buildGroups, buildGroup) == buildGroups.end()) {
 					buildGroups.push_back(buildGroup);
 				}
@@ -1073,19 +1000,19 @@ namespace Smp
 			return false;
 		}
 
-		ClearPrototypeGroupsLocked(a_state, buildGroups);
+		ClearBuildGroupsLocked(a_state, buildGroups);
 		return true;
 	}
 
-	void Fo4PhysicsWorld::ClearHeadPrototypeTrackingLocked(PrototypeActorState& a_state, const std::string_view a_reason)
+	void Fo4PhysicsWorld::ClearHeadPhysicsTrackingLocked(Fo4SkinnedMeshSystem& a_state, const std::string_view a_reason)
 	{
-		const auto clearedHead = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHead);
-		const auto clearedHair = ClearPrototypeGroupsByDomainLocked(a_state, PrototypeBuildDomain::kHair);
+		const auto clearedHead = ClearBuildGroupsByDomainLocked(a_state, BuildDomain::kHead);
+		const auto clearedHair = ClearBuildGroupsByDomainLocked(a_state, BuildDomain::kHair);
 
 		const auto recordCount = a_state.headPartRecords.size();
 		a_state.headPartRecords.clear();
 		spdlog::debug(
-			"cleared head/hair prototype tracking actor={} reason={} clearedHead={} clearedHair={} headPartRecords={}",
+			"cleared head/hair system tracking actor={} reason={} clearedHead={} clearedHair={} headPartRecords={}",
 			static_cast<void*>(a_state.actor),
 			a_reason,
 			clearedHead,
@@ -1093,8 +1020,8 @@ namespace Smp
 			recordCount);
 	}
 
-	void Fo4PhysicsWorld::ClearPrototypeGroupsLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::ClearBuildGroupsLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const std::vector<std::uint64_t>& a_buildGroups,
 		const bool a_resetToStoredLocalPose)
 	{
@@ -1102,88 +1029,59 @@ namespace Smp
 			return;
 		}
 		if (a_resetToStoredLocalPose) {
-			ResetPrototypeBuildGroupsToStoredLocalPoseLocked(a_state, a_buildGroups, "clear-groups");
+			ResetBuildGroupsToStoredLocalPoseLocked(a_state, a_buildGroups, "clear-groups");
 		}
 
 		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
 			return std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
 		};
-		const auto allGroupsRemoved = [&containsGroup](const PrototypeBody& a_body) {
+		const auto allGroupsRemoved = [&containsGroup](const BoneRecord& a_body) {
 			return !a_body.buildGroups.empty() ?
 				std::ranges::all_of(a_body.buildGroups, containsGroup) :
 				containsGroup(a_body.buildGroup);
 		};
-		if (dynamicsWorld_) {
-			for (const auto& runtime : a_state.runtimes) {
-				if (!containsGroup(runtime.buildGroup)) {
-					continue;
-				}
-
-				for (auto* constraint : runtime.constraints) {
-					if (!constraint) {
-						continue;
-					}
-					dynamicsWorld_->removeConstraint(constraint);
-					for (auto& prototypeConstraint : a_state.constraints) {
-						if (prototypeConstraint.constraint.get() == constraint) {
-							prototypeConstraint.inBulletWorld = false;
-							break;
-						}
-					}
-				}
-
-				for (auto* mesh : runtime.meshes) {
-					if (!mesh) {
-						continue;
-					}
-					dynamicsWorld_->removeCollisionObject(mesh);
-					for (auto& prototypeMesh : a_state.meshes) {
-						if (prototypeMesh.body.get() == mesh) {
-							prototypeMesh.inBulletWorld = false;
-							break;
-						}
-					}
-				}
-
-				for (auto& prototypeBody : a_state.bodies) {
-					if (prototypeBody.bone &&
-						prototypeBody.inBulletWorld &&
-						allGroupsRemoved(prototypeBody) &&
-						std::ranges::find(runtime.bones, prototypeBody.bone.get()) != runtime.bones.end()) {
-						dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
-						prototypeBody.inBulletWorld = false;
-					}
-				}
+		for (auto& constraint : a_state.constraints) {
+			if (!constraint.constraint || !containsGroup(constraint.buildGroup)) {
+				continue;
 			}
-
-			for (auto& prototypeConstraint : a_state.constraints) {
-				if (prototypeConstraint.constraint && prototypeConstraint.inBulletWorld && containsGroup(prototypeConstraint.buildGroup)) {
-					dynamicsWorld_->removeConstraint(prototypeConstraint.constraint.get());
-					prototypeConstraint.inBulletWorld = false;
-				}
+			if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+				dynamicsWorld_->removeConstraint(constraint.GetConstraint());
 			}
-
-			for (auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.body && prototypeMesh.inBulletWorld && containsGroup(prototypeMesh.buildGroup)) {
-					dynamicsWorld_->removeCollisionObject(prototypeMesh.body.get());
-					prototypeMesh.inBulletWorld = false;
-				}
+			if (auto released = a_state.ReleaseConstraint(constraint.constraint.get())) {
+				constraint.constraint = std::move(released);
 			}
+		}
 
-			for (auto& prototypeBody : a_state.bodies) {
-				if (prototypeBody.bone && prototypeBody.inBulletWorld && allGroupsRemoved(prototypeBody)) {
-					dynamicsWorld_->removeRigidBody(std::addressof(prototypeBody.bone->m_rig));
-					prototypeBody.inBulletWorld = false;
-				}
+		for (auto& mesh : a_state.meshes) {
+			if (!mesh.body || !containsGroup(mesh.buildGroup)) {
+				continue;
+			}
+			if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+				dynamicsWorld_->removeCollisionObject(mesh.body.get());
+			}
+			if (auto released = a_state.ReleaseMesh(mesh.body.get())) {
+				mesh.body = std::move(released);
+			}
+		}
+
+		for (auto& body : a_state.bodies) {
+			if (!body.bone || !allGroupsRemoved(body)) {
+				continue;
+			}
+			if (dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+				dynamicsWorld_->removeRigidBody(std::addressof(body.bone->m_rig));
+			}
+			if (auto released = a_state.ReleaseBone(body.bone.get())) {
+				body.bone = std::move(released);
 			}
 		}
 
 		std::vector<Fo4SkinnedMeshBone::ActiveSkinSlot> activeSkinSlots;
-		for (const auto& prototypeBody : a_state.bodies) {
-			if (allGroupsRemoved(prototypeBody) || !prototypeBody.bone) {
+		for (const auto& boneRecord : a_state.bodies) {
+			if (allGroupsRemoved(boneRecord) || !boneRecord.bone) {
 				continue;
 			}
-			prototypeBody.bone->CollectSkinWorldTransformSlots(activeSkinSlots);
+			boneRecord.bone->CollectSkinWorldTransformSlots(activeSkinSlots);
 		}
 		for (const auto& suspendedSlot : a_state.suspendedSkinSlots) {
 			if (!suspendedSlot.skin || containsGroup(suspendedSlot.buildGroup)) {
@@ -1196,24 +1094,24 @@ namespace Smp
 			});
 		}
 
-		for (auto& prototypeBody : a_state.bodies) {
-			if (!prototypeBody.bone) {
+		for (auto& boneRecord : a_state.bodies) {
+			if (!boneRecord.bone) {
 				continue;
 			}
 
 			for (const auto buildGroup : a_buildGroups) {
-				prototypeBody.bone->RemoveSkinWorldTransformsForBuildGroup(buildGroup, activeSkinSlots);
+				boneRecord.bone->RemoveSkinWorldTransformsForBuildGroup(buildGroup, activeSkinSlots);
 			}
 		}
 		RestoreSuspendedSkinSlotsLocked(a_state, a_buildGroups, activeSkinSlots);
 
-		const auto meshCount = std::erase_if(a_state.meshes, [&containsGroup](const PrototypeMesh& a_mesh) {
+		const auto meshCount = std::erase_if(a_state.meshes, [&containsGroup](const MeshRecord& a_mesh) {
 			return containsGroup(a_mesh.buildGroup);
 		});
-		const auto constraintCount = std::erase_if(a_state.constraints, [&containsGroup](const PrototypeConstraint& a_constraint) {
+		const auto constraintCount = std::erase_if(a_state.constraints, [&containsGroup](const ConstraintRecord& a_constraint) {
 			return containsGroup(a_constraint.buildGroup);
 		});
-		const auto runtimeCount = std::erase_if(a_state.runtimes, [&containsGroup](const PrototypeBuildGroupRuntime& a_runtime) {
+		const auto runtimeCount = std::erase_if(a_state.buildGroups, [&containsGroup](const BuildGroupRecord& a_runtime) {
 			return containsGroup(a_runtime.buildGroup);
 		});
 
@@ -1222,7 +1120,7 @@ namespace Smp
 				body.buildGroups.push_back(body.buildGroup);
 			}
 			if (body.buildGroupDomains.empty() && body.buildGroup != 0) {
-				body.buildGroupDomains.push_back({ body.buildGroup, PrototypeBuildDomain::kArmor });
+				body.buildGroupDomains.push_back({ body.buildGroup, BuildDomain::kArmor });
 			}
 			if (body.buildGroupBipedObjects.empty() && body.buildGroup != 0) {
 				body.buildGroupBipedObjects.push_back({ body.buildGroup, body.bipedObject });
@@ -1244,13 +1142,17 @@ namespace Smp
 				body.bipedObject = biped != body.buildGroupBipedObjects.end() ? biped->second : RE::BIPED_OBJECT::kTotal;
 			}
 		}
-		const auto bodyCount = std::erase_if(a_state.bodies, [](const PrototypeBody& a_body) {
+		const auto bodyCount = std::erase_if(a_state.bodies, [](const BoneRecord& a_body) {
 			return a_body.buildGroups.empty();
 		});
-		const auto localPoseCount = std::erase_if(a_state.attachmentBoneLocalPoses, [&containsGroup](const PrototypeAttachmentBoneLocalPose& a_pose) {
+		if (!a_state.HasPhysics() && dynamicsWorld_ && a_state.m_world == dynamicsWorld_.get()) {
+			dynamicsWorld_->removeSkinnedMeshSystem(std::addressof(a_state));
+			a_state.ClearSystemObjects();
+		}
+		const auto localPoseCount = std::erase_if(a_state.attachmentBoneLocalPoses, [&containsGroup](const AttachmentBoneLocalPose& a_pose) {
 			return containsGroup(a_pose.buildGroup);
 		});
-		std::erase_if(a_state.attachmentRecords, [&containsGroup](PrototypeAttachmentRecord& a_record) {
+		std::erase_if(a_state.attachmentRecords, [&containsGroup](AttachmentPhysicsRecord& a_record) {
 			std::erase_if(a_record.buildGroups, [&containsGroup](const std::uint64_t a_buildGroup) {
 				return containsGroup(a_buildGroup);
 			});
@@ -1261,7 +1163,7 @@ namespace Smp
 			a_record.sourceObject = nullptr;
 			return true;
 		});
-		std::erase_if(a_state.headPartRecords, [&containsGroup](PrototypeHeadPartRecord& a_record) {
+		std::erase_if(a_state.headPartRecords, [&containsGroup](HeadPartPhysicsRecord& a_record) {
 			if (a_record.buildGroup == 0 || !containsGroup(a_record.buildGroup)) {
 				return false;
 			}
@@ -1270,7 +1172,7 @@ namespace Smp
 			a_record.sourceRoot = nullptr;
 			return true;
 		});
-		const auto armorRecordCount = std::erase_if(a_state.armorRecords, [&containsGroup](PrototypeArmorRecord& a_record) {
+		const auto armorRecordCount = std::erase_if(a_state.armorRecords, [&containsGroup](ArmorPhysicsRecord& a_record) {
 			if (a_record.buildGroups.empty()) {
 				return false;
 			}
@@ -1284,12 +1186,11 @@ namespace Smp
 			a_record.sourceObject = nullptr;
 			return true;
 		});
-		if (!a_state.HasRuntime()) {
-			a_state.runtimeSoftSuspended = false;
+		if (!a_state.HasPhysics()) {
 		}
 
 		spdlog::debug(
-			"cleared prototype physics groups={} runtimes={} bodies={} meshes={} constraints={} attachmentBoneLocalPoses={} armorRecords={} for actor={}",
+			"cleared system physics groups={} buildGroups={} bodies={} meshes={} constraints={} attachmentBoneLocalPoses={} armorRecords={} for actor={}",
 			a_buildGroups.size(),
 			runtimeCount,
 			bodyCount,
@@ -1300,46 +1201,30 @@ namespace Smp
 			static_cast<void*>(a_state.actor));
 	}
 
-	void Fo4PhysicsWorld::ClearAllPrototypeStatesLocked()
+	void Fo4PhysicsWorld::ClearAllSystemsLocked()
 	{
-		for (auto& actorState : prototypeActors_) {
-			ClearPrototypeStateLocked(actorState);
+		for (auto& actorState : systems_) {
+			ClearSystemLocked(*actorState);
 		}
-		prototypeActors_.clear();
+		systems_.clear();
 		suspendedActors_.clear();
 	}
 
 	void Fo4PhysicsWorld::ResumeFromLoadingMenuLocked()
 	{
 		std::size_t resetBodies = 0;
-		for (auto& actorState : prototypeActors_) {
-			if (actorState.runtimeSoftSuspended) {
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
+			if (actorState.IsInactive()) {
 				continue;
 			}
 			actorState.lastWritebackFrame = 0;
 			actorState.lastWritebackSource = WritebackSource::kUnknown;
 			actorState.currentWindFactor = 1.0F;
-			if (!actorState.runtimes.empty()) {
-				for (const auto& runtime : actorState.runtimes) {
-					for (auto* bone : runtime.bones) {
-						if (!bone) {
-							continue;
-						}
-						bone->readTransform(0.0F);
-						++resetBodies;
-					}
-					ScalePrototypeConstraintsLocked(actorState, runtime);
-				}
-			} else {
-				for (auto& prototypeBody : actorState.bodies) {
-					if (!prototypeBody.bone) {
-						continue;
-					}
-					prototypeBody.bone->readTransform(0.0F);
-					++resetBodies;
-				}
-				ScalePrototypeConstraintsLocked(actorState);
-			}
+			resetBodies += std::ranges::count_if(actorState.bodies, [](const BoneRecord& a_body) {
+				return static_cast<bool>(a_body.bone);
+			});
+			actorState.readTransform(0.0F);
 		}
 		if (dynamicsWorld_) {
 			dynamicsWorld_->clearForces();
@@ -1347,270 +1232,183 @@ namespace Smp
 		loadingPhysicsSuspended_ = false;
 		loadingMenuDepth_ = 0;
 		ResetStepClockLocked();
-		spdlog::debug("loading menu resume reset {} prototype physics bodies to current node poses", resetBodies);
+		spdlog::debug("loading menu resume reset {} system physics bodies to current node poses", resetBodies);
 	}
 
-	Fo4PhysicsWorld::PrototypeReadPreparation Fo4PhysicsWorld::PreparePrototypeActorForReadLocked(PrototypeActorState& a_state, float a_timeStep)
-	{
-		PrototypeReadPreparation preparation{
-			.timeStep = a_timeStep,
-		};
-		auto* actorRoot = a_state.actor ? a_state.actor->Get3D(a_state.firstPerson) : nullptr;
-		if (!actorRoot && a_state.actor && !a_state.firstPerson) {
-			actorRoot = a_state.actor->Get3D();
-		}
-		auto* skeletonRoot = actorRoot ? actorRoot->IsNode() : nullptr;
-		if (!skeletonRoot) {
-			return preparation;
-		}
-
-		auto* topRoot = static_cast<RE::NiAVObject*>(skeletonRoot);
-		while (topRoot && topRoot->parent) {
-			topRoot = topRoot->parent;
-		}
-
-		if (a_state.lastReadRoot && a_state.lastReadRoot.get() != topRoot) {
-			a_timeStep = 0.0F;
-			preparation.timeStep = a_timeStep;
-			a_state.lastRootRotationInitialized = false;
-		}
-		if (!a_state.readInitialized) {
-			a_timeStep = 0.0F;
-			preparation.timeStep = a_timeStep;
-			a_state.readInitialized = true;
-			a_state.lastRootRotationInitialized = false;
-		}
-
-		if (a_timeStep <= 0.0F) {
-			UpdateTransformUpDown(skeletonRoot, true);
-			a_state.lastRootRotation = Fo4Transform::ToBulletTransform(skeletonRoot->world).getRotation();
-			if (a_state.lastRootRotation.length2() <= FLT_EPSILON) {
-				a_state.lastRootRotation = btQuaternion::getIdentity();
-			} else {
-				a_state.lastRootRotation.normalize();
-			}
-			a_state.lastRootRotationInitialized = true;
-			a_state.lastReadRoot = topRoot;
-			preparation.timeStep = 0.0F;
-			return preparation;
-		}
-
-		auto newRootRotation = Fo4Transform::ToBulletTransform(skeletonRoot->world).getRotation();
-		if (newRootRotation.length2() <= FLT_EPSILON) {
-			newRootRotation = btQuaternion::getIdentity();
-		} else {
-			newRootRotation.normalize();
-		}
-		if (!a_state.lastRootRotationInitialized || a_state.lastRootRotation.length2() <= FLT_EPSILON) {
-			a_state.lastRootRotation = newRootRotation;
-			a_state.lastRootRotationInitialized = true;
-		} else if (a_state.firstPerson) {
-			a_state.lastRootRotation = newRootRotation;
-		} else {
-			btVector3 rotationAxis;
-			btScalar rotationAngle = 0.0F;
-			btTransformUtil::calculateDiffAxisAngleQuaternion(a_state.lastRootRotation, newRootRotation, rotationAxis, rotationAngle);
-			if (clampRotations_) {
-				const auto limit = rotationSpeedLimit_ * a_timeStep;
-				if (rotationAngle < -limit || rotationAngle > limit) {
-					rotationAngle = btClamped(rotationAngle, -limit, limit);
-					a_state.lastRootRotation = btQuaternion(rotationAxis, rotationAngle) * a_state.lastRootRotation;
-					a_state.lastRootRotation.normalize();
-					preparation.restoreRoot = skeletonRoot;
-					preparation.restoreWorld = skeletonRoot->world;
-					skeletonRoot->world.rotate = Fo4Transform::ToNiTransform(btTransform(a_state.lastRootRotation), skeletonRoot->world.scale).rotate;
-					for (auto& child : skeletonRoot->children) {
-						if (child) {
-							UpdateTransformUpDown(child.get(), true);
-						}
-					}
-				}
-			} else if (unclampedResets_) {
-				const auto limit = unclampedResetAngle_ * a_timeStep;
-				if (rotationAngle < -limit || rotationAngle > limit) {
-					UpdateTransformUpDown(skeletonRoot, true);
-					a_state.lastRootRotation = Fo4Transform::ToBulletTransform(skeletonRoot->world).getRotation();
-					if (a_state.lastRootRotation.length2() <= FLT_EPSILON) {
-						a_state.lastRootRotation = btQuaternion::getIdentity();
-					} else {
-						a_state.lastRootRotation.normalize();
-					}
-					a_state.lastReadRoot = topRoot;
-					preparation.timeStep = 0.0F;
-					return preparation;
-				}
-			}
-		}
-
-		a_state.lastReadRoot = topRoot;
-		preparation.timeStep = a_timeStep;
-		return preparation;
-	}
-
-	bool Fo4PhysicsWorld::PrototypeBuildGroupHasMeshLocked(const PrototypeActorState& a_state, const std::uint64_t a_buildGroup) const
+	bool Fo4PhysicsWorld::BuildGroupHasMeshLocked(const Fo4SkinnedMeshSystem& a_state, const std::uint64_t a_buildGroup) const
 	{
 		if (a_buildGroup == 0) {
 			return false;
 		}
 
-		return std::ranges::any_of(a_state.meshes, [a_buildGroup](const PrototypeMesh& a_mesh) {
+		return std::ranges::any_of(a_state.meshes, [a_buildGroup](const MeshRecord& a_mesh) {
 			return a_mesh.buildGroup == a_buildGroup && a_mesh.body;
 		});
 	}
 
-	bool Fo4PhysicsWorld::PrototypeBuildGroupHasBodyLocked(const PrototypeActorState& a_state, const std::uint64_t a_buildGroup) const
+	bool Fo4PhysicsWorld::BuildGroupHasBodyLocked(const Fo4SkinnedMeshSystem& a_state, const std::uint64_t a_buildGroup) const
 	{
 		if (a_buildGroup == 0) {
 			return false;
 		}
 
-		return std::ranges::any_of(a_state.bodies, [a_buildGroup](const PrototypeBody& a_body) {
-			return PrototypeBodyHasBuildGroup(a_body, a_buildGroup) && a_body.bone;
+		return std::ranges::any_of(a_state.bodies, [a_buildGroup](const BoneRecord& a_body) {
+			return BodyHasBuildGroup(a_body, a_buildGroup) && a_body.bone;
 		});
 	}
 
-	bool Fo4PhysicsWorld::PrototypeBuildGroupIsRecordableLocked(
-		const PrototypeActorState& a_state,
+	bool Fo4PhysicsWorld::BuildGroupIsRecordableLocked(
+		const Fo4SkinnedMeshSystem& a_state,
 		const std::uint64_t a_buildGroup,
-		const PrototypeBuildDomain a_domain,
+		const BuildDomain a_domain,
 		const RE::BIPED_OBJECT a_bipedObject) const
 	{
 		(void)a_domain;
 		(void)a_bipedObject;
 
-		if (!PrototypeBuildGroupHasBodyLocked(a_state, a_buildGroup)) {
+		if (!BuildGroupHasBodyLocked(a_state, a_buildGroup)) {
 			return false;
 		}
 
 		return true;
 	}
 
-	void Fo4PhysicsWorld::UpdatePrototypeBuildGroupMeshesLocked(PrototypeActorState& a_state, const std::uint64_t a_buildGroup)
+	void Fo4PhysicsWorld::UpdateBuildGroupMeshesLocked(Fo4SkinnedMeshSystem& a_state, const std::uint64_t a_buildGroup)
 	{
 		if (a_buildGroup == 0) {
 			return;
 		}
 
-		for (auto& prototypeMesh : a_state.meshes) {
-			if (!prototypeMesh.body || prototypeMesh.buildGroup != a_buildGroup) {
+		for (auto& meshRecord : a_state.meshes) {
+			if (!meshRecord.body || meshRecord.buildGroup != a_buildGroup) {
 				continue;
 			}
 
-			prototypeMesh.body->internalUpdate();
+			meshRecord.body->internalUpdate();
 		}
 	}
 
-	void Fo4PhysicsWorld::CommitPrototypeBuildGroupToBulletLocked(PrototypeActorState& a_state, const std::uint64_t a_buildGroup)
+	void Fo4PhysicsWorld::ActivateBuildGroupLocked(Fo4SkinnedMeshSystem& a_state, const std::uint64_t a_buildGroup)
 	{
 		if (!dynamicsWorld_ || a_buildGroup == 0) {
 			return;
 		}
 
+		const auto activateSystem = a_state.m_world == nullptr;
 		std::uint32_t committedMeshes = 0;
-		for (auto& prototypeMesh : a_state.meshes) {
-			if (prototypeMesh.inBulletWorld || !prototypeMesh.body || prototypeMesh.buildGroup != a_buildGroup) {
+		for (auto& meshRecord : a_state.meshes) {
+			if (!meshRecord.body || a_state.ContainsMesh(meshRecord.body.get()) || meshRecord.buildGroup != a_buildGroup) {
 				continue;
 			}
 
-			dynamicsWorld_->addCollisionObject(prototypeMesh.body.get(), 1, 1);
-			prototypeMesh.inBulletWorld = true;
+			if (!a_state.AddMesh(meshRecord.body)) {
+				continue;
+			}
+			if (!activateSystem) {
+				dynamicsWorld_->addCollisionObject(meshRecord.body.get(), 1, 1);
+			}
 			++committedMeshes;
 		}
 
 		std::uint32_t committedBodies = 0;
-		for (auto& prototypeBody : a_state.bodies) {
-			if (prototypeBody.inBulletWorld || !prototypeBody.bone || !PrototypeBodyHasBuildGroup(prototypeBody, a_buildGroup)) {
+		for (auto& boneRecord : a_state.bodies) {
+			if (!boneRecord.bone || a_state.ContainsBone(boneRecord.bone.get()) || !BodyHasBuildGroup(boneRecord, a_buildGroup)) {
 				continue;
 			}
 
-			// hdtSMP bones are solver/constraint bodies; mesh collisions are handled by the custom dispatcher.
-			dynamicsWorld_->addRigidBody(std::addressof(prototypeBody.bone->m_rig), 0, 0);
-			prototypeBody.inBulletWorld = true;
+			if (!a_state.AddBone(boneRecord.bone)) {
+				continue;
+			}
+			if (!activateSystem) {
+				// hdtSMP bones are solver/constraint bodies; mesh collisions are handled by the custom dispatcher.
+				dynamicsWorld_->addRigidBody(std::addressof(boneRecord.bone->m_rig), 0, 0);
+			}
 			++committedBodies;
 		}
 
 		std::uint32_t committedConstraints = 0;
-		for (auto& prototypeConstraint : a_state.constraints) {
-			if (prototypeConstraint.inBulletWorld || !prototypeConstraint.constraint || prototypeConstraint.buildGroup != a_buildGroup) {
+		for (auto& constraintRecord : a_state.constraints) {
+			if (!constraintRecord.constraint || a_state.ContainsConstraint(constraintRecord.constraint.get()) || constraintRecord.buildGroup != a_buildGroup) {
 				continue;
 			}
 
-			dynamicsWorld_->addConstraint(prototypeConstraint.constraint.get(), true);
-			prototypeConstraint.inBulletWorld = true;
+			if (!a_state.AddConstraint(constraintRecord.constraint)) {
+				continue;
+			}
+			if (!activateSystem) {
+				dynamicsWorld_->addConstraint(constraintRecord.GetConstraint(), true);
+			}
 			++committedConstraints;
 		}
 
 		if (committedBodies > 0 || committedMeshes > 0 || committedConstraints > 0) {
-			auto runtime = std::ranges::find_if(a_state.runtimes, [a_buildGroup](const PrototypeBuildGroupRuntime& a_runtime) {
+			if (activateSystem) {
+				dynamicsWorld_->addSkinnedMeshSystem(std::addressof(a_state));
+			}
+			auto runtime = std::ranges::find_if(a_state.buildGroups, [a_buildGroup](const BuildGroupRecord& a_runtime) {
 				return a_runtime.buildGroup == a_buildGroup;
 			});
-			if (runtime == a_state.runtimes.end()) {
-				PrototypeBuildGroupRuntime newRuntime;
+			if (runtime == a_state.buildGroups.end()) {
+				BuildGroupRecord newRuntime;
 				newRuntime.buildGroup = a_buildGroup;
 				newRuntime.pendingResetPhysicsRead = true;
 				newRuntime.pendingResetPhysicsWriteback = true;
-				if (const auto mesh = std::ranges::find_if(a_state.meshes, [a_buildGroup](const PrototypeMesh& a_mesh) {
+				if (const auto mesh = std::ranges::find_if(a_state.meshes, [a_buildGroup](const MeshRecord& a_mesh) {
 						return a_mesh.buildGroup == a_buildGroup;
 					});
 					mesh != a_state.meshes.end()) {
 					newRuntime.domain = mesh->domain;
 					newRuntime.bipedObject = mesh->bipedObject;
-				} else if (const auto constraint = std::ranges::find_if(a_state.constraints, [a_buildGroup](const PrototypeConstraint& a_constraint) {
+				} else if (const auto constraint = std::ranges::find_if(a_state.constraints, [a_buildGroup](const ConstraintRecord& a_constraint) {
 						return a_constraint.buildGroup == a_buildGroup;
 					});
 					constraint != a_state.constraints.end()) {
 					newRuntime.domain = constraint->domain;
 				}
-				a_state.runtimes.push_back(newRuntime);
-				runtime = std::prev(a_state.runtimes.end());
+				a_state.buildGroups.push_back(newRuntime);
+				runtime = std::prev(a_state.buildGroups.end());
 			}
-			runtime->meshes.clear();
-			runtime->bones.clear();
-			runtime->constraints.clear();
-			for (auto& prototypeMesh : a_state.meshes) {
-				if (prototypeMesh.buildGroup != a_buildGroup || !prototypeMesh.body) {
+			for (auto& meshRecord : a_state.meshes) {
+				if (meshRecord.buildGroup != a_buildGroup || !meshRecord.body) {
 					continue;
 				}
-				runtime->meshes.push_back(prototypeMesh.body.get());
-				runtime->domain = prototypeMesh.domain;
-				runtime->bipedObject = prototypeMesh.bipedObject;
+				runtime->domain = meshRecord.domain;
+				runtime->bipedObject = meshRecord.bipedObject;
 			}
-			for (auto& prototypeBody : a_state.bodies) {
-				if (!PrototypeBodyHasBuildGroup(prototypeBody, a_buildGroup) || !prototypeBody.bone) {
+			for (auto& boneRecord : a_state.bodies) {
+				if (!BodyHasBuildGroup(boneRecord, a_buildGroup) || !boneRecord.bone) {
 					continue;
 				}
-				runtime->bones.push_back(prototypeBody.bone.get());
 				if (runtime->bipedObject == RE::BIPED_OBJECT::kTotal) {
-					const auto biped = std::ranges::find_if(prototypeBody.buildGroupBipedObjects, [a_buildGroup](const auto& a_entry) {
+					const auto biped = std::ranges::find_if(boneRecord.buildGroupBipedObjects, [a_buildGroup](const auto& a_entry) {
 						return a_entry.first == a_buildGroup;
 					});
-					runtime->bipedObject = biped != prototypeBody.buildGroupBipedObjects.end() ? biped->second : prototypeBody.bipedObject;
+					runtime->bipedObject = biped != boneRecord.buildGroupBipedObjects.end() ? biped->second : boneRecord.bipedObject;
 				}
-				const auto domain = std::ranges::find_if(prototypeBody.buildGroupDomains, [a_buildGroup](const auto& a_entry) {
+				const auto domain = std::ranges::find_if(boneRecord.buildGroupDomains, [a_buildGroup](const auto& a_entry) {
 					return a_entry.first == a_buildGroup;
 				});
-				if (domain != prototypeBody.buildGroupDomains.end()) {
+				if (domain != boneRecord.buildGroupDomains.end()) {
 					runtime->domain = domain->second;
 				}
 			}
-			for (auto& prototypeConstraint : a_state.constraints) {
-				if (prototypeConstraint.buildGroup != a_buildGroup || !prototypeConstraint.constraint) {
+			for (auto& constraintRecord : a_state.constraints) {
+				if (constraintRecord.buildGroup != a_buildGroup || !constraintRecord.constraint) {
 					continue;
 				}
-				runtime->constraints.push_back(prototypeConstraint.constraint.get());
-				runtime->domain = prototypeConstraint.domain;
+				runtime->domain = constraintRecord.domain;
 			}
-			ResetPrototypeBuildGroupToCurrentPoseLocked(a_state, a_buildGroup);
-			UpdatePrototypeBuildGroupMeshesLocked(a_state, a_buildGroup);
+			ResetBuildGroupToCurrentPoseLocked(a_state, a_buildGroup);
+			UpdateBuildGroupMeshesLocked(a_state, a_buildGroup);
 			spdlog::debug(
-				"committed prototype build group to Bullet actor={} buildGroup={} domain={} bipedObject={} bodies={} meshes={} constraints={}",
+				"committed system build group to Bullet actor={} buildGroup={} domain={} bipedObject={} bodies={} meshes={} constraints={}",
 				static_cast<void*>(a_state.actor),
 				a_buildGroup,
-				PrototypeDomainName(runtime->domain),
+				BuildDomainName(runtime->domain),
 				std::to_underlying(runtime->bipedObject),
-				runtime->bones.size(),
-				runtime->meshes.size(),
-				runtime->constraints.size());
+				committedBodies,
+				committedMeshes,
+				committedConstraints);
 		}
 	}
 }

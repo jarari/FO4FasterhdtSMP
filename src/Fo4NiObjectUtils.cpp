@@ -6,6 +6,7 @@
 #include "RE/N/NiAVObject.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiStringExtraData.h"
+#include "RE/N/NiUpdateData.h"
 
 namespace Smp::NiObject
 {
@@ -99,6 +100,26 @@ namespace Smp::NiObject
 			}
 		}
 		return false;
+	}
+
+	void UpdateWorldData(RE::NiAVObject* a_object, const bool a_dirty)
+	{
+		if (!a_object) {
+			return;
+		}
+
+		RE::NiUpdateData updateData;
+		updateData.flags = a_dirty ? 1U : 0U;
+		a_object->UpdateWorldData(std::addressof(updateData));
+
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return;
+		}
+
+		for (auto& child : node->children) {
+			UpdateWorldData(child.get(), a_dirty);
+		}
 	}
 
 	RE::NiTransform BuildLocalToAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor)

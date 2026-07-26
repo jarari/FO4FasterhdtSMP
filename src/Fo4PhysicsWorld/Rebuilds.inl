@@ -3,37 +3,38 @@
 
 namespace Smp
 {
-	Fo4PhysicsWorld::PrototypeActorState* Fo4PhysicsWorld::FindPrototypeStateLocked(RE::Actor* a_actor, const bool a_firstPerson)
+	Fo4SkinnedMeshSystem* Fo4PhysicsWorld::FindSystemLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
-		const auto found = std::ranges::find_if(prototypeActors_, [a_actor, a_firstPerson](const PrototypeActorState& a_state) {
-			return a_state.actor == a_actor && a_state.firstPerson == a_firstPerson;
+		const auto found = std::ranges::find_if(systems_, [a_actor, a_firstPerson](const auto& a_state) {
+			return a_state->actor == a_actor && a_state->firstPerson == a_firstPerson;
 		});
-		return found == prototypeActors_.end() ? nullptr : std::addressof(*found);
+		return found == systems_.end() ? nullptr : found->get();
 	}
 
-	Fo4PhysicsWorld::PrototypeActorState& Fo4PhysicsWorld::GetOrCreatePrototypeStateLocked(RE::Actor* a_actor, const bool a_firstPerson)
+	Fo4SkinnedMeshSystem& Fo4PhysicsWorld::GetOrCreateSystemLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
-		if (auto* state = FindPrototypeStateLocked(a_actor, a_firstPerson)) {
+		if (auto* state = FindSystemLocked(a_actor, a_firstPerson)) {
 			return *state;
 		}
 
-		auto& state = prototypeActors_.emplace_back();
-		state.actor = a_actor;
-		state.actorHandle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
-		state.firstPerson = a_firstPerson;
-		return state;
+		auto state = RE::make_smart<Fo4SkinnedMeshSystem>();
+		state->actor = a_actor;
+		state->actorHandle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		state->firstPerson = a_firstPerson;
+		systems_.push_back(state);
+		return *state;
 	}
 
-	bool Fo4PhysicsWorld::IsPrototypeStateValidLocked(PrototypeActorState& a_state)
+	bool Fo4PhysicsWorld::IsSystemValidLocked(Fo4SkinnedMeshSystem& a_state)
 	{
 		if (!a_state.actor || !a_state.actorHandle) {
-			spdlog::debug("dropping prototype physics state with missing actor handle actor={}", static_cast<void*>(a_state.actor));
+			spdlog::debug("dropping system physics state with missing actor handle actor={}", static_cast<void*>(a_state.actor));
 			return false;
 		}
 
 		auto resolvedActor = a_state.actorHandle.get();
 		if (!resolvedActor || resolvedActor.get() != a_state.actor) {
-			spdlog::debug("dropping prototype physics state with stale actor handle actor={}", static_cast<void*>(a_state.actor));
+			spdlog::debug("dropping system physics state with stale actor handle actor={}", static_cast<void*>(a_state.actor));
 			return false;
 		}
 
@@ -42,20 +43,20 @@ namespace Smp
 			root = resolvedActor->Get3D();
 		}
 		if (!root) {
-			if (!a_state.armorRecords.empty() || a_state.HasRuntime() || a_state.runtimeSuspended) {
-				if (!a_state.runtimeSuspended || a_state.HasRuntime()) {
+			if (!a_state.armorRecords.empty() || a_state.HasPhysics() || a_state.suspended) {
+				if (!a_state.suspended || a_state.HasPhysics()) {
 					spdlog::debug(
-						"suspending prototype physics state for actor={} firstPerson={} with no current 3D; preserved armorRecords={} hadRuntime={}",
+						"suspending system physics state for actor={} firstPerson={} with no current 3D; preserved armorRecords={} hadRuntime={}",
 						static_cast<void*>(a_state.actor),
 						a_state.firstPerson,
 						a_state.armorRecords.size(),
-						a_state.HasRuntime());
-					SuspendPrototypeRuntimeLocked(a_state);
+						a_state.HasPhysics());
+					SuspendSystemLocked(a_state);
 				}
 				return true;
 			}
 			spdlog::debug(
-				"dropping prototype physics state for actor={} firstPerson={} with no current 3D",
+				"dropping system physics state for actor={} firstPerson={} with no current 3D",
 				static_cast<void*>(a_state.actor),
 				a_state.firstPerson);
 			return false;
@@ -64,16 +65,27 @@ namespace Smp
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		if (a_state.actor != player) {
 			if (!enableNpcPhysics_) {
-				spdlog::debug("dropping prototype physics state for actor={} because NPC physics is disabled", static_cast<void*>(a_state.actor));
+				spdlog::debug("dropping system physics state for actor={} because NPC physics is disabled", static_cast<void*>(a_state.actor));
 				return false;
 			}
 
-			if (!IsActorInReferenceCullView(a_state.actor, root, a_state.firstPerson)) {
-				if (a_state.HasRuntime() && !a_state.runtimeSoftSuspended) {
+			if (!IsActorWithinDistanceLocked(a_state.actor)) {
+				if (a_state.IsActive()) {
 					spdlog::debug(
-						"soft-suspending prototype physics state for actor={} because reference view culler marks it inactive",
+						"deactivating system physics state for actor={} beyond maxActorDistance={}",
+						static_cast<void*>(a_state.actor),
+						maxActorDistance_);
+					DeactivateSystemLocked(a_state);
+				}
+				return true;
+			}
+
+			if (!IsActorInReferenceCullView(a_state.actor, root, a_state.firstPerson)) {
+				if (a_state.IsActive()) {
+					spdlog::debug(
+						"deactivating system physics state for actor={} because reference view culler marks it inactive",
 						static_cast<void*>(a_state.actor));
-					SoftSuspendPrototypeRuntimeLocked(a_state);
+					DeactivateSystemLocked(a_state);
 				}
 				return true;
 			}
@@ -82,25 +94,36 @@ namespace Smp
 		return true;
 	}
 
-	void Fo4PhysicsWorld::PruneInvalidPrototypeStatesLocked()
+	bool Fo4PhysicsWorld::IsActorWithinDistanceLocked(RE::Actor* a_actor) const
 	{
-		for (auto& actorState : prototypeActors_) {
-			if (!IsPrototypeStateValidLocked(actorState)) {
-				ClearPrototypeStateLocked(actorState);
-				actorState.actor = nullptr;
-				actorState.actorHandle.reset();
+		const auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!a_actor || !player || a_actor == player || maxActorDistance_ <= 0.0F) {
+			return true;
+		}
+
+		const auto maxDistanceSquared = maxActorDistance_ * maxActorDistance_;
+		return DistanceSquared(a_actor->GetPosition(), player->GetPosition()) <= maxDistanceSquared;
+	}
+
+	void Fo4PhysicsWorld::PruneInvalidSystemsLocked()
+	{
+		for (auto& actorState : systems_) {
+			if (!IsSystemValidLocked(*actorState)) {
+				ClearSystemLocked(*actorState);
+				actorState->actor = nullptr;
+				actorState->actorHandle.reset();
 			}
 		}
 
-		std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return !a_state.actor && !a_state.HasRuntime();
+		std::erase_if(systems_, [](const auto& a_state) {
+			return !a_state->actor && !a_state->HasPhysics();
 		});
 	}
 
 	void Fo4PhysicsWorld::EnforceActorBudgetLocked()
 	{
-		auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-			return a_state.HasActiveRuntime();
+		auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
+			return a_state->IsActive();
 		}));
 		if (activeActors <= currentMaxActiveActors_) {
 			return;
@@ -108,17 +131,17 @@ namespace Smp
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		while (activeActors > currentMaxActiveActors_) {
-			auto victim = prototypeActors_.end();
+			auto victim = systems_.end();
 			auto victimDistanceSquared = -1.0F;
-			for (auto it = prototypeActors_.begin(); it != prototypeActors_.end(); ++it) {
-				if (!it->HasActiveRuntime()) {
+			for (auto it = systems_.begin(); it != systems_.end(); ++it) {
+				if (!(*it)->IsActive()) {
 					continue;
 				}
-				auto resolvedActor = it->actorHandle.get();
-				if (!resolvedActor || resolvedActor.get() != it->actor) {
+				auto resolvedActor = (*it)->actorHandle.get();
+				if (!resolvedActor || resolvedActor.get() != (*it)->actor) {
 					continue;
 				}
-				if (player && it->actor == player) {
+				if (player && (*it)->actor == player) {
 					continue;
 				}
 
@@ -127,21 +150,21 @@ namespace Smp
 					distanceSquared = DistanceSquared(resolvedActor->GetPosition(), player->GetPosition());
 				}
 
-				if (victim == prototypeActors_.end() || distanceSquared > victimDistanceSquared) {
+				if (victim == systems_.end() || distanceSquared > victimDistanceSquared) {
 					victim = it;
 					victimDistanceSquared = distanceSquared;
 				}
 			}
 
-			if (victim == prototypeActors_.end()) {
+			if (victim == systems_.end()) {
 				return;
 			}
 
 			spdlog::debug(
-				"soft-suspending prototype physics state for actor={} because active actor budget shrank to {}",
-				static_cast<void*>(victim->actor),
+				"deactivating system physics state for actor={} because active actor budget shrank to {}",
+				static_cast<void*>((*victim)->actor),
 				currentMaxActiveActors_);
-			SoftSuspendPrototypeRuntimeLocked(*victim);
+			DeactivateSystemLocked(**victim);
 			--activeActors;
 		}
 	}
@@ -151,9 +174,9 @@ namespace Smp
 		return IsArmorAttachCandidate(a_event.type) && !a_event.physicsXmlPath.empty();
 	}
 
-	void Fo4PhysicsWorld::SoftSuspendBuiltRuntimeIfOutOfRangeLocked(PrototypeActorState& a_state, const LifecycleEvent& a_event)
+	void Fo4PhysicsWorld::DeactivateBuiltSystemIfInactiveLocked(Fo4SkinnedMeshSystem& a_state, const LifecycleEvent& a_event)
 	{
-		if (!a_state.HasActiveRuntime()) {
+		if (!a_state.IsActive()) {
 			return;
 		}
 
@@ -164,12 +187,15 @@ namespace Smp
 
 		bool shouldSuspend = false;
 		const char* reason = nullptr;
-		if (!IsActorInReferenceCullView(a_state.actor, a_event.object, a_event.firstPerson)) {
+		if (!IsActorWithinDistanceLocked(a_state.actor)) {
+			shouldSuspend = true;
+			reason = "distance";
+		} else if (!IsActorInReferenceCullView(a_state.actor, a_event.object, a_event.firstPerson)) {
 			shouldSuspend = true;
 			reason = "view";
 		}
-		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_candidate) {
-			return a_candidate.HasActiveRuntime();
+		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_candidate) {
+			return a_candidate->IsActive();
 		}));
 		if (!shouldSuspend && activeActors > currentMaxActiveActors_) {
 			shouldSuspend = true;
@@ -181,27 +207,27 @@ namespace Smp
 		}
 
 		std::vector<std::uint64_t> buildGroups;
-		for (const auto& runtime : a_state.runtimes) {
+		for (const auto& runtime : a_state.buildGroups) {
 			if (runtime.buildGroup != 0 && std::ranges::find(buildGroups, runtime.buildGroup) == buildGroups.end()) {
 				buildGroups.push_back(runtime.buildGroup);
 			}
 		}
 
 		spdlog::debug(
-			"soft-suspending freshly built armor prototype runtime actor={} reason={} activeActors={} actorCap={} event={} buildGroups={}",
+			"deactivating freshly built armor system actor={} reason={} activeActors={} actorCap={} event={} buildGroups={}",
 			static_cast<void*>(a_state.actor),
 			reason ? reason : "unknown",
 			activeActors,
 			currentMaxActiveActors_,
 			ToString(a_event.type),
 			buildGroups.size());
-		SoftSuspendPrototypeRuntimeLocked(a_state);
+		DeactivateSystemLocked(a_state);
 	}
 
 	void Fo4PhysicsWorld::SuspendActorCandidateLocked(
 		RE::Actor* a_actor,
 		const bool a_firstPerson,
-		std::vector<PrototypeArmorRecord> a_armorRecords)
+		std::vector<ArmorPhysicsRecord> a_armorRecords)
 	{
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		if (!a_actor || a_actor == player || !enableNpcPhysics_) {
@@ -209,7 +235,7 @@ namespace Smp
 		}
 		if (a_armorRecords.empty()) {
 			spdlog::trace(
-				"skipping empty suspended prototype physics candidate actor={} firstPerson={}",
+				"skipping empty suspended system physics candidate actor={} firstPerson={}",
 				static_cast<void*>(a_actor),
 				a_firstPerson);
 			return;
@@ -237,7 +263,7 @@ namespace Smp
 			.armorRecords = std::move(a_armorRecords),
 		});
 		spdlog::debug(
-			"suspended prototype physics candidate actor={} firstPerson={} armorRecords={} until view/budget allows rebuild",
+			"suspended system physics candidate actor={} firstPerson={} armorRecords={} until view/budget allows rebuild",
 			static_cast<void*>(a_actor),
 			a_firstPerson,
 			suspendedActors_.back().armorRecords.size());
@@ -255,8 +281,8 @@ namespace Smp
 		}
 
 		for (auto it = suspendedActors_.begin(); it != suspendedActors_.end();) {
-			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return a_state.HasActiveRuntime();
+			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
+				return a_state->IsActive();
 			}));
 			if (activeActors >= currentMaxActiveActors_) {
 				return;
@@ -269,7 +295,7 @@ namespace Smp
 			}
 
 			auto* actor = resolvedActor.get();
-			auto* existingState = actor ? FindPrototypeStateLocked(actor, it->firstPerson) : nullptr;
+			auto* existingState = actor ? FindSystemLocked(actor, it->firstPerson) : nullptr;
 			if (!actor) {
 				it = suspendedActors_.erase(it);
 				continue;
@@ -279,12 +305,12 @@ namespace Smp
 				continue;
 			}
 			if (existingState) {
-				if ((existingState->runtimeSuspended || existingState->runtimeSoftSuspended) && !it->armorRecords.empty()) {
+				if ((existingState->suspended || existingState->IsInactive()) && !it->armorRecords.empty()) {
 					for (auto& record : it->armorRecords) {
-						MergePrototypeArmorRecord(existingState->armorRecords, std::move(record));
+						MergeArmorPhysicsRecord(existingState->armorRecords, std::move(record));
 					}
 					spdlog::debug(
-						"merged suspended armor records into soft-suspended prototype state actor={} firstPerson={} armorRecords={}",
+						"merged suspended armor records into inactive system state actor={} firstPerson={} armorRecords={}",
 						static_cast<void*>(actor),
 						it->firstPerson,
 						existingState->armorRecords.size());
@@ -298,6 +324,10 @@ namespace Smp
 				root = actor->Get3D();
 			}
 			if (!root) {
+				++it;
+				continue;
+			}
+			if (!IsActorWithinDistanceLocked(actor)) {
 				++it;
 				continue;
 			}
@@ -323,32 +353,33 @@ namespace Smp
 			}
 
 			spdlog::debug(
-				"reactivated suspended prototype physics candidate actor={} firstPerson={} from preserved armor records",
+				"reactivated suspended system physics candidate actor={} firstPerson={} from preserved armor records",
 				static_cast<void*>(actor),
 				it->firstPerson);
 			it = suspendedActors_.erase(it);
 		}
 	}
 
-	void Fo4PhysicsWorld::TryReactivateSuspendedPrototypeStatesLocked()
+	void Fo4PhysicsWorld::TryReactivateInactiveSystemsLocked()
 	{
 		if (!enableNpcPhysics_) {
 			return;
 		}
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
-		for (auto& actorState : prototypeActors_) {
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
 			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actorState.actor)) {
 				continue;
 			}
-			const auto needsSoftResume = actorState.runtimeSoftSuspended;
-			const auto needsRebuild = actorState.runtimeSuspended && !actorState.armorRecords.empty();
-			if ((!needsSoftResume && !needsRebuild) || actorState.actor == player) {
+			const auto needsReactivation = actorState.IsInactive();
+			const auto needsRebuild = actorState.suspended && !actorState.armorRecords.empty();
+			if ((!needsReactivation && !needsRebuild) || actorState.actor == player) {
 				continue;
 			}
 
-			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return a_state.HasActiveRuntime();
+			const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
+				return a_state->IsActive();
 			}));
 			if (activeActors >= currentMaxActiveActors_) {
 				return;
@@ -367,18 +398,21 @@ namespace Smp
 			if (!root) {
 				continue;
 			}
+			if (!IsActorWithinDistanceLocked(actor)) {
+				continue;
+			}
 			if (!IsActorInReferenceCullView(actor, root, actorState.firstPerson)) {
 				continue;
 			}
 
-			if (needsSoftResume && ResumeSoftSuspendedPrototypeRuntimeLocked(actorState)) {
+			if (needsReactivation && ReactivateSystemLocked(actorState)) {
 				continue;
 			}
-			if (needsSoftResume && !actorState.armorRecords.empty()) {
-				actorState.runtimeSuspended = true;
+			if (needsReactivation && !actorState.armorRecords.empty()) {
+				actorState.suspended = true;
 			}
 
-			if (!actorState.runtimeSuspended || actorState.armorRecords.empty()) {
+			if (!actorState.suspended || actorState.armorRecords.empty()) {
 				continue;
 			}
 
@@ -389,21 +423,21 @@ namespace Smp
 				.armorRecords = std::move(armorRecords),
 			};
 			if (!RebuildPendingArmorRecordsLocked(actor, pending)) {
-				if (actorState.HasRuntime()) {
-					actorState.runtimeSuspended = false;
+				if (actorState.HasPhysics()) {
+					actorState.suspended = false;
 				}
 				continue;
 			}
 
-			actorState.runtimeSuspended = false;
+			actorState.suspended = false;
 			spdlog::debug(
-				"reactivated soft-suspended prototype physics state actor={} firstPerson={} from preserved armor records",
+				"reactivated inactive system physics state actor={} firstPerson={} from preserved armor records",
 				static_cast<void*>(actor),
 				actorState.firstPerson);
 		}
 	}
 
-	void Fo4PhysicsWorld::MergePrototypeArmorRecord(std::vector<PrototypeArmorRecord>& a_records, PrototypeArmorRecord a_record)
+	void Fo4PhysicsWorld::MergeArmorPhysicsRecord(std::vector<ArmorPhysicsRecord>& a_records, ArmorPhysicsRecord a_record)
 	{
 		if (a_record.bipedObject == RE::BIPED_OBJECT::kTotal || a_record.physicsXmlPath.empty()) {
 			return;
@@ -415,19 +449,19 @@ namespace Smp
 				}
 			}
 		};
-		auto runtimeObjectsCompatible = [](const PrototypeArmorRecord& a_lhs, const PrototypeArmorRecord& a_rhs) {
+		auto runtimeObjectsCompatible = [](const ArmorPhysicsRecord& a_lhs, const ArmorPhysicsRecord& a_rhs) {
 			return (!a_lhs.attachedObject || !a_rhs.attachedObject || a_lhs.attachedObject.get() == a_rhs.attachedObject.get()) &&
 				(!a_lhs.sourceObject || !a_rhs.sourceObject || a_lhs.sourceObject.get() == a_rhs.sourceObject.get());
 		};
 		const auto normalizedXml = ConfigPaths::LowerString(a_record.physicsXmlPath);
-		auto existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const PrototypeArmorRecord& a_existing) {
+		auto existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const ArmorPhysicsRecord& a_existing) {
 			return a_existing.bipedObject == a_record.bipedObject &&
 				a_existing.attachedObject.get() == a_record.attachedObject.get() &&
 				a_existing.sourceObject.get() == a_record.sourceObject.get() &&
 				ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
 		});
 		if (existing == a_records.end()) {
-			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml, &runtimeObjectsCompatible](const PrototypeArmorRecord& a_existing) {
+			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml, &runtimeObjectsCompatible](const ArmorPhysicsRecord& a_existing) {
 				return a_existing.bipedObject == a_record.bipedObject &&
 					ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
 					runtimeObjectsCompatible(a_record, a_existing);
@@ -456,7 +490,7 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::StripQueuedArmorRuntimePointers(std::vector<PrototypeArmorRecord>& a_records)
+	void Fo4PhysicsWorld::StripQueuedArmorRuntimePointers(std::vector<ArmorPhysicsRecord>& a_records)
 	{
 		for (auto& record : a_records) {
 			record.attachedObject = nullptr;
@@ -465,7 +499,7 @@ namespace Smp
 		}
 	}
 
-	std::uint32_t Fo4PhysicsWorld::PruneStalePendingHairSlotArmorRecords(std::vector<PrototypeArmorRecord>& a_records)
+	std::uint32_t Fo4PhysicsWorld::PruneStalePendingHairSlotArmorRecords(std::vector<ArmorPhysicsRecord>& a_records)
 	{
 		std::uint32_t removed = 0;
 		for (auto it = a_records.begin(); it != a_records.end();) {
@@ -475,7 +509,7 @@ namespace Smp
 			}
 
 			const auto bipedObject = it->bipedObject;
-			const auto hasLaterSlotOwner = std::ranges::any_of(std::next(it), a_records.end(), [bipedObject](const PrototypeArmorRecord& a_record) {
+			const auto hasLaterSlotOwner = std::ranges::any_of(std::next(it), a_records.end(), [bipedObject](const ArmorPhysicsRecord& a_record) {
 				return a_record.bipedObject == bipedObject;
 			});
 			if (!hasLaterSlotOwner) {
@@ -489,9 +523,9 @@ namespace Smp
 		return removed;
 	}
 
-	bool Fo4PhysicsWorld::PrototypeArmorRecordsIncludeHairSlot(const std::span<const PrototypeArmorRecord> a_records)
+	bool Fo4PhysicsWorld::ArmorPhysicsRecordsIncludeHairSlot(const std::span<const ArmorPhysicsRecord> a_records)
 	{
-		return std::ranges::any_of(a_records, [](const PrototypeArmorRecord& a_record) {
+		return std::ranges::any_of(a_records, [](const ArmorPhysicsRecord& a_record) {
 			return IsHairBipedObject(a_record.bipedObject);
 		});
 	}
@@ -509,41 +543,41 @@ namespace Smp
 		return found != pendingActorRebuilds_.end() ? std::addressof(*found) : nullptr;
 	}
 
-	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event)
+	std::vector<ArmorPhysicsRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForAttachLocked(const LifecycleEvent& a_event)
 	{
-		std::vector<PrototypeArmorRecord> records;
+		std::vector<ArmorPhysicsRecord> records;
 		if (auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson)) {
 			for (auto& record : pending->armorRecords) {
-				MergePrototypeArmorRecord(records, record);
+				MergeArmorPhysicsRecord(records, record);
 			}
-		} else if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
+		} else if (auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson)) {
 			for (auto& record : actorState->armorRecords) {
-				MergePrototypeArmorRecord(records, record);
+				MergeArmorPhysicsRecord(records, record);
 			}
 		}
 
 		for (auto& record : CollectSuspendedArmorRecordsLocked(a_event)) {
-			MergePrototypeArmorRecord(records, std::move(record));
+			MergeArmorPhysicsRecord(records, std::move(record));
 		}
 		return records;
 	}
 
-	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event)
+	std::vector<ArmorPhysicsRecord> Fo4PhysicsWorld::CollectQueuedArmorRecordsForDetachLocked(const LifecycleEvent& a_event)
 	{
-		std::vector<PrototypeArmorRecord> records;
+		std::vector<ArmorPhysicsRecord> records;
 		if (auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson)) {
 			records = pending->armorRecords;
-		} else if (auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson)) {
+		} else if (auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson)) {
 			records = actorState->armorRecords;
 		}
 		const auto detachedBipedObject = ResolveEventBipedObject(a_event);
 		if (detachedBipedObject != RE::BIPED_OBJECT::kTotal) {
-			std::erase_if(records, [detachedBipedObject, object = a_event.object](const PrototypeArmorRecord& a_record) {
+			std::erase_if(records, [detachedBipedObject, object = a_event.object](const ArmorPhysicsRecord& a_record) {
 				if (a_record.bipedObject != detachedBipedObject) {
 					return false;
 				}
-				const auto recordHasRuntimeObject = a_record.attachedObject || a_record.sourceObject;
-				if (!object || !recordHasRuntimeObject) {
+				const auto recordHasPhysicsObject = a_record.attachedObject || a_record.sourceObject;
+				if (!object || !recordHasPhysicsObject) {
 					return true;
 				}
 				const auto matchesAttached =
@@ -565,7 +599,7 @@ namespace Smp
 	void Fo4PhysicsWorld::MarkPendingActorRebuildLocked(
 		RE::Actor* a_actor,
 		const bool a_firstPerson,
-		std::vector<PrototypeArmorRecord> a_armorRecords,
+		std::vector<ArmorPhysicsRecord> a_armorRecords,
 		const bool a_forceArmorRescan,
 		const bool a_scheduleImmediately,
 		const bool a_replaceArmorRecords)
@@ -579,7 +613,7 @@ namespace Smp
 			return;
 		}
 
-		const auto requestedDelay = std::ranges::any_of(a_armorRecords, [](const PrototypeArmorRecord& a_record) {
+		const auto requestedDelay = std::ranges::any_of(a_armorRecords, [](const ArmorPhysicsRecord& a_record) {
 			return a_record.cpuCopyRetryCount > 0;
 		}) ? kCpuCopyPendingRetryDelayTasks : 0U;
 		const auto rebuildDelay = a_forceArmorRescan ? std::max(requestedDelay, kArmorChangeRebuildDelayTasks) : requestedDelay;
@@ -590,14 +624,14 @@ namespace Smp
 				pending->armorRecords = std::move(a_armorRecords);
 			} else {
 				for (auto& record : a_armorRecords) {
-					MergePrototypeArmorRecord(pending->armorRecords, std::move(record));
+					MergeArmorPhysicsRecord(pending->armorRecords, std::move(record));
 				}
 			}
 			const auto prunedHairSlotRecords = PruneStalePendingHairSlotArmorRecords(pending->armorRecords);
 			pending->frameDelay = std::max(pending->frameDelay, frameDelay);
 			pending->forceArmorRescan = pending->forceArmorRescan || a_forceArmorRescan;
 			spdlog::debug(
-				"updated pending prototype physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
+				"updated pending system physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
 				static_cast<void*>(a_actor),
 				a_firstPerson,
 				pending->armorRecords.size(),
@@ -624,7 +658,7 @@ namespace Smp
 			.forceArmorRescan = a_forceArmorRescan,
 		});
 		spdlog::debug(
-			"queued pending prototype physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
+			"queued pending system physics rebuild for actor={} firstPerson={} armorRecords={} forceArmorRescan={} scheduleImmediately={} replaceArmorRecords={}",
 			static_cast<void*>(a_actor),
 			a_firstPerson,
 			pendingActorRebuilds_.back().armorRecords.size(),
@@ -641,7 +675,7 @@ namespace Smp
 		}
 	}
 
-	bool Fo4PhysicsWorld::SoftReloadPrototypeStateLocked(PrototypeActorState& a_state, const LifecycleEventType a_reason)
+	bool Fo4PhysicsWorld::SoftReloadSystemLocked(Fo4SkinnedMeshSystem& a_state, const LifecycleEventType a_reason)
 	{
 		auto* actor = a_state.actor;
 		if (!actor) {
@@ -654,9 +688,9 @@ namespace Smp
 		}
 
 		auto armorRecords = a_state.armorRecords;
-		const auto hadRuntime = a_state.HasRuntime();
+		const auto hadRuntime = a_state.HasPhysics();
 		if (hadRuntime) {
-			SuspendPrototypeRuntimeLocked(a_state);
+			SuspendSystemLocked(a_state);
 		}
 
 		if (armorRecords.empty() && !hadRuntime) {
@@ -667,7 +701,7 @@ namespace Smp
 		MarkPendingActorRebuildLocked(actor, a_state.firstPerson, std::move(armorRecords), forceArmorRescan, true, true);
 		ResetStepClockLocked();
 		spdlog::debug(
-			"soft-reloaded prototype physics state after {} actor={} firstPerson={} hadRuntime={} forceArmorRescan={}",
+			"soft-reloaded system physics state after {} actor={} firstPerson={} hadRuntime={} forceArmorRescan={}",
 			ToString(a_reason),
 			static_cast<void*>(actor),
 			a_state.firstPerson,
@@ -711,8 +745,8 @@ namespace Smp
 			return false;
 		}
 
-		if (std::ranges::any_of(prototypeActors_, [a_actor](const PrototypeActorState& a_state) {
-			return a_state.actor == a_actor;
+		if (std::ranges::any_of(systems_, [a_actor](const auto& a_state) {
+			return a_state->actor == a_actor;
 		})) {
 			return true;
 		}
@@ -723,9 +757,9 @@ namespace Smp
 		});
 	}
 
-	std::vector<Fo4PhysicsWorld::PrototypeArmorRecord> Fo4PhysicsWorld::CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event)
+	std::vector<ArmorPhysicsRecord> Fo4PhysicsWorld::CollectSuspendedArmorRecordsLocked(const LifecycleEvent& a_event)
 	{
-		std::vector<PrototypeArmorRecord> records;
+		std::vector<ArmorPhysicsRecord> records;
 		if (!IsArmorAttachCandidate(a_event.type) || a_event.physicsXmlPath.empty() || !a_event.object) {
 			return records;
 		}
@@ -745,8 +779,8 @@ namespace Smp
 		return records;
 	}
 
-	void Fo4PhysicsWorld::RecordPrototypeArmorLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::RecordArmorLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		std::string a_physicsXmlPath,
 		const DefaultBBP::NameMap& a_meshNameMap,
@@ -765,7 +799,7 @@ namespace Smp
 				a_buildGroups.push_back(a_buildGroup);
 			}
 		};
-		auto existing = std::ranges::find_if(a_state.armorRecords, [&](const PrototypeArmorRecord& a_record) {
+		auto existing = std::ranges::find_if(a_state.armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 			return a_record.bipedObject == a_bipedObject &&
 				a_record.attachedObject.get() == a_attachedObject &&
 				a_record.sourceObject.get() == a_sourceObject &&
@@ -795,8 +829,8 @@ namespace Smp
 		}
 	}
 
-	Fo4PhysicsWorld::PrototypeAttachmentRecord* Fo4PhysicsWorld::FindPrototypeAttachmentLocked(
-		PrototypeActorState& a_state,
+	AttachmentPhysicsRecord* Fo4PhysicsWorld::FindAttachmentLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		RE::NiAVObject* a_object,
 		RE::NiAVObject* a_sourceObject,
@@ -807,7 +841,7 @@ namespace Smp
 		}
 
 		const auto normalizedXml = a_physicsXmlPath.empty() ? std::string{} : ConfigPaths::LowerString(std::string(a_physicsXmlPath));
-		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const PrototypeAttachmentRecord& a_record) {
+		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
 			if (a_record.bipedObject != a_bipedObject) {
 				return false;
 			}
@@ -825,8 +859,8 @@ namespace Smp
 		return found != a_state.attachmentRecords.end() ? std::addressof(*found) : nullptr;
 	}
 
-	const Fo4PhysicsWorld::PrototypeAttachmentRecord* Fo4PhysicsWorld::FindPrototypeAttachmentLocked(
-		const PrototypeActorState& a_state,
+	const AttachmentPhysicsRecord* Fo4PhysicsWorld::FindAttachmentLocked(
+		const Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		RE::NiAVObject* a_object,
 		RE::NiAVObject* a_sourceObject,
@@ -837,7 +871,7 @@ namespace Smp
 		}
 
 		const auto normalizedXml = a_physicsXmlPath.empty() ? std::string{} : ConfigPaths::LowerString(std::string(a_physicsXmlPath));
-		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const PrototypeAttachmentRecord& a_record) {
+		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
 			if (a_record.bipedObject != a_bipedObject) {
 				return false;
 			}
@@ -855,14 +889,14 @@ namespace Smp
 		return found != a_state.attachmentRecords.end() ? std::addressof(*found) : nullptr;
 	}
 
-	bool Fo4PhysicsWorld::IsPrototypeAttachmentCurrentLocked(
-		const PrototypeActorState& a_state,
+	bool Fo4PhysicsWorld::IsAttachmentCurrentLocked(
+		const Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		RE::NiAVObject* a_object,
 		RE::NiAVObject* a_sourceObject,
 		const std::string_view a_physicsXmlPath)
 	{
-		const auto* record = FindPrototypeAttachmentLocked(a_state, a_bipedObject, a_object, a_sourceObject, a_physicsXmlPath);
+		const auto* record = FindAttachmentLocked(a_state, a_bipedObject, a_object, a_sourceObject, a_physicsXmlPath);
 		if (!record || record->buildGroups.empty() || record->physicsXmlPath.empty()) {
 			return false;
 		}
@@ -879,19 +913,19 @@ namespace Smp
 		}
 
 		return std::ranges::any_of(record->buildGroups, [&](const std::uint64_t a_buildGroup) {
-			if (std::ranges::any_of(a_state.meshes, [a_buildGroup](const PrototypeMesh& a_mesh) {
+			if (std::ranges::any_of(a_state.meshes, [a_buildGroup](const MeshRecord& a_mesh) {
 					return a_mesh.buildGroup == a_buildGroup;
 				})) {
 				return true;
 			}
-			return std::ranges::any_of(a_state.bodies, [a_buildGroup](const PrototypeBody& a_body) {
-				return PrototypeBodyHasBuildGroup(a_body, a_buildGroup);
+			return std::ranges::any_of(a_state.bodies, [a_buildGroup](const BoneRecord& a_body) {
+				return BodyHasBuildGroup(a_body, a_buildGroup);
 			});
 		});
 	}
 
-	void Fo4PhysicsWorld::RecordPrototypeAttachmentLocked(
-		PrototypeActorState& a_state,
+	void Fo4PhysicsWorld::RecordAttachmentLocked(
+		Fo4SkinnedMeshSystem& a_state,
 		const RE::BIPED_OBJECT a_bipedObject,
 		RE::NiAVObject* a_object,
 		RE::NiAVObject* a_sourceObject,
@@ -902,7 +936,7 @@ namespace Smp
 			return;
 		}
 
-		auto* record = FindPrototypeAttachmentLocked(a_state, a_bipedObject, a_object, a_sourceObject, a_physicsXmlPath);
+		auto* record = FindAttachmentLocked(a_state, a_bipedObject, a_object, a_sourceObject, a_physicsXmlPath);
 		if (!record) {
 			a_state.attachmentRecords.push_back({
 				.bipedObject = a_bipedObject,
@@ -935,10 +969,10 @@ namespace Smp
 		}
 
 		if (a_pending.armorRecords.size() > 1) {
-			auto recordScore = [](const PrototypeArmorRecord& a_record) {
+			auto recordScore = [](const ArmorPhysicsRecord& a_record) {
 				return a_record.armorBoneReferences.size();
 			};
-			auto fillMissingRecordState = [](PrototypeArmorRecord& a_target, const PrototypeArmorRecord& a_source) {
+			auto fillMissingRecordState = [](ArmorPhysicsRecord& a_target, const ArmorPhysicsRecord& a_source) {
 				if (!a_target.attachedObject && a_source.attachedObject) {
 					a_target.attachedObject = a_source.attachedObject;
 				}
@@ -957,19 +991,19 @@ namespace Smp
 					}
 				}
 			};
-			auto runtimeObjectsCompatible = [](const PrototypeArmorRecord& a_lhs, const PrototypeArmorRecord& a_rhs) {
+			auto runtimeObjectsCompatible = [](const ArmorPhysicsRecord& a_lhs, const ArmorPhysicsRecord& a_rhs) {
 				return (!a_lhs.attachedObject || !a_rhs.attachedObject || a_lhs.attachedObject.get() == a_rhs.attachedObject.get()) &&
 					(!a_lhs.sourceObject || !a_rhs.sourceObject || a_lhs.sourceObject.get() == a_rhs.sourceObject.get());
 			};
 
-			std::vector<PrototypeArmorRecord> mergedRecords;
+			std::vector<ArmorPhysicsRecord> mergedRecords;
 			for (auto& record : a_pending.armorRecords) {
 				if (record.bipedObject == RE::BIPED_OBJECT::kTotal || record.physicsXmlPath.empty()) {
 					continue;
 				}
 
 				const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
-				auto existing = std::ranges::find_if(mergedRecords, [&](const PrototypeArmorRecord& a_existing) {
+				auto existing = std::ranges::find_if(mergedRecords, [&](const ArmorPhysicsRecord& a_existing) {
 					return a_existing.bipedObject == record.bipedObject &&
 						ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
 						runtimeObjectsCompatible(record, a_existing);
@@ -1064,9 +1098,9 @@ namespace Smp
 				.firstPerson = a_pending.firstPerson,
 			};
 
-			auto& actorState = GetOrCreatePrototypeStateLocked(a_actor, a_pending.firstPerson);
+			auto& actorState = GetOrCreateSystemLocked(a_actor, a_pending.firstPerson);
 			std::vector<std::uint64_t> staleArmorBuildGroups;
-			std::vector<PrototypeAttachmentBoneLocalPose> preservedPoseCache;
+			std::vector<AttachmentBoneLocalPose> preservedPoseCache;
 			const auto cacheCurrentPoseForGroups = [&](const std::span<const std::uint64_t> a_buildGroups) {
 				if (!record.preserveCurrentPose || a_buildGroups.empty()) {
 					return;
@@ -1074,7 +1108,7 @@ namespace Smp
 				for (const auto& localPose : actorState.attachmentBoneLocalPoses) {
 					if (!localPose.node ||
 						std::ranges::find(a_buildGroups, localPose.buildGroup) == a_buildGroups.end() ||
-						std::ranges::any_of(preservedPoseCache, [&](const PrototypeAttachmentBoneLocalPose& a_cached) {
+						std::ranges::any_of(preservedPoseCache, [&](const AttachmentBoneLocalPose& a_cached) {
 							return a_cached.node.get() == localPose.node.get();
 						})) {
 						continue;
@@ -1086,7 +1120,7 @@ namespace Smp
 			};
 			const auto restoreCachedPoses = [&]() {
 				for (const auto& cachedPose : preservedPoseCache) {
-					const auto alreadyCached = std::ranges::any_of(actorState.attachmentBoneLocalPoses, [&](const PrototypeAttachmentBoneLocalPose& a_existing) {
+					const auto alreadyCached = std::ranges::any_of(actorState.attachmentBoneLocalPoses, [&](const AttachmentBoneLocalPose& a_existing) {
 						return a_existing.buildGroup == kPapyrusArmorPoseCacheBuildGroup && a_existing.node.get() == cachedPose.node.get();
 					});
 					if (!alreadyCached) {
@@ -1095,14 +1129,14 @@ namespace Smp
 				}
 			};
 			const auto hairSlotArmorBuild = IsHairBipedObject(record.bipedObject);
-			if (const auto* attachment = FindPrototypeAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath)) {
+			if (const auto* attachment = FindAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath)) {
 				for (const auto buildGroup : attachment->buildGroups) {
 					if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
 						staleArmorBuildGroups.push_back(buildGroup);
 					}
 				}
 			}
-			for (const auto buildGroup : CollectPrototypeGroupsForObjectLocked(actorState, rebuildObject)) {
+			for (const auto buildGroup : CollectBuildGroupsForObjectLocked(actorState, rebuildObject)) {
 				if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
 					staleArmorBuildGroups.push_back(buildGroup);
 				}
@@ -1112,7 +1146,7 @@ namespace Smp
 				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
 				if (replacedHeadParts > 0) {
 					spdlog::debug(
-						"pending hair-slot armor rebuild is replacing tracked head/hair prototype groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+						"pending hair-slot armor rebuild is replacing tracked head/hair system groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
 						static_cast<void*>(a_actor),
 						std::to_underlying(record.bipedObject),
 						static_cast<void*>(rebuildObject),
@@ -1121,17 +1155,17 @@ namespace Smp
 						staleHeadBuildGroups.size());
 				}
 				if (!staleHeadBuildGroups.empty()) {
-					ClearPrototypeGroupsLocked(actorState, staleHeadBuildGroups);
+					ClearBuildGroupsLocked(actorState, staleHeadBuildGroups);
 				}
 			}
 			if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
 				cacheCurrentPoseForGroups(staleArmorBuildGroups);
-				ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups, !record.preserveCurrentPose);
+				ClearBuildGroupsLocked(actorState, staleArmorBuildGroups, !record.preserveCurrentPose);
 				restoreCachedPoses();
 				const auto clearedCount = staleArmorBuildGroups.size();
 				staleArmorBuildGroups.clear();
 				spdlog::debug(
-					"cleared stale prototype groups before pending armor rebuild actor={} bipedObject={} object={} xml='{}' groups={}",
+					"cleared stale system groups before pending armor rebuild actor={} bipedObject={} object={} xml='{}' groups={}",
 					static_cast<void*>(a_actor),
 					std::to_underlying(record.bipedObject),
 					static_cast<void*>(rebuildObject),
@@ -1139,7 +1173,7 @@ namespace Smp
 					clearedCount);
 			}
 			if (hairSlotArmorBuild) {
-				const auto staleHairBuildGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, record.bipedObject);
+				const auto staleHairBuildGroups = CollectArmorPhysicsGroupsForBipedObjectLocked(actorState, record.bipedObject);
 				cacheCurrentPoseForGroups(staleHairBuildGroups);
 				ClearStaleHairSlotArmorGroupsLocked(
 					actorState,
@@ -1153,23 +1187,23 @@ namespace Smp
 				staleArmorBuildGroups.clear();
 			}
 			spdlog::debug(
-				"rebuilding pending armor prototype physics actor={} bipedObject={} object={} xml='{}' stagedStaleGroups={}",
+				"rebuilding pending armor system physics actor={} bipedObject={} object={} xml='{}' stagedStaleGroups={}",
 				static_cast<void*>(a_actor),
 				std::to_underlying(record.bipedObject),
 				static_cast<void*>(rebuildObject),
 				record.physicsXmlPath,
 				staleArmorBuildGroups.size());
-			auto buildResult = BuildPrototypeBodiesLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, PrototypeBuildDomain::kArmor, !hairSlotArmorBuild);
+			auto buildResult = BuildSystemObjectsLocked(actorState, resumeEvent, *selectedSummary, record.meshNameMap, BuildDomain::kArmor, !hairSlotArmorBuild);
 			if (buildResult.succeeded) {
 				if (hairSlotArmorBuild) {
-					CommitPrototypeBuildGroupToBulletLocked(actorState, buildResult.buildGroup);
+					ActivateBuildGroupLocked(actorState, buildResult.buildGroup);
 					buildResult.committed = true;
-					LogPrototypeActorBulletObjectsLocked(actorState, "after-prototype-build-commit");
+					LogSystemBulletObjectsLocked(actorState, "after-system-build-commit");
 				} else if (!staleArmorBuildGroups.empty()) {
-					ClearPrototypeGroupsLocked(actorState, staleArmorBuildGroups);
+					ClearBuildGroupsLocked(actorState, staleArmorBuildGroups);
 				}
-				RecordPrototypeAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath, buildResult.buildGroup);
-				RecordPrototypeArmorLocked(
+				RecordAttachmentLocked(actorState, record.bipedObject, rebuildObject, rebuildSourceObject, record.physicsXmlPath, buildResult.buildGroup);
+				RecordArmorLocked(
 					actorState,
 					record.bipedObject,
 					record.physicsXmlPath,
@@ -1179,7 +1213,7 @@ namespace Smp
 					record.armorBoneReferences,
 					buildResult.buildGroup);
 				if (hairSlotArmorBuild) {
-					const auto remainingHairSlotArmorGroups = CollectArmorPrototypeGroupsForBipedObjectLocked(actorState, record.bipedObject).size();
+					const auto remainingHairSlotArmorGroups = CollectArmorPhysicsGroupsForBipedObjectLocked(actorState, record.bipedObject).size();
 					spdlog::debug(
 						"hair-slot armor ownership after pending commit actor={} bipedObject={} buildGroup={} object={} xml='{}' remainingArmorGroups={}",
 						static_cast<void*>(a_actor),
@@ -1189,11 +1223,11 @@ namespace Smp
 						record.physicsXmlPath,
 						remainingHairSlotArmorGroups);
 				}
-				SoftSuspendBuiltRuntimeIfOutOfRangeLocked(actorState, resumeEvent);
-			} else if (buildResult.buildGroup != 0 && PrototypeBuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, PrototypeBuildDomain::kArmor)) {
-				ClearPrototypeGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
+				DeactivateBuiltSystemIfInactiveLocked(actorState, resumeEvent);
+			} else if (buildResult.buildGroup != 0 && BuildGroupIsRecordableLocked(actorState, buildResult.buildGroup, BuildDomain::kArmor)) {
+				ClearBuildGroupsLocked(actorState, std::vector<std::uint64_t>{ buildResult.buildGroup });
 				spdlog::debug(
-					"rolled back incomplete pending armor prototype build group actor={} bipedObject={} object={} buildGroup={} xml='{}' pendingCpuCopy={}",
+					"rolled back incomplete pending armor system build group actor={} bipedObject={} object={} buildGroup={} xml='{}' pendingCpuCopy={}",
 					static_cast<void*>(a_actor),
 					std::to_underlying(record.bipedObject),
 					static_cast<void*>(rebuildObject),
@@ -1206,7 +1240,7 @@ namespace Smp
 					++record.cpuCopyRetryCount;
 					a_pending.frameDelay = std::max(a_pending.frameDelay, kCpuCopyPendingRetryDelayTasks);
 					spdlog::debug(
-						"retrying pending prototype mesh CPU copy actor={} bipedObject={} object={} attempt={}/{} delayTasks={}",
+						"retrying pending system mesh CPU copy actor={} bipedObject={} object={} attempt={}/{} delayTasks={}",
 						static_cast<void*>(a_actor),
 						std::to_underlying(record.bipedObject),
 						static_cast<void*>(rebuildObject),
@@ -1217,7 +1251,7 @@ namespace Smp
 					continue;
 				}
 				spdlog::warn(
-					"giving up pending prototype mesh CPU copy actor={} bipedObject={} object={} attempts={} xml='{}'",
+					"giving up pending system mesh CPU copy actor={} bipedObject={} object={} attempts={} xml='{}'",
 					static_cast<void*>(a_actor),
 					std::to_underlying(record.bipedObject),
 					static_cast<void*>(rebuildObject),
@@ -1225,7 +1259,7 @@ namespace Smp
 					record.physicsXmlPath);
 			}
 			if (record.preserveCurrentPose) {
-				std::erase_if(actorState.attachmentBoneLocalPoses, [](const PrototypeAttachmentBoneLocalPose& a_pose) {
+				std::erase_if(actorState.attachmentBoneLocalPoses, [](const AttachmentBoneLocalPose& a_pose) {
 					return a_pose.buildGroup == kPapyrusArmorPoseCacheBuildGroup;
 				});
 			}
@@ -1286,10 +1320,10 @@ namespace Smp
 					continue;
 				}
 
-				if (auto* existingState = FindPrototypeStateLocked(actor, it->firstPerson)) {
-					ClearPrototypeStateLocked(*existingState);
-					std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-						return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
+				if (auto* existingState = FindSystemLocked(actor, it->firstPerson)) {
+					ClearSystemLocked(*existingState);
+					std::erase_if(systems_, [](const auto& a_state) {
+						return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 					});
 				}
 
@@ -1302,19 +1336,19 @@ namespace Smp
 						.object = root,
 						.firstPerson = it->firstPerson,
 					};
-					if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
+					if (IsBuildCandidateLocked(rebuildEvent, true)) {
 						spdlog::debug(
-							"processing full actor prototype physics rebuild for actor={} root={} firstPerson={} with no queued armor records",
+							"processing full actor system physics rebuild for actor={} root={} firstPerson={} with no queued armor records",
 							static_cast<void*>(actor),
 							static_cast<void*>(root),
 							it->firstPerson);
-						BuildPrototypeForEventLocked(rebuildEvent);
+						BuildForEventLocked(rebuildEvent);
 					}
 					it = pendingActorRebuilds_.erase(it);
 					continue;
 				}
 				spdlog::debug(
-					"processing full actor prototype physics rebuild for actor={} root={} firstPerson={} armorRecords={}",
+					"processing full actor system physics rebuild for actor={} root={} firstPerson={} armorRecords={}",
 					static_cast<void*>(actor),
 					static_cast<void*>(root),
 					it->firstPerson,
@@ -1328,17 +1362,17 @@ namespace Smp
 					continue;
 				}
 				if (fullActorRebuild) {
-					LogActorSkeletonHierarchy(actor, it->firstPerson, "after-full-actor-prototype-rebuild");
-					if (const auto* rebuiltState = FindPrototypeStateLocked(actor, it->firstPerson)) {
-						LogPrototypeActorBulletObjectsLocked(*rebuiltState, "after-full-actor-prototype-rebuild");
+					LogActorSkeletonHierarchy(actor, it->firstPerson, "after-full-actor-system-rebuild");
+					if (const auto* rebuiltState = FindSystemLocked(actor, it->firstPerson)) {
+						LogSystemBulletObjectsLocked(*rebuiltState, "after-full-actor-system-rebuild");
 					}
 				}
 				it = pendingActorRebuilds_.erase(it);
 				continue;
 			}
 
-			if (auto* existingState = FindPrototypeStateLocked(actor, it->firstPerson);
-				existingState && existingState->HasActiveRuntime()) {
+			if (auto* existingState = FindSystemLocked(actor, it->firstPerson);
+				existingState && existingState->IsActive()) {
 				it = pendingActorRebuilds_.erase(it);
 				continue;
 			}
@@ -1362,23 +1396,23 @@ namespace Smp
 				.object = root,
 				.firstPerson = it->firstPerson,
 			};
-			if (IsPrototypeCandidateLocked(rebuildEvent, true)) {
+			if (IsBuildCandidateLocked(rebuildEvent, true)) {
 				spdlog::debug(
-					"processing pending prototype physics rebuild for actor={} root={} firstPerson={}",
+					"processing pending system physics rebuild for actor={} root={} firstPerson={}",
 					static_cast<void*>(actor),
 					static_cast<void*>(root),
 					it->firstPerson);
-				BuildPrototypeForEventLocked(rebuildEvent);
+				BuildForEventLocked(rebuildEvent);
 			}
-			const auto* rebuiltState = FindPrototypeStateLocked(actor, it->firstPerson);
-			const auto rebuiltRuntime = rebuiltState && rebuiltState->HasActiveRuntime();
+			const auto* rebuiltState = FindSystemLocked(actor, it->firstPerson);
+			const auto rebuiltRuntime = rebuiltState && rebuiltState->IsActive();
 			if (rebuiltRuntime) {
 				it = pendingActorRebuilds_.erase(it);
 				continue;
 			}
 			if (rebuildEvent.biped) {
 				spdlog::debug(
-					"dropping pending prototype physics rebuild for actor={} firstPerson={} because no early SMP armor records are tracked",
+					"dropping pending system physics rebuild for actor={} firstPerson={} because no early SMP armor records are tracked",
 					static_cast<void*>(actor),
 					it->firstPerson);
 				it = pendingActorRebuilds_.erase(it);
@@ -1428,7 +1462,7 @@ namespace Smp
 
 					const auto removed = std::erase_if(
 						pendingActorIt->armorRecords,
-						[biped](const PrototypeArmorRecord& a_record) {
+						[biped](const ArmorPhysicsRecord& a_record) {
 							if (a_record.bipedObject == RE::BIPED_OBJECT::kTotal) {
 								return true;
 							}
@@ -1481,13 +1515,13 @@ namespace Smp
 				.headPart = it->headPart,
 				.firstPerson = false,
 			};
-			if (IsPrototypeCandidateLocked(headEvent, false)) {
+			if (IsBuildCandidateLocked(headEvent, false)) {
 				spdlog::debug(
 					"processing pending head physics rebuild for actor={} root={} faceNode={}",
 					static_cast<void*>(actor),
 					static_cast<void*>(root),
 					static_cast<void*>(faceNode));
-				BuildHeadPrototypeForEventLocked(headEvent);
+				BuildHeadForEventLocked(headEvent);
 			}
 			it = pendingHeadRebuilds_.erase(it);
 		}

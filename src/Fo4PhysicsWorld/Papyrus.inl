@@ -64,16 +64,16 @@ namespace Smp
 		std::string oldPhysicsFilePath;
 		{
 			std::scoped_lock lock(lock_);
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 
 			for (const bool firstPerson : { false, true }) {
-				auto* actorState = FindPrototypeStateLocked(a_actor, firstPerson);
+				auto* actorState = FindSystemLocked(a_actor, firstPerson);
 				if (!actorState) {
 					continue;
 				}
 				actorFound = true;
 
-				auto record = std::ranges::find_if(actorState->armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				auto record = std::ranges::find_if(actorState->armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 					return BipedObjectUsesArmorAddon(a_actor, actorState->firstPerson, a_record.bipedObject, a_armorAddon);
 				});
 				if (record == actorState->armorRecords.end()) {
@@ -96,7 +96,7 @@ namespace Smp
 				MarkPendingActorRebuildLocked(
 					a_actor,
 					actorState->firstPerson,
-					std::vector<PrototypeArmorRecord>{ std::move(queuedRecord) });
+					std::vector<ArmorPhysicsRecord>{ std::move(queuedRecord) });
 				succeeded = true;
 				LogDynamicHdtResult(a_verbose, std::format("Physics file path switched to \"{}\".", a_physicsFilePath));
 				break;
@@ -141,16 +141,16 @@ namespace Smp
 		bool succeeded = false;
 		{
 			std::scoped_lock lock(lock_);
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 
 			for (const bool firstPerson : { false, true }) {
-				auto* actorState = FindPrototypeStateLocked(a_actor, firstPerson);
+				auto* actorState = FindSystemLocked(a_actor, firstPerson);
 				if (!actorState) {
 					continue;
 				}
 				actorFound = true;
 
-				auto record = std::ranges::find_if(actorState->armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				auto record = std::ranges::find_if(actorState->armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 					return a_record.physicsXmlPath == a_oldPhysicsFilePath;
 				});
 				if (record == actorState->armorRecords.end()) {
@@ -172,7 +172,7 @@ namespace Smp
 				MarkPendingActorRebuildLocked(
 					a_actor,
 					actorState->firstPerson,
-					std::vector<PrototypeArmorRecord>{ std::move(queuedRecord) });
+					std::vector<ArmorPhysicsRecord>{ std::move(queuedRecord) });
 				succeeded = true;
 				break;
 			}
@@ -213,16 +213,16 @@ namespace Smp
 		std::string physicsFilePath;
 		{
 			std::scoped_lock lock(lock_);
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 
 			for (const bool firstPerson : { false, true }) {
-				const auto* actorState = FindPrototypeStateLocked(a_actor, firstPerson);
+				const auto* actorState = FindSystemLocked(a_actor, firstPerson);
 				if (!actorState) {
 					continue;
 				}
 				actorFound = true;
 
-				const auto record = std::ranges::find_if(actorState->armorRecords, [&](const PrototypeArmorRecord& a_record) {
+				const auto record = std::ranges::find_if(actorState->armorRecords, [&](const ArmorPhysicsRecord& a_record) {
 					return BipedObjectUsesArmorAddon(a_actor, actorState->firstPerson, a_record.bipedObject, a_armorAddon);
 				});
 				if (record == actorState->armorRecords.end()) {
@@ -258,11 +258,12 @@ namespace Smp
 
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 
 		for (std::size_t nameIndex = 0; nameIndex < a_boneNames.size(); ++nameIndex) {
 			bool foundAny = false;
-			for (auto& actorState : prototypeActors_) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
 				auto* stateActor = actorState.actor;
 				if (!stateActor) {
 					if (const auto resolved = actorState.actorHandle.get()) {
@@ -304,8 +305,12 @@ namespace Smp
 						if (!constraint.constraint) {
 							continue;
 						}
-						auto& constraintBodyA = constraint.constraint->getRigidBodyA();
-						auto& constraintBodyB = constraint.constraint->getRigidBodyB();
+						auto* bulletConstraint = constraint.GetConstraint();
+						if (!bulletConstraint) {
+							continue;
+						}
+						auto& constraintBodyA = bulletConstraint->getRigidBodyA();
+						auto& constraintBodyB = bulletConstraint->getRigidBodyB();
 						if (std::addressof(constraintBodyA) != std::addressof(rigidBody) &&
 							std::addressof(constraintBodyB) != std::addressof(rigidBody)) {
 							continue;
@@ -313,7 +318,7 @@ namespace Smp
 						const auto bothKinematic =
 							constraintBodyA.isStaticOrKinematicObject() &&
 							constraintBodyB.isStaticOrKinematicObject();
-						constraint.constraint->setEnabled(!bothKinematic);
+						bulletConstraint->setEnabled(!bothKinematic);
 					}
 				}
 			}
@@ -329,12 +334,12 @@ namespace Smp
 
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 
 		bool queuedActorRebuild = false;
 		bool queuedHeadRebuild = false;
 		for (const bool firstPerson : { false, true }) {
-			auto* actorState = FindPrototypeStateLocked(a_actor, firstPerson);
+			auto* actorState = FindSystemLocked(a_actor, firstPerson);
 			if (!actorState) {
 				continue;
 			}
@@ -378,11 +383,11 @@ namespace Smp
 					std::vector<std::uint64_t> headBuildGroups;
 					CollectHeadPartGroupsLocked(*actorState, headBuildGroups);
 					if (!headBuildGroups.empty()) {
-						std::vector<PrototypeAttachmentBoneLocalPose> cachedHeadPoses;
+						std::vector<AttachmentBoneLocalPose> cachedHeadPoses;
 						for (const auto& localPose : actorState->attachmentBoneLocalPoses) {
 							if (!localPose.node ||
 								std::ranges::find(headBuildGroups, localPose.buildGroup) == headBuildGroups.end() ||
-								std::ranges::any_of(cachedHeadPoses, [&](const PrototypeAttachmentBoneLocalPose& a_cached) {
+								std::ranges::any_of(cachedHeadPoses, [&](const AttachmentBoneLocalPose& a_cached) {
 									return a_cached.node.get() == localPose.node.get();
 								})) {
 								continue;
@@ -391,7 +396,7 @@ namespace Smp
 							cachedPose.buildGroup = kPapyrusHeadPoseCacheBuildGroup;
 							cachedHeadPoses.push_back(std::move(cachedPose));
 						}
-						ClearPrototypeGroupsLocked(*actorState, headBuildGroups, false);
+						ClearBuildGroupsLocked(*actorState, headBuildGroups, false);
 						actorState->attachmentBoneLocalPoses.insert(
 							actorState->attachmentBoneLocalPoses.end(),
 							cachedHeadPoses.begin(),

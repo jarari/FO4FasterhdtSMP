@@ -7,8 +7,6 @@
 
 namespace hdt
 {
-	// Fallout 4 keeps actor/build-group ownership outside the Bullet world, but
-	// the simulation behavior itself is the reference hdtSkinnedMeshWorld.
 	class SkinnedMeshWorld :
 		public btDiscreteDynamicsWorldMt
 	{
@@ -16,8 +14,8 @@ namespace hdt
 		using btDiscreteDynamicsWorldMt::btDiscreteDynamicsWorldMt;
 		~SkinnedMeshWorld() override;
 
-		void addSkinnedMeshSystem(SkinnedMeshSystem* a_system);
-		void removeSkinnedMeshSystem(SkinnedMeshSystem* a_system);
+		virtual void addSkinnedMeshSystem(SkinnedMeshSystem* a_system);
+		virtual void removeSkinnedMeshSystem(SkinnedMeshSystem* a_system);
 		void updateConstraintsForBone(SkinnedMeshBone* a_bone);
 
 		int stepSimulation(
@@ -34,6 +32,6 @@ namespace hdt
 		void calculateSimulationIslands() override;
 		void solveConstraints(btContactSolverInfo& a_solverInfo) override;
 
-		std::vector<RE::BSTSmartPointer<SkinnedMeshSystem>> systems_;
+		std::vector<RE::BSTSmartPointer<SkinnedMeshSystem>> m_systems;
 	};
 }

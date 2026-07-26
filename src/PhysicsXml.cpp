@@ -199,7 +199,7 @@ namespace
 		if (!TryReadFloatAttribute(a_element, "x", x) ||
 			!TryReadFloatAttribute(a_element, "y", y) ||
 			!TryReadFloatAttribute(a_element, "z", z)) {
-			spdlog::warn("prototype physics XML {} has incomplete vector '{}'; constraint skipped", a_context, a_element->Name());
+			spdlog::warn("physics XML {} has incomplete vector '{}'; constraint skipped", a_context, a_element->Name());
 			a_valid = false;
 			return result;
 		}
@@ -246,7 +246,7 @@ namespace
 			!TryReadFloatAttribute(a_element, "y", result.y) ||
 			!TryReadFloatAttribute(a_element, "z", result.z) ||
 			!TryReadFloatAttribute(a_element, "w", result.w)) {
-			spdlog::warn("prototype physics XML {} has incomplete quaternion '{}'; constraint skipped", a_context, a_element->Name());
+			spdlog::warn("physics XML {} has incomplete quaternion '{}'; constraint skipped", a_context, a_element->Name());
 			a_valid = false;
 			return a_default;
 		}
@@ -307,7 +307,7 @@ namespace
 			!TryReadFloatAttribute(a_element, "y", axis.y) ||
 			!TryReadFloatAttribute(a_element, "z", axis.z) ||
 			!TryReadFloatAttribute(a_element, "angle", angle)) {
-			spdlog::warn("prototype physics XML {} has incomplete axis-angle '{}'; constraint skipped", a_context, a_element->Name());
+			spdlog::warn("physics XML {} has incomplete axis-angle '{}'; constraint skipped", a_context, a_element->Name());
 			a_valid = false;
 			return a_default;
 		}
@@ -390,7 +390,7 @@ namespace
 					return found->second;
 				}
 			}
-			spdlog::warn("prototype physics XML references unknown shape '{}'", name);
+			spdlog::warn("physics XML references unknown shape '{}'", name);
 			result.valid = false;
 			return result;
 		} else if (type == "box") {
@@ -440,7 +440,7 @@ namespace
 			result.kind = Smp::PhysicsShapeKind::kSphere;
 			result.radius = ReadFloat(a_shape, "radius", result.radius);
 		} else {
-			spdlog::warn("prototype physics XML has unknown shape type '{}'", type);
+			spdlog::warn("physics XML has unknown shape type '{}'", type);
 			result.valid = false;
 		}
 
@@ -815,26 +815,6 @@ namespace Smp
 	void PhysicsXmlLoader::ClearCache()
 	{
 		summaryCache_.clear();
-		prototype_ = PhysicsXmlSummary{};
-		hasPrototype_ = false;
-	}
-
-	bool PhysicsXmlLoader::LoadPrototype(const std::string& a_path)
-	{
-		if (a_path.empty()) {
-			prototype_ = PhysicsXmlSummary{};
-			hasPrototype_ = false;
-			spdlog::warn("no prototype physics XML configured");
-			return false;
-		}
-
-		if (auto loaded = LoadSummary(a_path)) {
-			prototype_ = std::move(*loaded);
-			hasPrototype_ = true;
-			return true;
-		}
-
-		return false;
 	}
 
 	std::optional<PhysicsXmlSummary> PhysicsXmlLoader::LoadSummary(const std::string& a_path)
@@ -851,28 +831,28 @@ namespace Smp
 				if (found->second.timestamp == *currentTimestamp) {
 					return found->second.summary;
 				}
-				spdlog::debug("prototype physics XML timestamp changed, reloading {}", cacheKey);
+				spdlog::debug("physics XML timestamp changed, reloading {}", cacheKey);
 			}
 		}
 
 		PhysicsXmlSummary loaded;
 		loaded.path = resolvedPath;
 		if (!PathExists(loaded.path)) {
-			spdlog::warn("prototype physics XML not found: {}", a_path);
+			spdlog::warn("physics XML not found: {}", a_path);
 			return std::nullopt;
 		}
 
 		tinyxml2::XMLDocument document;
 		const auto error = document.LoadFile(loaded.path.string().c_str());
 		if (error != tinyxml2::XML_SUCCESS) {
-			spdlog::error("failed to parse prototype physics XML {}: {}", loaded.path.string(), document.ErrorStr());
+			spdlog::error("failed to parse physics XML {}: {}", loaded.path.string(), document.ErrorStr());
 			return std::nullopt;
 		}
 
 		const auto system = document.FirstChildElement("system");
 		loaded.validSystemRoot = system != nullptr;
 		if (!system) {
-			spdlog::warn("prototype physics XML {} does not contain a <system> root", loaded.path.string());
+			spdlog::warn("physics XML {} does not contain a <system> root", loaded.path.string());
 			return std::nullopt;
 		}
 

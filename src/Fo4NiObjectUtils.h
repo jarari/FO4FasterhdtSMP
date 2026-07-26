@@ -24,6 +24,7 @@ namespace Smp::NiObject
 		std::unordered_set<RE::NiAVObject*>& a_inheritedExclusions,
 		std::vector<RE::NiAVObject*>& a_nodes);
 	bool IsDescendantOf(RE::NiAVObject* a_object, RE::NiAVObject* a_ancestor);
+	void UpdateWorldData(RE::NiAVObject* a_object, bool a_dirty);
 	RE::NiTransform BuildLocalToAncestor(RE::NiNode* a_node, RE::NiNode* a_ancestor);
 	RE::NiNode* GetObjectNodeByName(RE::NiAVObject* a_root, std::string_view a_name);
 }

@@ -10,14 +10,15 @@ namespace Smp
 			if (a_event.type == LifecycleEventType::kActorSet3D && !a_event.object) {
 				std::scoped_lock lock(lock_);
 				bool queuedSoftReload = false;
-				for (auto& actorState : prototypeActors_) {
+				for (auto& actorStatePointer : systems_) {
+					auto& actorState = *actorStatePointer;
 					if (actorState.actor != a_event.actor) {
 						continue;
 					}
-					queuedSoftReload = SoftReloadPrototypeStateLocked(actorState, a_event.type) || queuedSoftReload;
+					queuedSoftReload = SoftReloadSystemLocked(actorState, a_event.type) || queuedSoftReload;
 				}
-				std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-					return !a_state.actor && !a_state.HasRuntime() && a_state.armorRecords.empty();
+				std::erase_if(systems_, [](const auto& a_state) {
+					return !a_state->actor && !a_state->HasPhysics() && a_state->armorRecords.empty();
 				});
 				if (queuedSoftReload) {
 					spdlog::debug("physics world soft-reloaded actor state for null Set3D actor={}", static_cast<void*>(a_event.actor));
@@ -39,14 +40,14 @@ namespace Smp
 			}
 
 			if (IsIgnoredFirstPersonEvent(a_event, disableFirstPersonViewPhysics_)) {
-				spdlog::debug("skipping first-person prototype physics detach candidate {}", ToString(a_event.type));
+				spdlog::debug("skipping first-person system physics detach candidate {}", ToString(a_event.type));
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
 			std::scoped_lock lock(lock_);
 			if (a_event.firstPerson) {
 				spdlog::debug(
-					"ignored first-person armor detach full prototype rebuild candidate {} actor={} object={}",
+					"ignored first-person armor detach full system rebuild candidate {} actor={} object={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object));
@@ -78,7 +79,7 @@ namespace Smp
 				}
 			}
 
-			auto* actorState = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson);
+			auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState) {
 				spdlog::trace(
 					"ignored untracked armor detach candidate {} actor={} object={}",
@@ -92,15 +93,15 @@ namespace Smp
 			const auto bipedObject = ResolveEventBipedObject(a_event);
 			bool clearedHairSlotArmor = IsHairBipedObject(bipedObject);
 			if (a_event.object) {
-				auto buildGroups = CollectPrototypeGroupsForObjectLocked(*actorState, a_event.object);
-				clearedHairSlotArmor = clearedHairSlotArmor || PrototypeBuildGroupsIncludeHairSlotArmorLocked(*actorState, buildGroups);
+				auto buildGroups = CollectBuildGroupsForObjectLocked(*actorState, a_event.object);
+				clearedHairSlotArmor = clearedHairSlotArmor || BuildGroupsIncludeHairSlotArmorLocked(*actorState, buildGroups);
 				if (!buildGroups.empty()) {
-					ClearPrototypeGroupsLocked(*actorState, buildGroups);
+					ClearBuildGroupsLocked(*actorState, buildGroups);
 					cleared = true;
 				}
 			}
 			if (!cleared && bipedObject != RE::BIPED_OBJECT::kTotal) {
-				cleared = ClearPrototypeGroupsForBipedObjectLocked(*actorState, bipedObject);
+				cleared = ClearBuildGroupsForBipedObjectLocked(*actorState, bipedObject);
 			}
 			if (cleared && clearedHairSlotArmor) {
 				MarkPendingHeadRebuildLocked(LifecycleEvent{
@@ -110,18 +111,18 @@ namespace Smp
 					.firstPerson = a_event.firstPerson,
 				});
 				spdlog::debug(
-					"queued headpart prototype rebuild after hair-slot armor detach actor={} bipedObject={}",
+					"queued headpart system rebuild after hair-slot armor detach actor={} bipedObject={}",
 					static_cast<void*>(a_event.actor),
 					std::to_underlying(bipedObject));
 			}
-			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.runtimeSuspended && !a_state.HasRuntime() && a_state.armorRecords.empty();
+			std::erase_if(systems_, [](const auto& a_state) {
+				return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 			});
 			ResetStepClockLocked();
 			const auto detachLogLevel = cleared ? spdlog::level::debug : spdlog::level::trace;
 			spdlog::log(
 				detachLogLevel,
-				"processed scoped armor prototype physics detach after {} actor={} object={} cleared={} customizationActive={}",
+				"processed scoped armor system physics detach after {} actor={} object={} cleared={} customizationActive={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object),
@@ -137,25 +138,26 @@ namespace Smp
 			std::scoped_lock lock(lock_);
 			const auto deferForCustomization = DeferCharacterCustomizationLifecycleLocked(a_event, true, true);
 			bool queuedSoftReload = false;
-			for (auto& actorState : prototypeActors_) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
 				if (actorState.actor != a_event.actor) {
 					continue;
 				}
 				if (deferForCustomization) {
 					continue;
 				}
-				queuedSoftReload = SoftReloadPrototypeStateLocked(actorState, a_event.type) || queuedSoftReload;
+				queuedSoftReload = SoftReloadSystemLocked(actorState, a_event.type) || queuedSoftReload;
 			}
-			std::erase_if(prototypeActors_, [](const PrototypeActorState& a_state) {
-				return !a_state.actor && !a_state.HasRuntime() && a_state.armorRecords.empty();
+			std::erase_if(systems_, [](const auto& a_state) {
+				return !a_state->actor && !a_state->HasPhysics() && a_state->armorRecords.empty();
 			});
 			if (!deferForCustomization) {
-				PruneInvalidPrototypeStatesLocked();
+				PruneInvalidSystemsLocked();
 			}
 			bool rebuilt = false;
-			if (!deferForCustomization && InitializeLocked() && IsPrototypeCandidateLocked(a_event, true)) {
-				BuildPrototypeForEventLocked(a_event);
-				rebuilt = FindPrototypeStateLocked(a_event.actor, a_event.firstPerson) != nullptr;
+			if (!deferForCustomization && InitializeLocked() && IsBuildCandidateLocked(a_event, true)) {
+				BuildForEventLocked(a_event);
+				rebuilt = FindSystemLocked(a_event.actor, a_event.firstPerson) != nullptr;
 			}
 			if (!rebuilt && queuedSoftReload) {
 				if (!deferForCustomization) {
@@ -178,7 +180,7 @@ namespace Smp
 					static_cast<void*>(a_event.object));
 				return RE::BSEventNotifyControl::kContinue;
 			}
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 			MarkPendingHeadRebuildLocked(a_event);
 			ResetStepClockLocked();
 			spdlog::debug(
@@ -204,13 +206,13 @@ namespace Smp
 				if (dynamicsWorld_) {
 					dynamicsWorld_->clearForces();
 				}
-				spdlog::debug("loading menu '{}' opened; prototype physics suspended until game resumes", std::string_view(a_event.menuName));
+				spdlog::debug("loading menu '{}' opened; system physics suspended until game resumes", std::string_view(a_event.menuName));
 			} else {
 				if (loadingMenuDepth_ > 0) {
 					--loadingMenuDepth_;
 				}
 				spdlog::debug(
-					"loading menu '{}' closed; prototype physics reset will run when game resumes depth={}",
+					"loading menu '{}' closed; system physics reset will run when game resumes depth={}",
 					std::string_view(a_event.menuName),
 					loadingMenuDepth_);
 			}
@@ -229,7 +231,7 @@ namespace Smp
 				SuspendCharacterCustomizationTargetLocked();
 			}
 			spdlog::debug(
-				"character customization menu '{}' opened; target-scoped prototype physics suspension active actor={}",
+				"character customization menu '{}' opened; target-scoped system physics suspension active actor={}",
 				std::string_view(a_event.menuName),
 				static_cast<void*>(ResolveCharacterCustomizationTargetLocked()));
 		} else {
@@ -241,7 +243,7 @@ namespace Smp
 			}
 			ResetStepClockLocked();
 			spdlog::debug(
-				"character customization menu '{}' closed; target-scoped prototype physics reload queued",
+				"character customization menu '{}' closed; target-scoped system physics reload queued",
 				std::string_view(a_event.menuName));
 		}
 

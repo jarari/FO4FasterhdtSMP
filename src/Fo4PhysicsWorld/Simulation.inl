@@ -79,46 +79,31 @@ namespace Smp
 			return;
 		}
 
-		PruneInvalidPrototypeStatesLocked();
+		PruneInvalidSystemsLocked();
 		TryReactivateSuspendedActorsLocked();
-		TryReactivateSuspendedPrototypeStatesLocked();
+		TryReactivateInactiveSystemsLocked();
 
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
 		struct ActorReadTask
 		{
-			PrototypeActorState* actorState{ nullptr };
+			Fo4SkinnedMeshSystem* actorState{ nullptr };
 			float readDelta{ 0.0F };
 			RE::NiNode* restoreRoot{ nullptr };
 			RE::NiTransform restoreWorld{ RE::NiTransform::IDENTITY };
 		};
 		const auto processReadTask = [this](const ActorReadTask& a_task) {
 			auto& actorState = *a_task.actorState;
-			if (!actorState.runtimes.empty()) {
-				for (const auto& runtime : actorState.runtimes) {
-					for (auto* bone : runtime.bones) {
-						if (bone) {
-							bone->readTransform(a_task.readDelta);
-						}
-					}
-					ScalePrototypeConstraintsLocked(actorState, runtime);
-				}
-			} else {
-				for (auto& prototypeBody : actorState.bodies) {
-					if (prototypeBody.bone) {
-						prototypeBody.bone->readTransform(a_task.readDelta);
-					}
-				}
-				ScalePrototypeConstraintsLocked(actorState);
-			}
+			actorState.readTransform(a_task.readDelta);
 		};
 
 		auto phaseStart = Clock::now();
 		std::vector<ActorReadTask> readTasks;
-		readTasks.reserve(prototypeActors_.size());
-		for (auto& actorState : prototypeActors_) {
-			if (actorState.runtimeSoftSuspended) {
+		readTasks.reserve(systems_.size());
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
+			if (actorState.IsInactive()) {
 				continue;
 			}
 			if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
@@ -126,24 +111,29 @@ namespace Smp
 				continue;
 			}
 			UpdateMeshDisableStatesLocked(actorState);
-			for (auto& runtime : actorState.runtimes) {
+			for (auto& runtime : actorState.buildGroups) {
 				if (!runtime.pendingResetPhysicsRead) {
 					continue;
 				}
 
-				ResetPrototypeBuildGroupToCurrentPoseLocked(actorState, runtime.buildGroup);
+				ResetBuildGroupToCurrentPoseLocked(actorState, runtime.buildGroup);
 				runtime.pendingResetPhysicsRead = false;
 				spdlog::debug(
-					"performed one-shot reset physics read for newly committed prototype build group actor={} buildGroup={} domain={} bipedObject={}",
+					"performed one-shot reset physics read for newly committed system build group actor={} buildGroup={} domain={} bipedObject={}",
 					static_cast<void*>(actorState.actor),
 					runtime.buildGroup,
-					PrototypeDomainName(runtime.domain),
+					BuildDomainName(runtime.domain),
 					std::to_underlying(runtime.bipedObject));
 			}
-			const auto preparation = PreparePrototypeActorForReadLocked(actorState, simulationDelta);
+			actorState.clampRotations = clampRotations_;
+			actorState.rotationSpeedLimit = rotationSpeedLimit_;
+			actorState.unclampedResets = unclampedResets_;
+			actorState.unclampedResetAngle = unclampedResetAngle_;
+			const auto readDelta = actorState.prepareForRead(simulationDelta);
+			const auto& preparation = actorState.GetReadPreparation();
 			readTasks.push_back({
 				.actorState = std::addressof(actorState),
-				.readDelta = preparation.timeStep,
+				.readDelta = readDelta,
 				.restoreRoot = preparation.restoreRoot,
 				.restoreWorld = preparation.restoreWorld,
 			});
@@ -155,9 +145,7 @@ namespace Smp
 			if (readTask.restoreRoot) {
 				readTask.restoreRoot->world = readTask.restoreWorld;
 				for (auto& child : readTask.restoreRoot->children) {
-					if (child) {
-						UpdateTransformUpDown(child.get(), true);
-					}
+					NiObject::UpdateWorldData(child.get(), true);
 				}
 			}
 		}
@@ -188,7 +176,7 @@ namespace Smp
 		ResetFrameCollisionProfile();
 		auto phaseStart = Clock::now();
 		const auto translationOffset = ApplyTranslationOffset(*dynamicsWorld_);
-		if (auto* world = static_cast<PrototypeDynamicsWorld*>(dynamicsWorld_.get())) {
+		if (auto* world = static_cast<Fo4SkinnedMeshWorld*>(dynamicsWorld_.get())) {
 			world->StepReference(a_deltaSeconds, a_fixedStepSeconds);
 		}
 		RestoreTranslationOffset(*dynamicsWorld_, translationOffset);
@@ -210,29 +198,33 @@ namespace Smp
 		PhysicsProfiler::AdvanceFrame();
 	}
 
-	void Fo4PhysicsWorld::LogRootConstraintDiagnosticsLocked(const std::string_view a_phase, const PrototypeActorState& a_state)
+	void Fo4PhysicsWorld::LogRootConstraintDiagnosticsLocked(const std::string_view a_phase, const Fo4SkinnedMeshSystem& a_state)
 	{
-		const PrototypeConstraint* selected = nullptr;
-		for (const auto& prototypeConstraint : a_state.constraints) {
-			if (!prototypeConstraint.constraint || prototypeConstraint.kind != PhysicsConstraintKind::kGeneric) {
+		const ConstraintRecord* selected = nullptr;
+		for (const auto& constraintRecord : a_state.constraints) {
+			if (!constraintRecord.constraint || constraintRecord.kind != PhysicsConstraintKind::kGeneric) {
 				continue;
 			}
 
-			const auto& bodyA = prototypeConstraint.constraint->getRigidBodyA();
-			const auto& bodyB = prototypeConstraint.constraint->getRigidBodyB();
+			const auto* bulletConstraint = constraintRecord.GetConstraint();
+			if (!bulletConstraint) {
+				continue;
+			}
+			const auto& bodyA = bulletConstraint->getRigidBodyA();
+			const auto& bodyB = bulletConstraint->getRigidBodyB();
 			if (bodyA.isStaticOrKinematicObject() != bodyB.isStaticOrKinematicObject()) {
-				selected = std::addressof(prototypeConstraint);
+				selected = std::addressof(constraintRecord);
 				break;
 			}
 			if (!selected) {
-				selected = std::addressof(prototypeConstraint);
+				selected = std::addressof(constraintRecord);
 			}
 		}
 		if (!selected || !selected->constraint) {
 			return;
 		}
 
-		auto* generic = static_cast<btGeneric6DofSpring2Constraint*>(selected->constraint.get());
+		auto* generic = static_cast<btGeneric6DofSpring2Constraint*>(selected->GetConstraint());
 		const auto& bodyA = generic->getRigidBodyA();
 		const auto& bodyB = generic->getRigidBodyB();
 		const auto bodyATransform = bodyA.getWorldTransform();
@@ -246,7 +238,7 @@ namespace Smp
 		const auto anchorDelta = anchorBOrigin - anchorAOrigin;
 
 		spdlog::info(
-			"prototype root constraint diagnostic {} actor={} bodies='{}'/'{}' enabled={} bodyAkin={} bodyBkin={} bodyA=({:.3f},{:.3f},{:.3f}) bodyB=({:.3f},{:.3f},{:.3f}) anchorA=({:.3f},{:.3f},{:.3f}) anchorB=({:.3f},{:.3f},{:.3f}) anchorDelta=({:.3f},{:.3f},{:.3f}) velA=({:.3f},{:.3f},{:.3f}) velB=({:.3f},{:.3f},{:.3f})",
+			"system root constraint diagnostic {} actor={} bodies='{}'/'{}' enabled={} bodyAkin={} bodyBkin={} bodyA=({:.3f},{:.3f},{:.3f}) bodyB=({:.3f},{:.3f},{:.3f}) anchorA=({:.3f},{:.3f},{:.3f}) anchorB=({:.3f},{:.3f},{:.3f}) anchorDelta=({:.3f},{:.3f},{:.3f}) velA=({:.3f},{:.3f},{:.3f}) velB=({:.3f},{:.3f},{:.3f})",
 			a_phase,
 			static_cast<void*>(a_state.actor),
 			selected->bodyA,
@@ -277,7 +269,7 @@ namespace Smp
 			bodyB.getLinearVelocity().z());
 	}
 
-	void Fo4PhysicsWorld::UpdateMeshDisableStatesLocked(PrototypeActorState& a_state)
+	void Fo4PhysicsWorld::UpdateMeshDisableStatesLocked(Fo4SkinnedMeshSystem& a_state)
 	{
 		struct DisableGroup
 		{
@@ -289,14 +281,14 @@ namespace Smp
 		std::vector<DisableGroup> disableGroups;
 		const auto disableHairForWig = disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_state.actor);
 
-		for (auto& prototypeMesh : a_state.meshes) {
-			auto* body = prototypeMesh.body.get();
+		for (auto& meshRecord : a_state.meshes) {
+			auto* body = meshRecord.body.get();
 			if (!body) {
 				continue;
 			}
 
 			body->disabled_ = false;
-			if (disableHairForWig && prototypeMesh.domain == PrototypeBuildDomain::kHair) {
+			if (disableHairForWig && meshRecord.domain == BuildDomain::kHair) {
 				body->disabled_ = true;
 				continue;
 			}
@@ -386,7 +378,8 @@ namespace Smp
 	{
 		const auto windMagnitude = currentWind_.length();
 		if (windMagnitude <= SIMD_EPSILON) {
-			for (auto& actorState : prototypeActors_) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
 				actorState.currentWindFactor = 0.0F;
 			}
 			return;
@@ -420,8 +413,9 @@ namespace Smp
 			kMinGustSpeed,
 			kMaxGustSpeed);
 
-		for (auto& actorState : prototypeActors_) {
-			if (actorState.runtimeSoftSuspended) {
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
+			if (actorState.IsInactive()) {
 				actorState.currentWindFactor = 0.0F;
 				continue;
 			}
@@ -441,16 +435,16 @@ namespace Smp
 			}
 
 			const auto actorWind = currentWind_ * actorWindScale;
-			for (auto& prototypeBody : actorState.bodies) {
-				if (!prototypeBody.bone || prototypeBody.bone->m_windFactor <= 0.0F || prototypeBody.bone->m_rig.isStaticOrKinematicObject()) {
+			for (auto& boneRecord : actorState.bodies) {
+				if (!boneRecord.bone || boneRecord.bone->m_windFactor <= 0.0F || boneRecord.bone->m_rig.isStaticOrKinematicObject()) {
 					continue;
 				}
 
-				auto& body = prototypeBody.bone->m_rig;
+				auto& body = boneRecord.bone->m_rig;
 				const auto variation = randomizePerBoneWind_ ?
-					StableWindVariation(prototypeBody.boneName) :
+					StableWindVariation(boneRecord.boneName) :
 					1.0F;
-				const auto windFactor = prototypeBody.bone->m_windFactor * variation;
+				const auto windFactor = boneRecord.bone->m_windFactor * variation;
 				const auto origin = body.getWorldTransform().getOrigin();
 				const auto advectedTime =
 					windTime_ -
@@ -500,7 +494,7 @@ namespace Smp
 	void Fo4PhysicsWorld::RecordFrameMetrics(const float a_stepMs)
 	{
 		std::scoped_lock lock(lock_);
-		if (prototypeActors_.empty()) {
+		if (systems_.empty()) {
 			pendingWritebackMs_ = 0.0F;
 			pendingMainSyncMs_ = 0.0F;
 			pendingStepReadMs_ = 0.0F;
@@ -547,10 +541,11 @@ namespace Smp
 		std::size_t bodyCount = 0;
 		std::size_t meshCount = 0;
 		std::size_t activeActors = 0;
-		for (const auto& actorState : prototypeActors_) {
+		for (const auto& actorStatePointer : systems_) {
+			const auto& actorState = *actorStatePointer;
 			bodyCount += actorState.bodies.size();
 			meshCount += actorState.meshes.size();
-			if (actorState.HasActiveRuntime()) {
+			if (actorState.IsActive()) {
 				++activeActors;
 			}
 		}
@@ -646,7 +641,7 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::WriteBackPrototypeBodies(const WritebackSource a_source)
+	void Fo4PhysicsWorld::WriteBackSystems(const WritebackSource a_source)
 	{
 		const auto start = Clock::now();
 		bool wroteAny = false;
@@ -659,12 +654,13 @@ namespace Smp
 				return;
 			}
 
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 			const auto* player = RE::PlayerCharacter::GetSingleton();
 			const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
-			for (auto& actorState : prototypeActors_) {
-				if (actorState.runtimeSoftSuspended) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
+				if (actorState.IsInactive()) {
 					continue;
 				}
 				if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
@@ -676,61 +672,26 @@ namespace Smp
 				}
 				actorState.lastWritebackFrame = simulationFrame_;
 				actorState.lastWritebackSource = a_source;
-				std::vector<RE::NiNode*> writtenNodes;
-				const auto writeBody = [&](PrototypeBody& prototypeBody) {
-					if (!prototypeBody.bone || prototypeBody.bone->m_rig.isKinematicObject()) {
-						return;
-					}
-					if (prototypeBody.node && std::ranges::find(writtenNodes, prototypeBody.node) != writtenNodes.end()) {
-						skippedDuplicate = true;
-						spdlog::warn(
-							"skipping duplicate dynamic prototype writeback actor={} node={} nodeName='{}' buildGroup={} bone='{}' source={}",
-							static_cast<void*>(actorState.actor),
-							static_cast<void*>(prototypeBody.node),
-							std::string_view(prototypeBody.node->GetName()),
-							prototypeBody.buildGroup,
-							prototypeBody.boneName,
-							WritebackSourceName(a_source));
-						return;
-					}
-					prototypeBody.bone->writeTransform();
-					if (prototypeBody.node) {
-						writtenNodes.push_back(prototypeBody.node);
-					}
-					wroteAny = true;
-				};
-				if (!actorState.runtimes.empty()) {
-					for (auto& runtime : actorState.runtimes) {
-						if (runtime.pendingResetPhysicsWriteback) {
-							skippedDuplicate = true;
-							spdlog::trace(
-								"skipping first prototype writeback after reset physics read actor={} buildGroup={}",
-								static_cast<void*>(actorState.actor),
-								runtime.buildGroup);
-							runtime.pendingResetPhysicsWriteback = false;
-							continue;
-						}
-						for (auto* bone : runtime.bones) {
-							auto body = std::ranges::find_if(actorState.bodies, [bone](const PrototypeBody& a_body) {
-								return a_body.bone.get() == bone;
-							});
-							if (body == actorState.bodies.end()) {
-								continue;
-							}
-							writeBody(*body);
-						}
-					}
-				} else {
-					for (auto& prototypeBody : actorState.bodies) {
-						writeBody(prototypeBody);
-					}
+				const auto pendingReset = std::ranges::any_of(actorState.buildGroups, [](const BuildGroupRecord& a_runtime) {
+					return a_runtime.pendingResetPhysicsWriteback;
+				});
+				for (auto& runtime : actorState.buildGroups) {
+					runtime.pendingResetPhysicsWriteback = false;
 				}
+				if (pendingReset) {
+					skippedDuplicate = true;
+					continue;
+				}
+				wroteAny = wroteAny || std::ranges::any_of(actorState.bodies, [](const BoneRecord& a_body) {
+					return a_body.bone && !a_body.bone->m_rig.isKinematicObject();
+				});
+				actorState.writeTransform();
 			}
 		}
 		RecordWritebackMetric(ElapsedMs(start, Clock::now()), a_source, wroteAny, skippedDuplicate);
 	}
 
-	void Fo4PhysicsWorld::WriteBackPrototypeBodies(RE::Actor* a_actor, const WritebackSource a_source)
+	void Fo4PhysicsWorld::WriteBackSystems(RE::Actor* a_actor, const WritebackSource a_source)
 	{
 		const auto start = Clock::now();
 		bool wroteAny = false;
@@ -743,15 +704,16 @@ namespace Smp
 				return;
 			}
 
-			PruneInvalidPrototypeStatesLocked();
+			PruneInvalidSystemsLocked();
 			const auto* player = RE::PlayerCharacter::GetSingleton();
 			const auto skipFirstPersonPlayerPhysics = disableFirstPersonViewPhysics_ && IsPlayerFirstPersonView();
 
-			for (auto& actorState : prototypeActors_) {
+			for (auto& actorStatePointer : systems_) {
+				auto& actorState = *actorStatePointer;
 				if (actorState.actor != a_actor) {
 					continue;
 				}
-				if (actorState.runtimeSoftSuspended) {
+				if (actorState.IsInactive()) {
 					continue;
 				}
 				if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
@@ -761,55 +723,20 @@ namespace Smp
 				if (CanWriteBackFrame(actorState.lastWritebackFrame, a_source, simulationFrame_)) {
 					actorState.lastWritebackFrame = simulationFrame_;
 					actorState.lastWritebackSource = a_source;
-					std::vector<RE::NiNode*> writtenNodes;
-					const auto writeBody = [&](PrototypeBody& prototypeBody) {
-						if (!prototypeBody.bone || prototypeBody.bone->m_rig.isKinematicObject()) {
-							return;
-						}
-						if (prototypeBody.node && std::ranges::find(writtenNodes, prototypeBody.node) != writtenNodes.end()) {
-							skippedDuplicate = true;
-							spdlog::warn(
-								"skipping duplicate dynamic prototype writeback actor={} node={} nodeName='{}' buildGroup={} bone='{}' source={}",
-								static_cast<void*>(actorState.actor),
-								static_cast<void*>(prototypeBody.node),
-								std::string_view(prototypeBody.node->GetName()),
-								prototypeBody.buildGroup,
-								prototypeBody.boneName,
-								WritebackSourceName(a_source));
-							return;
-						}
-						prototypeBody.bone->writeTransform();
-						if (prototypeBody.node) {
-							writtenNodes.push_back(prototypeBody.node);
-						}
-						wroteAny = true;
-					};
-					if (!actorState.runtimes.empty()) {
-						for (auto& runtime : actorState.runtimes) {
-							if (runtime.pendingResetPhysicsWriteback) {
-								skippedDuplicate = true;
-								spdlog::trace(
-									"skipping first targeted prototype writeback after reset physics read actor={} buildGroup={}",
-									static_cast<void*>(actorState.actor),
-									runtime.buildGroup);
-								runtime.pendingResetPhysicsWriteback = false;
-								continue;
-							}
-							for (auto* bone : runtime.bones) {
-								auto body = std::ranges::find_if(actorState.bodies, [bone](const PrototypeBody& a_body) {
-									return a_body.bone.get() == bone;
-								});
-								if (body == actorState.bodies.end()) {
-									continue;
-								}
-								writeBody(*body);
-							}
-						}
-					} else {
-						for (auto& prototypeBody : actorState.bodies) {
-							writeBody(prototypeBody);
-						}
+					const auto pendingReset = std::ranges::any_of(actorState.buildGroups, [](const BuildGroupRecord& a_runtime) {
+						return a_runtime.pendingResetPhysicsWriteback;
+					});
+					for (auto& runtime : actorState.buildGroups) {
+						runtime.pendingResetPhysicsWriteback = false;
 					}
+					if (pendingReset) {
+						skippedDuplicate = true;
+						continue;
+					}
+					wroteAny = wroteAny || std::ranges::any_of(actorState.bodies, [](const BoneRecord& a_body) {
+						return a_body.bone && !a_body.bone->m_rig.isKinematicObject();
+					});
+					actorState.writeTransform();
 				} else {
 					skippedDuplicate = true;
 				}
