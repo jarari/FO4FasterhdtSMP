@@ -359,11 +359,6 @@ namespace Smp
 
 		const auto world = Smp::Fo4Transform::ToNiTransformNormalizedScale(transform, node_->world.scale);
 		node_->world = world;
-		if (node_->parent) {
-			node_->local = node_->parent->world.Invert() * world;
-		} else {
-			node_->local = world;
-		}
 
 		RefreshSkinWorldTransforms();
 	}
