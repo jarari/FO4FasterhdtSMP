@@ -1,6 +1,7 @@
 #include "Fo4PhysicsWorld.h"
 
 #include "Address.h"
+#include "ArmorBoneReference.h"
 #include "BSSkin.h"
 #include "ConfigPaths.h"
 #include "DefaultBBP.h"
@@ -26,6 +27,7 @@
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/bhkPickData.h"
 #include "RE/B/BSFlattenedBoneTree.h"
+#include "RE/B/BSModelDB.h"
 #include "RE/B/BSUtilities.h"
 #include "RE/B/BSTimer.h"
 #include "RE/C/CFilter.h"
@@ -143,35 +145,6 @@ namespace
 	};
 	static_assert(offsetof(Fo4BShkbAnimationGraph, characterInstance) == 0x1C8);
 
-	struct Fo4BSFaceGenModelMeshData
-	{
-		std::byte pad00[0x08]{};
-		RE::NiPointer<RE::NiAVObject> faceNode;
-		RE::NiPointer<RE::NiAVObject> geometry;
-		std::byte pad18[0x10]{};
-	};
-	static_assert(offsetof(Fo4BSFaceGenModelMeshData, faceNode) == 0x08);
-	static_assert(sizeof(Fo4BSFaceGenModelMeshData) == 0x28);
-
-	struct Fo4BSFaceGenModel
-	{
-		std::byte pad00[0x10]{};
-		Fo4BSFaceGenModelMeshData* modelMeshData{ nullptr };
-		std::byte pad18[0x08]{};
-	};
-	static_assert(offsetof(Fo4BSFaceGenModel, modelMeshData) == 0x10);
-	static_assert(sizeof(Fo4BSFaceGenModel) == 0x20);
-
-	struct Fo4BSFaceGenModelExtraData :
-		public RE::NiExtraData
-	{
-		Fo4BSFaceGenModel* model{ nullptr };
-		RE::BSFixedString bones[0x80];
-	};
-	static_assert(offsetof(Fo4BSFaceGenModelExtraData, model) == 0x18);
-	static_assert(offsetof(Fo4BSFaceGenModelExtraData, bones) == 0x20);
-	static_assert(sizeof(Fo4BSFaceGenModelExtraData) == 0x420);
-
 	float ElapsedMs(const Clock::time_point a_start, const Clock::time_point a_end)
 	{
 		return std::chrono::duration<float, std::milli>(a_end - a_start).count();
@@ -260,6 +233,8 @@ namespace
 		Smp::DefaultBBP::NameMap meshNameMap;
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
+		RE::NiPointer<RE::NiNode> destinationRoot;
+		std::vector<Smp::ArmorBoneReference> boneReferences;
 		Smp::PrototypeBuildDomain domain{ Smp::PrototypeBuildDomain::kHead };
 	};
 
@@ -267,6 +242,10 @@ namespace
 	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor);
 	bool IsReadableMemory(const void* a_address, std::size_t a_minSize);
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object);
+	RE::BSFlattenedBoneTree* FindFlattenedBoneTreeInScene(RE::NiAVObject* a_object);
+	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
+		RE::BSFlattenedBoneTree* a_tree,
+		std::string_view a_name);
 	void CollectParentInheritedExclusions(
 		RE::NiAVObject* a_object,
 		std::unordered_set<RE::NiAVObject*>& a_exclusionSet,
@@ -383,13 +362,20 @@ namespace
 		a_keys.push_back(std::move(key));
 	}
 
+	const char* GetHeadPartModelPath(RE::BGSHeadPart* a_headPart)
+	{
+		return a_headPart ?
+			static_cast<RE::BGSModelMaterialSwap*>(a_headPart)->GetModel() :
+			nullptr;
+	}
+
 	void AddHairHeadpartKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
 	{
 		if (!a_headPart || a_headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
 			return;
 		}
 
-		AddHeadpartKey(a_keys, a_headPart->ChargenModel.GetModel());
+		AddHeadpartKey(a_keys, GetHeadPartModelPath(a_headPart));
 		AddHeadpartKey(a_keys, std::string(std::string_view(a_headPart->formEditorID)));
 		for (auto* extraPart : a_headPart->extraParts) {
 			AddHairHeadpartKeys(extraPart, a_keys);
@@ -620,7 +606,8 @@ namespace
 
 	bool IsHeadCandidate(const Smp::LifecycleEventType a_type)
 	{
-		return a_type == Smp::LifecycleEventType::kHeadSkinAllGeometry ||
+		return a_type == Smp::LifecycleEventType::kActorHeadInitialized ||
+			a_type == Smp::LifecycleEventType::kHeadSkinAllGeometry ||
 			a_type == Smp::LifecycleEventType::kHeadSkinSingleGeometry;
 	}
 
@@ -687,28 +674,6 @@ namespace
 		return Smp::PhysicsXmlSelection::FindDirectPhysicsXmlExtraData(a_object);
 	}
 
-	RE::NiNode* ResolveFaceGenOriginalRoot(RE::NiAVObject* a_object)
-	{
-		if (!a_object || !a_object->extra) {
-			return nullptr;
-		}
-
-		for (auto* extra : *a_object->extra) {
-			if (!extra || !Smp::PhysicsNamesEqual(std::string_view(extra->name), "FMD")) {
-				continue;
-			}
-
-			auto* fmd = static_cast<Fo4BSFaceGenModelExtraData*>(extra);
-			auto* meshData = fmd->model ? fmd->model->modelMeshData : nullptr;
-			auto* faceNode = meshData ? meshData->faceNode.get() : nullptr;
-			if (auto* root = faceNode ? faceNode->IsNode() : nullptr) {
-				return root;
-			}
-		}
-
-		return nullptr;
-	}
-
 	void AppendHeadCandidate(
 		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates,
 		RE::NiAVObject* a_object,
@@ -716,7 +681,9 @@ namespace
 		Smp::DefaultBBP::NameMap a_meshNameMap,
 		RE::NiAVObject* a_sourceObject,
 		RE::NiNode* a_sourceRoot,
-		const Smp::PrototypeBuildDomain a_domain)
+		const Smp::PrototypeBuildDomain a_domain,
+		RE::NiNode* a_destinationRoot = nullptr,
+		std::vector<Smp::ArmorBoneReference> a_boneReferences = {})
 	{
 		if (!a_object || a_path.empty()) {
 			return;
@@ -738,8 +705,205 @@ namespace
 			.meshNameMap = std::move(a_meshNameMap),
 			.sourceObject = a_sourceObject,
 			.sourceRoot = a_sourceRoot,
+			.destinationRoot = a_destinationRoot,
+			.boneReferences = std::move(a_boneReferences),
 			.domain = a_domain,
 		});
+	}
+
+	struct HeadPartSourceSelection
+	{
+		std::filesystem::path path;
+		RE::BSGeometry* geometry{ nullptr };
+	};
+
+	RE::BSGeometry* FindFirstGeometry(RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return nullptr;
+		}
+		if (auto* geometry = a_object->IsGeometry()) {
+			return geometry;
+		}
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return nullptr;
+		}
+		for (auto& child : node->children) {
+			if (auto* geometry = FindFirstGeometry(child.get())) {
+				return geometry;
+			}
+		}
+		return nullptr;
+	}
+
+	std::optional<HeadPartSourceSelection> FindHeadPartSourceSelection(RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return std::nullopt;
+		}
+		if (auto path = FindDirectPhysicsXmlExtraData(a_object)) {
+			return HeadPartSourceSelection{
+				.path = std::move(*path),
+				.geometry = FindFirstGeometry(a_object),
+			};
+		}
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return std::nullopt;
+		}
+		for (auto& child : node->children) {
+			if (auto selection = FindHeadPartSourceSelection(child.get())) {
+				return selection;
+			}
+		}
+		return std::nullopt;
+	}
+
+	RE::BSGeometry* ResolveLiveHeadPartGeometry(
+		RE::NiAVObject* a_faceObject,
+		RE::BGSHeadPart* a_headPart,
+		const std::string_view a_sourceGeometryName)
+	{
+		if (!a_faceObject || !a_headPart) {
+			return nullptr;
+		}
+		if (!a_headPart->formEditorID.empty()) {
+			if (auto* object = a_faceObject->GetObjectByName(a_headPart->formEditorID)) {
+				if (auto* geometry = FindFirstGeometry(object)) {
+					return geometry;
+				}
+			}
+		}
+		if (!a_sourceGeometryName.empty()) {
+			if (auto* object = a_faceObject->GetObjectByName(RE::BSFixedString(std::string(a_sourceGeometryName)))) {
+				return FindFirstGeometry(object);
+			}
+		}
+		return nullptr;
+	}
+
+	void AppendLiveHairHeadPartCandidates(
+		RE::Actor* a_actor,
+		RE::NiAVObject* a_faceObject,
+		RE::NiNode* a_destinationRoot,
+		RE::BGSHeadPart* a_headPart,
+		std::unordered_set<RE::BGSHeadPart*>& a_visited,
+		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
+	{
+		if (!a_actor || !a_faceObject || !a_destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
+			return;
+		}
+
+		const auto* modelPath = GetHeadPartModelPath(a_headPart);
+		if (modelPath && *modelPath) {
+			// Matches BSFaceGenModel::LoadModelMesh: loadLevel 3 with FaceGen,
+			// process, and texture loading enabled.
+			RE::BSModelDB::DBTraits::ArgsType args{};
+			args.loadLevel = 3;
+			args.faceGenModel = true;
+			args.performProcess = true;
+			args.loadTextures = true;
+
+			RE::NiPointer<RE::NiNode> sourceRoot;
+			const auto error = RE::BSModelDB::Demand(modelPath, std::addressof(sourceRoot), args);
+			if (error != RE::BSResource::ErrorCode::kNone || !sourceRoot) {
+				spdlog::warn(
+					"failed to load current hair headpart model actor={} headPart={:08X} nif='{}' error={}",
+					static_cast<void*>(a_actor),
+					a_headPart->GetFormID(),
+					modelPath,
+					std::to_underlying(error));
+			} else if (auto selection = FindHeadPartSourceSelection(sourceRoot.get())) {
+				const auto sourceGeometryName = selection->geometry ?
+					std::string(std::string_view(selection->geometry->GetName())) :
+					std::string{};
+				auto* liveGeometry = ResolveLiveHeadPartGeometry(a_faceObject, a_headPart, sourceGeometryName);
+				if (!liveGeometry) {
+					spdlog::debug(
+						"could not pair current hair headpart model with live FaceGen geometry actor={} headPart={:08X} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}'",
+						static_cast<void*>(a_actor),
+						a_headPart->GetFormID(),
+						std::string_view(a_headPart->formEditorID),
+						modelPath,
+						sourceGeometryName,
+						selection->path.string());
+				} else {
+					auto references = Smp::CaptureArmorBoneReferences(sourceRoot.get(), a_destinationRoot, modelPath);
+					auto* actorBoneTree = FindFlattenedBoneTreeInScene(a_destinationRoot);
+					for (auto& reference : references) {
+						reference.isArmorOnly = FindFlattenedBoneByName(actorBoneTree, reference.name) == nullptr;
+					}
+
+					Smp::DefaultBBP::NameMap meshNameMap;
+					const auto liveGeometryName = std::string(std::string_view(liveGeometry->GetName()));
+					if (!sourceGeometryName.empty() && !liveGeometryName.empty()) {
+						meshNameMap[sourceGeometryName].emplace(liveGeometryName);
+					}
+
+					const auto previousCandidateCount = a_candidates.size();
+					AppendHeadCandidate(
+						a_candidates,
+						liveGeometry,
+						std::move(selection->path),
+						std::move(meshNameMap),
+						liveGeometry,
+						nullptr,
+						Smp::PrototypeBuildDomain::kHair,
+						a_destinationRoot,
+						std::move(references));
+					if (a_candidates.size() != previousCandidateCount) {
+						spdlog::debug(
+							"resolved current hair headpart physics actor={} headPart={:08X} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}' references={}",
+							static_cast<void*>(a_actor),
+							a_headPart->GetFormID(),
+							modelPath,
+							a_candidates.back().path.string(),
+							sourceGeometryName,
+							static_cast<void*>(liveGeometry),
+							liveGeometryName,
+							a_candidates.back().boneReferences.size());
+					}
+				}
+			}
+		}
+
+		for (auto* extraPart : a_headPart->extraParts) {
+			AppendLiveHairHeadPartCandidates(
+				a_actor,
+				a_faceObject,
+				a_destinationRoot,
+				extraPart,
+				a_visited,
+				a_candidates);
+		}
+	}
+
+	void CollectLiveHairHeadPartCandidates(
+		RE::Actor* a_actor,
+		RE::NiAVObject* a_faceObject,
+		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
+	{
+		auto* npc = a_actor ? a_actor->GetNPC() : nullptr;
+		auto* actorObject = a_actor ? a_actor->Get3D(false) : nullptr;
+		auto* destinationRoot = actorObject ? actorObject->IsNode() : nullptr;
+		if (!npc || !a_faceObject || !destinationRoot) {
+			return;
+		}
+
+		std::unordered_set<RE::BGSHeadPart*> visited;
+		for (auto* headPart : npc->GetHeadParts(true)) {
+			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
+				continue;
+			}
+			AppendLiveHairHeadPartCandidates(
+				a_actor,
+				a_faceObject,
+				destinationRoot,
+				headPart,
+				visited,
+				a_candidates);
+		}
 	}
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(const Smp::LifecycleEvent& a_event)
@@ -1029,42 +1193,26 @@ namespace
 		}
 
 		const auto isHair = a_parentIsHair || IsHairSubtree(a_object, a_hairKeys);
-		auto* originalRoot = ResolveFaceGenOriginalRoot(a_object);
-		auto* sourceObject = originalRoot ? static_cast<RE::NiAVObject*>(originalRoot) : a_object;
 		if (auto directXml = FindDirectPhysicsXmlExtraData(a_object)) {
 			AppendHeadCandidate(
 				a_candidates,
 				a_object,
 				*directXml,
 				{},
-				sourceObject,
-				originalRoot ? originalRoot : a_object->IsNode(),
+				a_object,
+				a_object->IsNode(),
 				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 			return;
 		}
 
-		if (originalRoot) {
-			if (auto directXml = FindDirectPhysicsXmlExtraData(originalRoot)) {
-				AppendHeadCandidate(
-					a_candidates,
-					a_object,
-					*directXml,
-					{},
-					sourceObject,
-					originalRoot,
-					isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
-				return;
-			}
-		}
-
-		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(sourceObject)) {
+		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(a_object)) {
 			AppendHeadCandidate(
 				a_candidates,
 				a_object,
 				defaultBbp->physicsXml,
 				std::move(defaultBbp->meshNameMap),
-				sourceObject,
-				originalRoot ? originalRoot : sourceObject->IsNode(),
+				a_object,
+				a_object->IsNode(),
 				isHair ? Smp::PrototypeBuildDomain::kHair : Smp::PrototypeBuildDomain::kHead);
 			return;
 		}
@@ -1821,6 +1969,9 @@ namespace
 		if (referenceLocals.empty()) {
 			return false;
 		}
+		const auto hasHavokReference = [&](const std::string_view a_name) {
+			return referenceLocals.contains(Smp::NormalizePhysicsName(a_name));
+		};
 
 		// Emulate BSFlattenedBoneTree::UpdateBoneArray without mutating the live
 		// tree. The reference implementation replaces matching Ni locals with
@@ -1959,7 +2110,12 @@ namespace
 			RE::NiTransform canonicalWorld;
 			bool resolved = false;
 			const auto reference = capturedReferences.find(Smp::NormalizePhysicsName(matchedBone.name));
-			if (reference != capturedReferences.end() && reference->second->isArmorOnly) {
+			if (hasHavokReference(matchedBone.name)) {
+				resolved = findActorWorld(matchedBone.name, canonicalWorld);
+				if (resolved) {
+					++appliedActorBones;
+				}
+			} else if (reference != capturedReferences.end() && reference->second->isArmorOnly) {
 				resolved = computeCapturedWorld(*reference->second, canonicalWorld);
 				if (resolved) {
 					++appliedArmorBones;
@@ -2003,11 +2159,14 @@ namespace
 			unresolvedRequiredBones.size());
 		for (const auto name : unresolvedRequiredBones) {
 			spdlog::warn(
-				"cannot build armor constraint reference pose because required bone '{}' is absent from both Havok reference skeleton and captured armor hierarchy actor={}",
+				"skipping armor physics bone '{}' because it has neither an actor reference transform nor a captured NIF-local armor hierarchy actor={}",
 				name,
 				static_cast<void*>(a_actor));
 		}
-		return requiredMatchedBones > 0 && unresolvedRequiredBones.empty();
+		std::erase_if(a_matchedBones, [](const MatchedSkinBone& a_bone) {
+			return !a_bone.hasCanonicalWorld;
+		});
+		return requiredMatchedBones > unresolvedRequiredBones.size();
 	}
 
 	void RestoreSavedLocalPoses(std::vector<SavedNodeLocalPose>& a_savedPoses, RE::NiAVObject* a_updateRoot)

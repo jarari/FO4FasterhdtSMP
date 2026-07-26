@@ -36,33 +36,6 @@ namespace
 	static_assert(offsetof(Fo4BSFaceGenObjectData, positionCount) == 0x20);
 	static_assert(offsetof(Fo4BSFaceGenObjectData, vertexCount) == 0x24);
 
-	struct Fo4BSFaceGenModelMeshData
-	{
-		std::byte pad00[0x08]{};
-		RE::NiPointer<RE::NiAVObject> faceNode;
-		RE::NiPointer<RE::NiAVObject> geometry;
-		std::byte pad18[0x10]{};
-	};
-	static_assert(offsetof(Fo4BSFaceGenModelMeshData, faceNode) == 0x08);
-	static_assert(offsetof(Fo4BSFaceGenModelMeshData, geometry) == 0x10);
-	static_assert(sizeof(Fo4BSFaceGenModelMeshData) == 0x28);
-
-	struct Fo4BSFaceGenModel
-	{
-		std::byte pad00[0x10]{};
-		Fo4BSFaceGenModelMeshData* modelMeshData{ nullptr };
-		std::byte pad18[0x08]{};
-	};
-	static_assert(offsetof(Fo4BSFaceGenModel, modelMeshData) == 0x10);
-	static_assert(sizeof(Fo4BSFaceGenModel) == 0x20);
-
-	struct Fo4BSFaceGenModelExtraData :
-		public RE::NiExtraData
-	{
-		Fo4BSFaceGenModel* model{ nullptr };
-	};
-	static_assert(offsetof(Fo4BSFaceGenModelExtraData, model) == 0x18);
-
 	hdt::BoundingSphere ToBoundingSphere(const RE::NiBound& a_bound)
 	{
 		return hdt::BoundingSphere(
@@ -299,37 +272,10 @@ namespace
 #endif
 	}
 
-	RE::BSGeometry* ResolveFaceGenOriginalGeometry(RE::BSGeometry* a_geometry)
-	{
-		if (!a_geometry || !a_geometry->extra) {
-			return nullptr;
-		}
-
-		for (auto* extra : *a_geometry->extra) {
-			if (!extra || !Smp::PhysicsNamesEqual(std::string_view(extra->name), "FMD")) {
-				continue;
-			}
-
-			const auto* fmd = static_cast<const Fo4BSFaceGenModelExtraData*>(extra);
-			const auto* meshData = fmd->model ? fmd->model->modelMeshData : nullptr;
-			auto* originalObject = meshData ? meshData->geometry.get() : nullptr;
-			return originalObject ? originalObject->IsGeometry() : nullptr;
-		}
-
-		return nullptr;
-	}
-
 	std::string ResolveGeometryName(RE::BSGeometry* a_geometry)
 	{
 		if (!a_geometry) {
 			return {};
-		}
-
-		if (auto* originalGeometry = ResolveFaceGenOriginalGeometry(a_geometry)) {
-			const auto originalName = originalGeometry->GetName();
-			if (!originalName.empty()) {
-				return std::string(originalName);
-			}
 		}
 
 		const auto name = a_geometry->GetName();

@@ -103,7 +103,7 @@ namespace Smp
 		}
 		phaseStart = Clock::now();
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
-		if (a_domain == PrototypeBuildDomain::kArmor) {
+		if (!a_event.armorBoneReferences.empty()) {
 			CollectMatchedArmorReferenceBones(a_event.armorBoneReferences, a_summary.boneNames, actorRoot, matchedBones);
 		}
 		auto* engineSkeletonRoot = a_event.destinationRoot;

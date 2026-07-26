@@ -2,30 +2,24 @@
 
 namespace Smp::Address
 {
-	namespace
-	{
-		const REL::ID MainOnIdleID{ 633524, 2228917 };
-		const REL::ID BSFaceGenAddHeadPartOnActorID{ 913780, 2209545 };
-	}
-
 	REL::Relocation<ActorCalculateLOS_t*> ActorCalculateLOS{ REL::ID{ 1324305, 2230201 } };
 
-	REL::Relocation<std::uintptr_t> MainOnIdle{ MainOnIdleID };
+	REL::Relocation<std::uintptr_t> MainOnIdle{ REL::ID{ 633524, 2228917 } };
 	REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects{ REL::ID{ 224320, 2194381 } };
 	REL::Relocation<std::uintptr_t> BipedAnimAttachSkinnedObject{ REL::ID{ 1575810, 2194388 } };
 	REL::Relocation<std::uintptr_t> BipedAnimAttachToParent{ REL::ID{ 1370428, 2194378 } };
 	REL::Relocation<std::uintptr_t> BipedAnimRemovePart{ REL::ID{ 575576, 2194342 } };
 	REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
-	REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ BSFaceGenAddHeadPartOnActorID };
+	REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ REL::ID{ 913780, 2209545 } };
 	REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 2209387 } };
 	REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu{ REL::ID{ 411372, 2223366 } };
 
 	const IDOffset MainOnIdleSwapCall{
-		MainOnIdleID,
+		REL::ID{ 633524, 2228917 },
 		VariantOffset{ 0x6EC, 0xCDC }
 	};
 	const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall{
-		BSFaceGenAddHeadPartOnActorID,
+		REL::ID{ 913780, 2209545 },
 		VariantOffset{ 0xFD, 0x107 }
 	};
 

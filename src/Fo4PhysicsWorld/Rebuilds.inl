@@ -682,19 +682,6 @@ namespace Smp
 			return;
 		}
 
-		if (auto* pendingActorRebuild = FindPendingActorRebuildLocked(a_event.actor, false);
-			pendingActorRebuild && PrototypeArmorRecordsIncludeHairSlot(pendingActorRebuild->armorRecords)) {
-			const auto removed = std::erase_if(pendingHeadRebuilds_, [&](const PendingHeadRebuild& a_pending) {
-				const auto resolvedActor = a_pending.actorHandle.get();
-				return resolvedActor && resolvedActor.get() == a_event.actor;
-			});
-			spdlog::debug(
-				"discarded head physics rebuild for actor={} while hair-slot armor rebuild is pending removedPendingHeads={}",
-				static_cast<void*>(a_event.actor),
-				removed);
-			return;
-		}
-
 		auto handle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_event.actor);
 		if (!handle) {
 			return;
@@ -1427,24 +1414,46 @@ namespace Smp
 				++it;
 				continue;
 			}
+			auto* biped = actor->GetBiped(false).get();
+			if (!biped) {
+				biped = actor->GetBiped().get();
+			}
+			if (biped) {
+				for (auto pendingActorIt = pendingActorRebuilds_.begin(); pendingActorIt != pendingActorRebuilds_.end();) {
+					const auto pendingActor = pendingActorIt->actorHandle.get();
+					if (!pendingActor || pendingActor.get() != actor || pendingActorIt->firstPerson) {
+						++pendingActorIt;
+						continue;
+					}
+
+					const auto removed = std::erase_if(
+						pendingActorIt->armorRecords,
+						[biped](const PrototypeArmorRecord& a_record) {
+							if (a_record.bipedObject == RE::BIPED_OBJECT::kTotal) {
+								return true;
+							}
+							const auto* bipObject = biped->GetBipObject(a_record.bipedObject);
+							return !bipObject || !bipObject->partClone;
+						});
+					if (removed > 0) {
+						spdlog::debug(
+							"discarded pending armor records absent from the live biped before head rebuild actor={} removed={} remaining={}",
+							static_cast<void*>(actor),
+							removed,
+							pendingActorIt->armorRecords.size());
+					}
+					if (pendingActorIt->armorRecords.empty() && !pendingActorIt->forceArmorRescan) {
+						pendingActorIt = pendingActorRebuilds_.erase(pendingActorIt);
+						continue;
+					}
+					++pendingActorIt;
+				}
+			}
 			const auto actorRebuildPending = std::ranges::any_of(pendingActorRebuilds_, [actor](const PendingActorRebuild& a_pending) {
 				const auto resolvedPendingActor = a_pending.actorHandle.get();
 				return resolvedPendingActor && resolvedPendingActor.get() == actor;
 			});
 			if (actorRebuildPending) {
-				const auto hairSlotArmorRebuildPending = std::ranges::any_of(pendingActorRebuilds_, [actor](const PendingActorRebuild& a_pending) {
-					const auto resolvedPendingActor = a_pending.actorHandle.get();
-					return resolvedPendingActor &&
-						resolvedPendingActor.get() == actor &&
-						PrototypeArmorRecordsIncludeHairSlot(a_pending.armorRecords);
-				});
-				if (hairSlotArmorRebuildPending) {
-					spdlog::debug(
-						"dropping pending head physics rebuild for actor={} because a hair-slot armor rebuild owns the slot",
-						static_cast<void*>(actor));
-					it = pendingHeadRebuilds_.erase(it);
-					continue;
-				}
 				++it;
 				continue;
 			}

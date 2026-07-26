@@ -506,7 +506,12 @@ namespace Smp
 		const auto hairKeys = BuildHairHeadpartKeys(a_event.actor);
 		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
 		const auto headPartIsHair = a_event.headPart && a_event.headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
-		CollectHeadPhysicsXmlSelections(touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject, hairKeys, candidates, headPartIsHair);
+		CollectLiveHairHeadPartCandidates(a_event.actor, faceObject, candidates);
+		CollectHeadPhysicsXmlSelections(
+			touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject,
+			hairKeys,
+			candidates,
+			headPartIsHair);
 		if (candidates.empty()) {
 			if (!actorState.headPartRecords.empty()) {
 				if (!touchedHeadGeometry) {
@@ -541,7 +546,7 @@ namespace Smp
 		std::uint32_t skippedExisting = 0;
 		std::uint32_t skippedDuplicateXml = 0;
 		std::vector<std::pair<PrototypeBuildDomain, std::string>> scannedPhysicsFiles;
-		for (const auto& candidate : candidates) {
+		for (auto& candidate : candidates) {
 			const auto selectedXml = candidate.path.string();
 			if (selectedXml.empty()) {
 				continue;
@@ -629,6 +634,18 @@ namespace Smp
 			scopedEvent.object = candidate.object;
 			scopedEvent.sourceObject = candidate.sourceObject.get();
 			scopedEvent.sourceRoot = candidate.sourceRoot ? candidate.sourceRoot->IsNode() : nullptr;
+			if (candidate.destinationRoot) {
+				scopedEvent.destinationRoot = candidate.destinationRoot.get();
+			}
+			if (!candidate.boneReferences.empty()) {
+				FinalizeArmorSkinBindings(
+					a_event.actor,
+					candidate.object,
+					candidate.destinationRoot.get(),
+					false,
+					candidate.boneReferences);
+				scopedEvent.armorBoneReferences = candidate.boneReferences;
+			}
 			const auto buildResult = BuildPrototypeBodiesLocked(actorState, scopedEvent, *selectedSummary, candidate.meshNameMap, candidate.domain);
 			if (buildResult.succeeded) {
 				actorState.headPartRecords.push_back({

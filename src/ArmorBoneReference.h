@@ -38,8 +38,4 @@ namespace Smp
 		RE::NiNode* a_skeletonRoot,
 		bool a_firstPerson,
 		std::vector<ArmorBoneReference>& a_references);
-	void RestoreArmorBoneLocalPose(
-		RE::NiAVObject* a_attachedObject,
-		RE::NiAVObject* a_actorRoot,
-		const std::vector<ArmorBoneReference>& a_references);
 }
