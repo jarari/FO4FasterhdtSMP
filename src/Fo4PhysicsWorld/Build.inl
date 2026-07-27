@@ -50,19 +50,10 @@ namespace Smp
 		}
 
 		std::vector<MatchedSkinBone> matchedBones;
-		// Armor may be added while other groups are simulating. Build its
-		// canonical pose out-of-band so their live writeback targets stay intact.
-		const auto detachedArmorBuild = a_domain == BuildDomain::kArmor;
 		auto phaseStart = Clock::now();
-		const auto actorSkeletonSearchExclusions = BuildBipedPartExclusions(a_event);
-		const auto knownAttachmentNodes = BuildKnownAttachmentNodeSet(a_event);
 		auto* actorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
 		if (!actorRoot && a_event.actor) {
 			actorRoot = a_event.actor->Get3D();
-		}
-		auto* actorRootNode = actorRoot ? actorRoot->IsNode() : nullptr;
-		if (actorRootNode && !detachedArmorBuild) {
-			NiObject::UpdateWorldData(actorRootNode, true);
 		}
 		timing.actorTreePrepMs += ElapsedMs(phaseStart, Clock::now());
 		if (a_domain == BuildDomain::kArmor && !a_summary.meshDescriptors.empty()) {
@@ -85,22 +76,6 @@ namespace Smp
 				return result;
 			}
 		}
-		std::vector<SavedNodeLocalPose> savedBuildPoses;
-		if (actorRootNode && !detachedArmorBuild) {
-			phaseStart = Clock::now();
-			if (!ApplyHavokReferencePose(
-					a_event.actor,
-					actorRootNode,
-					actorSkeletonSearchExclusions,
-					knownAttachmentNodes,
-					savedBuildPoses)) {
-				spdlog::debug(
-					"system physics build used current actor pose because Havok reference pose was unavailable actor={} root={}",
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(actorRootNode));
-			}
-			timing.referencePoseMs += ElapsedMs(phaseStart, Clock::now());
-		}
 		phaseStart = Clock::now();
 		CollectMatchedSkinBones(a_event.object, a_summary.boneNames, meshNames, matchedBones);
 		if (!a_event.armorBoneReferences.empty()) {
@@ -112,37 +87,35 @@ namespace Smp
 		}
 		ResolveEnginePreparedBones(matchedBones, a_summary.boneNames, actorRoot, engineSkeletonRoot);
 		timing.xmlSkinResolveMs += ElapsedMs(phaseStart, Clock::now());
-		if (detachedArmorBuild) {
-			const auto referencePoseStart = Clock::now();
-			auto* flattened = FindFlattenedBoneTreeInScene(engineSkeletonRoot);
-			if (!flattened) {
-				flattened = FindFlattenedBoneTreeInScene(actorRoot);
-			}
-			if (!BuildDetachedHavokReferencePose(
-					a_event.actor,
-					flattened,
-					a_event.armorBoneReferences,
-					matchedBones)) {
-				spdlog::debug(
-					"aborting system armor physics build because a complete detached Havok reference pose is unavailable actor={} root={}",
-					static_cast<void*>(a_event.actor),
-					static_cast<void*>(actorRootNode));
-				timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
-				logBuildTiming("incomplete-detached-reference-pose");
-				return {};
-			}
-			timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
-		}
 		if (matchedBones.empty()) {
 			spdlog::debug(
 				"system physics XML matched no skin bones for {} actor={} object={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
-			RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
 			logBuildTiming("no-matched-bones");
 			return {};
 		}
+		const auto referencePoseStart = Clock::now();
+		auto* flattened = FindFlattenedBoneTreeInScene(engineSkeletonRoot);
+		if (!flattened) {
+			flattened = FindFlattenedBoneTreeInScene(actorRoot);
+		}
+		if (!BuildDetachedHavokReferencePose(
+				a_event.actor,
+				flattened,
+				a_event.armorBoneReferences,
+				matchedBones)) {
+			spdlog::debug(
+				"aborting system physics build because a detached Havok reference pose is unavailable actor={} root={} domain={}",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(actorRoot),
+				BuildDomainName(a_domain));
+			timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
+			logBuildTiming("unavailable-detached-reference-pose");
+			return {};
+		}
+		timing.referencePoseMs += ElapsedMs(referencePoseStart, Clock::now());
 
 		std::uint32_t created = 0;
 		std::uint32_t dynamicBodies = 0;
@@ -358,9 +331,6 @@ namespace Smp
 			return lhsDepth < rhsDepth;
 		});
 
-		if (!detachedArmorBuild) {
-			ResetBuildGroupToCurrentPoseLocked(a_state, buildGroup, stagedBodies);
-		}
 		std::vector<MeshRecord> stagedMeshes;
 		phaseStart = Clock::now();
 		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, a_meshSourceRoots, buildGroup, a_domain, stagedBodies, stagedMeshes);
@@ -372,7 +342,6 @@ namespace Smp
 				static_cast<void*>(a_state.actor),
 				buildGroup);
 			result.cpuCopyPending = true;
-			RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
 			logBuildTiming("cpu-copy-pending", buildGroup);
 			return result;
 		}
@@ -442,10 +411,6 @@ namespace Smp
 		BuildConstraintsLocked(a_state, a_summary, buildGroup, a_domain, {}, stagedConstraints);
 		for (auto& stagedConstraint : stagedConstraints) {
 			a_state.constraints.push_back(std::move(stagedConstraint));
-		}
-		RestoreSavedLocalPoses(savedBuildPoses, actorRootNode);
-		if (!detachedArmorBuild) {
-			ResetBuildGroupToCurrentPoseLocked(a_state, buildGroup);
 		}
 		if (a_commitToBullet) {
 			ActivateBuildGroupLocked(a_state, buildGroup);

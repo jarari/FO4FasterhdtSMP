@@ -247,10 +247,6 @@ namespace
 	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
 		RE::BSFlattenedBoneTree* a_tree,
 		std::string_view a_name);
-	void CollectParentInheritedExclusions(
-		RE::NiAVObject* a_object,
-		std::unordered_set<RE::NiAVObject*>& a_exclusionSet,
-		std::vector<RE::NiAVObject*>& a_exclusions);
 
 	float DistanceSquared(const RE::NiPoint3& a_lhs, const RE::NiPoint3& a_rhs)
 	{
@@ -925,10 +921,6 @@ namespace
 					std::size_t referenceCount = 0;
 					if (selection) {
 						auto references = Smp::CaptureArmorBoneReferences(sourceRoot.get(), a_destinationRoot, modelPath);
-						auto* actorBoneTree = FindFlattenedBoneTreeInScene(a_destinationRoot);
-						for (auto& reference : references) {
-							reference.isArmorOnly = FindFlattenedBoneByName(actorBoneTree, reference.name) == nullptr;
-						}
 						referenceCount = references.size();
 						AppendHeadCandidate(
 							a_candidates,
@@ -1133,53 +1125,6 @@ namespace
 		}
 
 		return RE::BIPED_OBJECT::kTotal;
-	}
-
-	std::vector<RE::NiAVObject*> BuildBipedPartExclusions(const Smp::LifecycleEvent& a_event)
-	{
-		std::vector<RE::NiAVObject*> exclusions;
-		auto* primaryActorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
-		auto* thirdPersonActorRoot = a_event.actor ? a_event.actor->Get3D(false) : nullptr;
-		auto* firstPersonActorRoot = a_event.actor ? a_event.actor->Get3D(true) : nullptr;
-		auto addExclusion = [&exclusions](RE::NiAVObject* a_object) {
-			if (a_object && std::ranges::find(exclusions, a_object) == exclusions.end()) {
-				exclusions.push_back(a_object);
-			}
-		};
-		auto addArmorExclusion = [&](RE::NiAVObject* a_object) {
-			if (!a_object || a_object == primaryActorRoot || a_object == thirdPersonActorRoot || a_object == firstPersonActorRoot) {
-				return;
-			}
-			addExclusion(a_object);
-		};
-
-		addArmorExclusion(a_event.object);
-		addArmorExclusion(a_event.sourceObject);
-		addArmorExclusion(a_event.sourceRoot);
-
-		auto* biped = ResolveEventBiped(a_event);
-		if (!biped) {
-			return exclusions;
-		}
-
-		for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
-			const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
-			auto* bipObject = biped->GetBipObject(bipedObject);
-			if (bipObject && bipObject->partClone) {
-				addExclusion(bipObject->partClone.get());
-			}
-		}
-
-		std::unordered_set<RE::NiAVObject*> exclusionSet(exclusions.begin(), exclusions.end());
-		CollectParentInheritedExclusions(primaryActorRoot, exclusionSet, exclusions);
-		if (thirdPersonActorRoot != primaryActorRoot) {
-			CollectParentInheritedExclusions(thirdPersonActorRoot, exclusionSet, exclusions);
-		}
-		if (firstPersonActorRoot != primaryActorRoot && firstPersonActorRoot != thirdPersonActorRoot) {
-			CollectParentInheritedExclusions(firstPersonActorRoot, exclusionSet, exclusions);
-		}
-
-		return exclusions;
 	}
 
 	bool HasEquippedHairSlotObject(RE::Actor* a_actor)
@@ -1411,12 +1356,6 @@ namespace
 		std::vector<SkinWorldTransformSlot> skinWorldTransforms;
 	};
 
-	struct SavedNodeLocalPose
-	{
-		RE::NiNode* node{ nullptr };
-		RE::NiTransform local;
-	};
-
 	MatchedSkinBone* FindMatchedSkinBone(std::vector<MatchedSkinBone>& a_nodes, RE::NiNode* a_node)
 	{
 		const auto found = std::ranges::find_if(a_nodes, [a_node](const auto& a_entry) {
@@ -1453,17 +1392,6 @@ namespace
 			.originalWorldTransform = a_skin->worldTransforms[a_index],
 			.originalRootNode = a_skin->rootNode,
 		});
-	}
-
-	bool IsExcludedSkeletonSearchObject(
-		RE::NiAVObject* a_object,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects)
-	{
-		if (!a_object) {
-			return true;
-		}
-
-		return std::ranges::find(a_excludedObjects, a_object) != a_excludedObjects.end();
 	}
 
 	bool IsNodeInTree(RE::NiAVObject* a_object, RE::NiNode* a_needle)
@@ -1512,119 +1440,6 @@ namespace
 		}
 
 		return false;
-	}
-
-	void CollectParentInheritedExclusions(
-		RE::NiAVObject* a_object,
-		std::unordered_set<RE::NiAVObject*>& a_exclusionSet,
-		std::vector<RE::NiAVObject*>& a_exclusions)
-	{
-		if (!a_object) {
-			return;
-		}
-
-		if (a_object->parent && a_exclusionSet.contains(a_object->parent)) {
-			if (a_exclusionSet.insert(a_object).second) {
-				a_exclusions.push_back(a_object);
-			}
-		}
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			CollectParentInheritedExclusions(child.get(), a_exclusionSet, a_exclusions);
-		}
-	}
-
-	void CollectObjectTree(RE::NiAVObject* a_object, std::unordered_set<RE::NiAVObject*>& a_result)
-	{
-		if (!a_object || !a_result.insert(a_object).second) {
-			return;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* childObject = child.get()) {
-				CollectObjectTree(childObject, a_result);
-			}
-		}
-	}
-
-	std::unordered_set<RE::NiAVObject*> BuildKnownAttachmentNodeSet(const Smp::LifecycleEvent& a_event)
-	{
-		std::vector<RE::NiAVObject*> roots;
-		auto* primaryActorRoot = a_event.actor ? a_event.actor->Get3D(a_event.firstPerson) : nullptr;
-		auto* thirdPersonActorRoot = a_event.actor ? a_event.actor->Get3D(false) : nullptr;
-		auto* firstPersonActorRoot = a_event.actor ? a_event.actor->Get3D(true) : nullptr;
-		auto addRoot = [&roots](RE::NiAVObject* a_object) {
-			if (a_object && std::ranges::find(roots, a_object) == roots.end()) {
-				roots.push_back(a_object);
-			}
-		};
-		auto addAttachmentRoot = [&](RE::NiAVObject* a_object) {
-			if (!a_object || a_object == primaryActorRoot || a_object == thirdPersonActorRoot || a_object == firstPersonActorRoot) {
-				return;
-			}
-			addRoot(a_object);
-		};
-
-		addAttachmentRoot(a_event.object);
-		addAttachmentRoot(a_event.sourceObject);
-		addAttachmentRoot(a_event.sourceRoot);
-		if (auto* biped = ResolveEventBiped(a_event)) {
-			for (auto index = 0; index < std::to_underlying(RE::BIPED_OBJECT::kTotal); ++index) {
-				const auto bipedObject = static_cast<RE::BIPED_OBJECT>(index);
-				auto* bipObject = biped->GetBipObject(bipedObject);
-				if (bipObject && bipObject->partClone) {
-					addRoot(bipObject->partClone.get());
-				}
-			}
-		}
-		std::unordered_set<RE::NiAVObject*> result;
-		for (auto* root : roots) {
-			if (IsProbablyValidNiObject(root)) {
-				CollectObjectTree(root, result);
-			}
-		}
-		return result;
-	}
-
-	RE::NiNode* FindNodeByNameExcludingKnownNodes(
-		RE::NiAVObject* a_root,
-		const std::string_view a_name,
-		const std::vector<RE::NiAVObject*>& a_excludedObjects,
-		const std::unordered_set<RE::NiAVObject*>& a_knownAttachmentNodes)
-	{
-		if (!a_root ||
-			a_name.empty() ||
-			IsExcludedSkeletonSearchObject(a_root, a_excludedObjects) ||
-			a_knownAttachmentNodes.contains(a_root)) {
-			return nullptr;
-		}
-
-		if (const auto name = a_root->GetName(); !name.empty() && Smp::PhysicsNamesEqual(name, a_name)) {
-			return a_root->IsNode();
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindNodeByNameExcludingKnownNodes(child.get(), a_name, a_excludedObjects, a_knownAttachmentNodes)) {
-				return found;
-			}
-		}
-
-		return nullptr;
 	}
 
 	const Smp::PhysicsBoneDescriptor* FindBoneDescriptor(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
@@ -1942,67 +1757,6 @@ namespace
 		return setup ? setup->animationSkeleton.ptr : nullptr;
 	}
 
-	bool HasSavedLocalPose(const std::vector<SavedNodeLocalPose>& a_savedPoses, RE::NiNode* a_node)
-	{
-		return std::ranges::any_of(a_savedPoses, [a_node](const SavedNodeLocalPose& a_entry) {
-			return a_entry.node == a_node;
-		});
-	}
-
-	bool ApplyHavokReferencePose(
-		RE::Actor* a_actor,
-		RE::NiNode* a_root,
-		const std::vector<RE::NiAVObject*>& a_actorSkeletonSearchExclusions,
-		const std::unordered_set<RE::NiAVObject*>& a_knownAttachmentNodes,
-		std::vector<SavedNodeLocalPose>& a_savedPoses)
-	{
-		const auto* skeleton = GetHavokReferenceSkeleton(a_actor);
-		if (!skeleton || !a_root || skeleton->bones.size <= 0 || skeleton->referencePose.size <= 0) {
-			return false;
-		}
-
-		const auto count = std::min(skeleton->bones.size, skeleton->referencePose.size);
-		std::uint32_t applied = 0;
-		a_savedPoses.reserve(a_savedPoses.size() + static_cast<std::size_t>(count));
-		for (std::int32_t index = 0; index < count; ++index) {
-			const auto* boneName = HkStringPtrData(skeleton->bones.data[index].name);
-			if (!boneName || *boneName == '\0') {
-				continue;
-			}
-
-			auto* boneNode = FindNodeByNameExcludingKnownNodes(
-				a_root,
-				boneName,
-				a_actorSkeletonSearchExclusions,
-				a_knownAttachmentNodes);
-			if (!boneNode) {
-				continue;
-			}
-
-			if (!HasSavedLocalPose(a_savedPoses, boneNode)) {
-				a_savedPoses.push_back({
-					.node = boneNode,
-					.local = boneNode->local,
-				});
-			}
-			boneNode->local = ToNiTransform(skeleton->referencePose.data[index]);
-			++applied;
-		}
-
-		if (applied > 0) {
-			Smp::NiObject::UpdateWorldData(a_root, true);
-			spdlog::debug(
-				"applied Havok reference pose for system build actor={} root={} bones={} matched={}",
-				static_cast<void*>(a_actor),
-				static_cast<void*>(a_root),
-				count,
-				applied);
-			return true;
-		}
-
-		return false;
-	}
-
 	RE::NiTransform ComposeFo4NiTransform(
 		const RE::NiTransform& a_parentWorld,
 		const RE::NiTransform& a_local)
@@ -2023,11 +1777,11 @@ namespace
 	bool BuildDetachedHavokReferencePose(
 		RE::Actor* a_actor,
 		RE::BSFlattenedBoneTree* a_flattened,
-		const std::vector<Smp::ArmorBoneReference>& a_armorBoneReferences,
+		const std::vector<Smp::ArmorBoneReference>& a_boneReferences,
 		std::vector<MatchedSkinBone>& a_matchedBones)
 	{
-		// Constraint frames still need a canonical pose, but hot armor attachment
-		// must not expose that pose through the actor's live scene graph.
+		// Constraint frames need a canonical pose, but system construction must
+		// never expose that pose through the actor's live scene graph.
 		const auto* skeleton = GetHavokReferenceSkeleton(a_actor);
 		if (!skeleton ||
 			!a_flattened ||
@@ -2126,8 +1880,8 @@ namespace
 		};
 
 		std::unordered_map<std::string, const Smp::ArmorBoneReference*> capturedReferences;
-		capturedReferences.reserve(a_armorBoneReferences.size());
-		for (const auto& reference : a_armorBoneReferences) {
+		capturedReferences.reserve(a_boneReferences.size());
+		for (const auto& reference : a_boneReferences) {
 			if (!reference.name.empty()) {
 				capturedReferences.try_emplace(Smp::NormalizePhysicsName(reference.name), std::addressof(reference));
 			}
@@ -2227,7 +1981,7 @@ namespace
 		}
 
 		spdlog::debug(
-			"built detached armor reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
+			"built detached Havok reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_flattened),
 			havokBoneCount,
@@ -2243,7 +1997,7 @@ namespace
 			unresolvedRequiredBones.size());
 		for (const auto name : unresolvedRequiredBones) {
 			spdlog::debug(
-				"skipping armor physics bone '{}' because it has neither an actor reference transform nor a captured NIF-local armor hierarchy actor={}",
+				"skipping system physics bone '{}' because it has neither an actor reference transform nor a captured NIF-local attachment hierarchy actor={}",
 				name,
 				static_cast<void*>(a_actor));
 		}
@@ -2251,20 +2005,6 @@ namespace
 			return !a_bone.hasCanonicalWorld;
 		});
 		return requiredMatchedBones > unresolvedRequiredBones.size();
-	}
-
-	void RestoreSavedLocalPoses(std::vector<SavedNodeLocalPose>& a_savedPoses, RE::NiAVObject* a_updateRoot)
-	{
-		if (a_savedPoses.empty()) {
-			return;
-		}
-		for (auto& saved : a_savedPoses) {
-			if (saved.node) {
-				saved.node->local = saved.local;
-			}
-		}
-		a_savedPoses.clear();
-		Smp::NiObject::UpdateWorldData(a_updateRoot, true);
 	}
 
 	bool IsDynamicXmlBone(const Smp::PhysicsXmlSummary& a_summary, const std::string_view a_name)
