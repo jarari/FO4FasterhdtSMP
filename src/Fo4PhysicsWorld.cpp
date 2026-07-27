@@ -40,6 +40,7 @@
 #include "RE/M/MenuOpenCloseEvent.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/P/PlayerCamera.h"
+#include "RE/P/PlayerCharacter.h"
 #include "RE/S/Sky.h"
 #include "RE/T/TESObjectCELL.h"
 #include "RE/T/TESNPC.h"
@@ -369,6 +370,48 @@ namespace
 			nullptr;
 	}
 
+	std::span<RE::BGSHeadPart*> GetRuntimeHeadParts(const RE::TESNPC* a_npc)
+	{
+		if (!a_npc) {
+			return {};
+		}
+
+		using HeadPartArray = RE::BSTArray<RE::BGSHeadPart*>;
+		using AlternateHeadPartMap = RE::BSTHashMap<const RE::TESNPC*, HeadPartArray*>;
+		// The runtime map stores pointers to separately allocated arrays. Modeling
+		// the mapped value inline changes the scatter-table entry stride.
+		static REL::Relocation<AlternateHeadPartMap*> alternateHeadParts{
+			RE::ID::TESNPC::AlternateHeadPartListMap,
+			-0x8
+		};
+
+		const auto findAlternate = [&]() -> HeadPartArray* {
+			auto& map = *alternateHeadParts;
+			const auto found = map.find(a_npc);
+			return found != map.end() ? found->second : nullptr;
+		};
+		const auto toSpan = [](HeadPartArray* a_headParts) {
+			return a_headParts ?
+				std::span<RE::BGSHeadPart*>{ a_headParts->data(), a_headParts->size() } :
+				std::span<RE::BGSHeadPart*>{};
+		};
+
+		if (a_npc->IsPlayer()) {
+			const auto* player = RE::PlayerCharacter::GetSingleton();
+			if (player && player->charGenRace && player->charGenRace != a_npc->formRace) {
+				if (auto* alternate = findAlternate()) {
+					return toSpan(alternate);
+				}
+			}
+		} else if (a_npc->originalRace && a_npc->originalRace != a_npc->formRace) {
+			return toSpan(findAlternate());
+		}
+
+		return a_npc->headParts && a_npc->numHeadParts > 0 ?
+			std::span<RE::BGSHeadPart*>{ a_npc->headParts, static_cast<std::size_t>(a_npc->numHeadParts) } :
+			std::span<RE::BGSHeadPart*>{};
+	}
+
 	void AddHeadpartClosureKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
 	{
 		if (!a_headPart) {
@@ -390,7 +433,7 @@ namespace
 			return keys;
 		}
 
-		for (auto* headPart : npc->GetHeadParts(true)) {
+		for (auto* headPart : GetRuntimeHeadParts(npc)) {
 			if (headPart && headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair) {
 				AddHeadpartClosureKeys(headPart, keys);
 			}
@@ -937,7 +980,7 @@ namespace
 			return;
 		}
 
-		for (auto* headPart : npc->GetHeadParts(true)) {
+		for (auto* headPart : GetRuntimeHeadParts(npc)) {
 			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
 				continue;
 			}
