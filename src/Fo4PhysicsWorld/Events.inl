@@ -57,7 +57,59 @@ namespace Smp
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
-			if (auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson)) {
+			const auto bipedObject = ResolveEventBipedObject(a_event);
+			auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson);
+			auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
+			if (!a_event.object && a_event.type == LifecycleEventType::kArmorDetachBegin) {
+				spdlog::trace(
+					"deferred null-object armor detach begin actor={} biped={} bipedObject={} queueDetach={} until post-remove live-slot validation",
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(a_event.biped),
+					std::to_underlying(bipedObject),
+					a_event.queueDetach);
+				return RE::BSEventNotifyControl::kContinue;
+			}
+			if (!a_event.object &&
+				a_event.type == LifecycleEventType::kArmorDetachEnd &&
+				bipedObject != RE::BIPED_OBJECT::kTotal) {
+				auto* liveBiped = a_event.actor->GetBiped(a_event.firstPerson).get();
+				if (!liveBiped) {
+					liveBiped = a_event.actor->GetBiped().get();
+				}
+				auto* liveBipObject = liveBiped ? liveBiped->GetBipObject(bipedObject) : nullptr;
+				auto* liveObject = liveBipObject ? liveBipObject->partClone.get() : nullptr;
+				const auto recordMatchesLiveObject = [bipedObject, liveObject](const ArmorPhysicsRecord& a_record) {
+					if (!liveObject || a_record.bipedObject != bipedObject) {
+						return false;
+					}
+					const auto matchesAttached =
+						a_record.attachedObject &&
+						(a_record.attachedObject.get() == liveObject ||
+						 IsObjectInTree(a_record.attachedObject.get(), liveObject) ||
+						 IsObjectInTree(liveObject, a_record.attachedObject.get()));
+					const auto matchesSource =
+						a_record.sourceObject &&
+						(a_record.sourceObject.get() == liveObject ||
+						 IsObjectInTree(a_record.sourceObject.get(), liveObject) ||
+						 IsObjectInTree(liveObject, a_record.sourceObject.get()));
+					return matchesAttached || matchesSource;
+				};
+				const auto liveObjectStillTracked =
+					(actorState && std::ranges::any_of(actorState->armorRecords, recordMatchesLiveObject)) ||
+					(pending && std::ranges::any_of(pending->armorRecords, recordMatchesLiveObject));
+				if (liveObjectStillTracked) {
+					spdlog::debug(
+						"ignored stale null-object armor detach end actor={} eventBiped={} liveBiped={} bipedObject={} liveObject={} because the live slot still owns a tracked armor system",
+						static_cast<void*>(a_event.actor),
+						static_cast<void*>(a_event.biped),
+						static_cast<void*>(liveBiped),
+						std::to_underlying(bipedObject),
+						static_cast<void*>(liveObject));
+					return RE::BSEventNotifyControl::kContinue;
+				}
+			}
+
+			if (pending) {
 				const auto before = pending->armorRecords.size();
 				auto remainingRecords = CollectQueuedArmorRecordsForDetachLocked(a_event);
 				const auto after = remainingRecords.size();
@@ -79,7 +131,6 @@ namespace Smp
 				}
 			}
 
-			auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState) {
 				spdlog::trace(
 					"ignored untracked armor detach candidate {} actor={} object={}",
@@ -90,7 +141,6 @@ namespace Smp
 			}
 
 			bool cleared = false;
-			const auto bipedObject = ResolveEventBipedObject(a_event);
 			bool clearedHairSlotArmor = IsHairBipedObject(bipedObject);
 			if (a_event.object) {
 				auto buildGroups = CollectBuildGroupsForObjectLocked(*actorState, a_event.object);
