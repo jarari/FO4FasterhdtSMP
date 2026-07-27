@@ -530,6 +530,11 @@ namespace Smp
 	std::vector<std::uint64_t> Fo4PhysicsWorld::CollectBuildGroupsForObjectLocked(const Fo4SkinnedMeshSystem& a_state, RE::NiAVObject* a_object) const
 	{
 		std::vector<std::uint64_t> buildGroups;
+		const auto appendGroup = [&buildGroups](const std::uint64_t a_buildGroup) {
+			if (a_buildGroup != 0 && std::ranges::find(buildGroups, a_buildGroup) == buildGroups.end()) {
+				buildGroups.push_back(a_buildGroup);
+			}
+		};
 		if (!a_object) {
 			return buildGroups;
 		}
@@ -562,9 +567,7 @@ namespace Smp
 			}
 
 			for (const auto buildGroup : record.buildGroups) {
-				if (buildGroup != 0 && std::ranges::find(buildGroups, buildGroup) == buildGroups.end()) {
-					buildGroups.push_back(buildGroup);
-				}
+				appendGroup(buildGroup);
 			}
 		}
 		if (!buildGroups.empty()) {
@@ -576,18 +579,20 @@ namespace Smp
 				continue;
 			}
 
-			if (std::ranges::find(buildGroups, meshRecord.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(meshRecord.buildGroup);
-			}
+			appendGroup(meshRecord.buildGroup);
 		}
 
 		for (const auto& boneRecord : a_state.bodies) {
-			if (boneRecord.buildGroup == 0 || !boneRecord.node || !IsNodeInTree(a_object, boneRecord.node)) {
+			if (!boneRecord.node || !IsNodeInTree(a_object, boneRecord.node)) {
 				continue;
 			}
 
-			if (std::ranges::find(buildGroups, boneRecord.buildGroup) == buildGroups.end()) {
-				buildGroups.push_back(boneRecord.buildGroup);
+			if (boneRecord.buildGroups.empty()) {
+				appendGroup(boneRecord.buildGroup);
+				continue;
+			}
+			for (const auto buildGroup : boneRecord.buildGroups) {
+				appendGroup(buildGroup);
 			}
 		}
 

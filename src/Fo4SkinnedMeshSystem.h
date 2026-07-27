@@ -101,6 +101,7 @@ namespace Smp
 	{
 		std::uint64_t buildGroup{ 0 };
 		BuildDomain domain{ BuildDomain::kArmor };
+		std::string sourceKey;
 		std::size_t descriptorIndex{ 0 };
 		std::string bodyA;
 		std::string bodyB;
@@ -120,6 +121,7 @@ namespace Smp
 		std::string name;
 		RE::BSGeometry* geometry{ nullptr };
 		std::uint64_t buildGroup{ 0 };
+		std::string sourceKey;
 		std::size_t descriptorIndex{ 0 };
 		RE::BIPED_OBJECT bipedObject{ RE::BIPED_OBJECT::kTotal };
 		BuildDomain domain{ BuildDomain::kArmor };

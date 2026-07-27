@@ -539,93 +539,136 @@ namespace Smp
 		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
+		std::vector<std::uint64_t> staleHairGroups;
+		for (const auto& record : actorState.headPartRecords) {
+			if (record.domain != BuildDomain::kHair || record.buildGroup == 0) {
+				continue;
+			}
+			const auto recordXmlKey = ConfigPaths::LowerString(record.physicsXmlPath);
+			const auto stillCurrent = std::ranges::any_of(candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
+				return a_candidate.domain == BuildDomain::kHair &&
+					a_candidate.object == record.object.get() &&
+					std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_path) {
+						return ConfigPaths::LowerString(a_path.string()) == recordXmlKey;
+					});
+			});
+			if (!stillCurrent && std::ranges::find(staleHairGroups, record.buildGroup) == staleHairGroups.end()) {
+				staleHairGroups.push_back(record.buildGroup);
+			}
+		}
+		if (!staleHairGroups.empty()) {
+			ClearBuildGroupsLocked(actorState, staleHairGroups);
+			spdlog::debug(
+				"cleared {} stale hair closure build groups for actor={} before rebuilding current headpart state",
+				staleHairGroups.size(),
+				static_cast<void*>(a_event.actor));
+		}
+
 		std::uint32_t built = 0;
 		std::uint32_t skippedExisting = 0;
 		std::uint32_t skippedDuplicateXml = 0;
 		bool cpuCopyPending = false;
 		std::vector<std::pair<BuildDomain, std::string>> scannedPhysicsFiles;
 		for (auto& candidate : candidates) {
-			const auto selectedXml = candidate.path.string();
-			if (selectedXml.empty()) {
+			std::vector<std::pair<std::filesystem::path, std::string>> selectedXmls;
+			for (const auto& path : candidate.paths) {
+				const auto selectedXml = path.string();
+				if (selectedXml.empty()) {
+					continue;
+				}
+				const auto selectedXmlKey = ConfigPaths::LowerString(selectedXml);
+				const auto duplicatePhysicsFile = std::ranges::any_of(scannedPhysicsFiles, [&](const auto& a_entry) {
+					return a_entry.first == candidate.domain && a_entry.second == selectedXmlKey;
+				});
+				if (duplicatePhysicsFile) {
+					++skippedDuplicateXml;
+					continue;
+				}
+				const auto trackedByAnotherObject = std::ranges::any_of(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
+					return a_record.object.get() != candidate.object &&
+						a_record.domain == candidate.domain &&
+						a_record.buildGroup != 0 &&
+						ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
+				});
+				if (trackedByAnotherObject) {
+					++skippedDuplicateXml;
+					continue;
+				}
+				scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
+				selectedXmls.emplace_back(path, std::move(selectedXmlKey));
+			}
+			if (selectedXmls.empty()) {
 				continue;
 			}
-			const auto selectedXmlKey = ConfigPaths::LowerString(selectedXml);
-			const auto duplicatePhysicsFile = std::ranges::any_of(scannedPhysicsFiles, [&](const auto& a_entry) {
-				return a_entry.first == candidate.domain && a_entry.second == selectedXmlKey;
-			});
-			if (duplicatePhysicsFile) {
-				++skippedDuplicateXml;
-				spdlog::debug(
-					"previous head part generated {} physics system for XML {}, skipping duplicate object={}",
-					BuildDomainName(candidate.domain),
-					selectedXml,
-					static_cast<void*>(candidate.object));
-				continue;
-			}
-			scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
 
-			const auto existing = std::ranges::find_if(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
-				return a_record.object.get() == candidate.object &&
-					a_record.sourceObject.get() == candidate.sourceObject.get() &&
-					a_record.domain == candidate.domain &&
-					ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
+			std::uint64_t trackedBuildGroup = 0;
+			const auto candidateAlreadyBuilt = std::ranges::all_of(selectedXmls, [&](const auto& a_selectedXml) {
+				const auto record = std::ranges::find_if(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
+					return a_record.object.get() == candidate.object &&
+						a_record.sourceObject.get() == candidate.sourceObject.get() &&
+						a_record.domain == candidate.domain &&
+						a_record.buildGroup != 0 &&
+						ConfigPaths::LowerString(a_record.physicsXmlPath) == a_selectedXml.second;
+				});
+				if (record == actorState.headPartRecords.end()) {
+					return false;
+				}
+				if (trackedBuildGroup == 0) {
+					trackedBuildGroup = record->buildGroup;
+				}
+				return record->buildGroup == trackedBuildGroup;
 			});
-			if (existing != actorState.headPartRecords.end() && existing->buildGroup != 0) {
-				++skippedExisting;
-				spdlog::debug(
-					"geometry is already added as {} head part actor={} object={} XML={} buildGroup={}",
+			if (candidateAlreadyBuilt) {
+				skippedExisting += static_cast<std::uint32_t>(selectedXmls.size());
+				continue;
+			}
+
+			PhysicsXmlSummary mergedSummary;
+			std::vector<std::filesystem::path> loadedPaths;
+			std::string sourceKey;
+			for (const auto& [path, pathKey] : selectedXmls) {
+				spdlog::info(
+					"loading {} system physics XML {} for actor={} object={}",
 					BuildDomainName(candidate.domain),
+					path.string(),
 					static_cast<void*>(a_event.actor),
-					static_cast<void*>(candidate.object),
-					selectedXml,
-					existing->buildGroup);
-				continue;
-			}
-
-			const auto duplicateTrackedXml = std::ranges::any_of(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
-				return a_record.object.get() != candidate.object &&
-					a_record.domain == candidate.domain &&
-					!a_record.physicsXmlPath.empty() &&
-					ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey &&
-					a_record.buildGroup != 0;
-			});
-			if (duplicateTrackedXml) {
-				++skippedDuplicateXml;
-				spdlog::debug(
-					"previous tracked head part generated {} physics system for XML {}, skipping duplicate object={}",
-					BuildDomainName(candidate.domain),
-					selectedXml,
 					static_cast<void*>(candidate.object));
+				const auto selectedSummary = loader->LoadSummary(path.string());
+				if (!selectedSummary) {
+					spdlog::warn(
+						"skipping {} physics XML because it failed to load: {}",
+						BuildDomainName(candidate.domain),
+						path.string());
+					continue;
+				}
+				MergePhysicsSummary(mergedSummary, *selectedSummary);
+				loadedPaths.push_back(path);
+				if (!sourceKey.empty()) {
+					sourceKey.push_back('|');
+				}
+				sourceKey.append(pathKey);
+			}
+			if (loadedPaths.empty()) {
 				continue;
 			}
 
 			std::vector<std::uint64_t> replacedGroups;
 			for (const auto& record : actorState.headPartRecords) {
-				if (record.object.get() == candidate.object && record.buildGroup != 0 && std::ranges::find(replacedGroups, record.buildGroup) == replacedGroups.end()) {
+				if (record.object.get() == candidate.object &&
+					record.domain == candidate.domain &&
+					record.buildGroup != 0 &&
+					std::ranges::find(replacedGroups, record.buildGroup) == replacedGroups.end()) {
 					replacedGroups.push_back(record.buildGroup);
 				}
 			}
 			if (!replacedGroups.empty()) {
 				ClearBuildGroupsLocked(actorState, replacedGroups);
 				spdlog::debug(
-					"cleared stale tracked {} headpart groups={} for actor={} object={} before rebuilding XML {}",
-					BuildDomainName(candidate.domain),
+					"cleared {} partial {} headpart build groups for actor={} object={} before single-pass rebuild",
 					replacedGroups.size(),
+					BuildDomainName(candidate.domain),
 					static_cast<void*>(a_event.actor),
-					static_cast<void*>(candidate.object),
-					selectedXml);
-			}
-
-			spdlog::info(
-				"loading {} system physics XML {} for actor={} object={}",
-				BuildDomainName(candidate.domain),
-				selectedXml,
-				static_cast<void*>(a_event.actor),
-				static_cast<void*>(candidate.object));
-			const auto selectedSummary = loader->LoadSummary(selectedXml);
-			if (!selectedSummary) {
-				spdlog::warn("skipping {} physics candidate because selected XML failed to load: {}", BuildDomainName(candidate.domain), selectedXml);
-				continue;
+					static_cast<void*>(candidate.object));
 			}
 
 			auto scopedEvent = a_event;
@@ -641,27 +684,36 @@ namespace Smp
 					candidate.object,
 					candidate.destinationRoot.get(),
 					false,
-					candidate.boneReferences);
+					candidate.boneReferences,
+					candidate.liveBindingObjects);
 				scopedEvent.armorBoneReferences = candidate.boneReferences;
 			}
+			const auto requestedBuildGroup =
+				candidate.paths.size() > 1 || !candidate.boneReferences.empty() ?
+				++actorState.nextBuildGroup :
+				0;
 			const auto buildResult = BuildSystemObjectsLocked(
 				actorState,
 				scopedEvent,
-				*selectedSummary,
+				mergedSummary,
 				candidate.meshNameMap,
 				candidate.domain,
 				true,
-				candidate.meshSourceRoots);
+				candidate.meshSourceRoots,
+				requestedBuildGroup,
+				sourceKey);
 			cpuCopyPending = cpuCopyPending || buildResult.cpuCopyPending;
 			if (buildResult.succeeded) {
-				actorState.headPartRecords.push_back({
-					.domain = candidate.domain,
-					.physicsXmlPath = selectedXml,
-					.object = candidate.object,
-					.sourceObject = candidate.sourceObject,
-					.sourceRoot = candidate.sourceRoot,
-					.buildGroup = buildResult.buildGroup,
-				});
+				for (const auto& loadedPath : loadedPaths) {
+					actorState.headPartRecords.push_back({
+						.domain = candidate.domain,
+						.physicsXmlPath = loadedPath.string(),
+						.object = candidate.object,
+						.sourceObject = candidate.sourceObject,
+						.sourceRoot = candidate.sourceRoot,
+						.buildGroup = buildResult.buildGroup,
+					});
+				}
 				++built;
 			}
 		}

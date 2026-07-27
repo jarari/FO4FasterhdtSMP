@@ -229,9 +229,10 @@ namespace
 	struct HeadPhysicsXmlBuildCandidate
 	{
 		RE::NiAVObject* object{ nullptr };
-		std::filesystem::path path;
+		std::vector<std::filesystem::path> paths;
 		Smp::DefaultBBP::NameMap meshNameMap;
 		std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
+		std::vector<RE::NiPointer<RE::NiAVObject>> liveBindingObjects;
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
 		RE::NiPointer<RE::NiNode> destinationRoot;
@@ -734,7 +735,9 @@ namespace
 		const auto duplicate = std::ranges::any_of(a_candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
 			return a_candidate.object == a_object &&
 				a_candidate.domain == a_domain &&
-				Smp::ConfigPaths::LowerString(a_candidate.path.string()) == normalizedPath;
+				std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_existingPath) {
+					return Smp::ConfigPaths::LowerString(a_existingPath.string()) == normalizedPath;
+				});
 		});
 		if (duplicate) {
 			return;
@@ -742,7 +745,7 @@ namespace
 
 		a_candidates.push_back({
 			.object = a_object,
-			.path = std::move(a_path),
+			.paths = { std::move(a_path) },
 			.meshNameMap = std::move(a_meshNameMap),
 			.sourceObject = a_sourceObject,
 			.sourceRoot = a_sourceRoot,
@@ -827,17 +830,116 @@ namespace
 		return nullptr;
 	}
 
+	struct HairHeadPartClosureSources
+	{
+		RE::NiAVObject* object{ nullptr };
+		RE::NiNode* destinationRoot{ nullptr };
+		Smp::DefaultBBP::NameMap meshNameMap;
+		std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
+		std::vector<RE::NiPointer<RE::NiAVObject>> liveBindingObjects;
+		std::vector<std::filesystem::path> physicsXmlPaths;
+		std::vector<Smp::ArmorBoneReference> boneReferences;
+	};
+
+	void AppendHairClosurePhysicsXml(
+		std::vector<std::filesystem::path>& a_paths,
+		const std::filesystem::path& a_path)
+	{
+		if (a_path.empty()) {
+			return;
+		}
+
+		const auto key = Smp::ConfigPaths::LowerString(a_path.string());
+		if (std::ranges::none_of(a_paths, [&](const auto& a_existing) {
+				return Smp::ConfigPaths::LowerString(a_existing.string()) == key;
+			})) {
+			a_paths.push_back(a_path);
+		}
+	}
+
+	void MergePhysicsSummary(
+		Smp::PhysicsXmlSummary& a_target,
+		const Smp::PhysicsXmlSummary& a_source)
+	{
+		if (a_target.path.empty()) {
+			a_target.path = a_source.path;
+		}
+		a_target.bones += a_source.bones;
+		a_target.boneDefaults += a_source.boneDefaults;
+		a_target.perVertexShapes += a_source.perVertexShapes;
+		a_target.perTriangleShapes += a_source.perTriangleShapes;
+		a_target.shapes += a_source.shapes;
+		a_target.constraintGroups += a_source.constraintGroups;
+		a_target.constraints += a_source.constraints;
+		a_target.validSystemRoot = a_target.validSystemRoot || a_source.validSystemRoot;
+
+		for (const auto& boneName : a_source.boneNames) {
+			if (boneName.empty()) {
+				continue;
+			}
+			if (std::ranges::none_of(a_target.boneNames, [&](const std::string& a_existing) {
+					return Smp::PhysicsNamesEqual(a_existing, boneName);
+				})) {
+				a_target.boneNames.push_back(boneName);
+			}
+
+			const auto explicitDescriptor = std::ranges::find_if(
+				a_source.boneDescriptors,
+				[&](const Smp::PhysicsBoneDescriptor& a_descriptor) {
+					return Smp::PhysicsNamesEqual(a_descriptor.name, boneName);
+				});
+			const auto alreadyDefined = std::ranges::any_of(
+				a_target.boneDescriptors,
+				[&](const Smp::PhysicsBoneDescriptor& a_descriptor) {
+					return Smp::PhysicsNamesEqual(a_descriptor.name, boneName);
+				});
+			if (alreadyDefined) {
+				continue;
+			}
+			if (explicitDescriptor != a_source.boneDescriptors.end()) {
+				a_target.boneDescriptors.push_back(*explicitDescriptor);
+			} else if (a_source.defaultBoneDescriptor) {
+				auto descriptor = *a_source.defaultBoneDescriptor;
+				descriptor.name = boneName;
+				a_target.boneDescriptors.push_back(std::move(descriptor));
+			}
+		}
+
+		a_target.meshDescriptors.insert(
+			a_target.meshDescriptors.end(),
+			a_source.meshDescriptors.begin(),
+			a_source.meshDescriptors.end());
+		a_target.constraintDescriptors.insert(
+			a_target.constraintDescriptors.end(),
+			a_source.constraintDescriptors.begin(),
+			a_source.constraintDescriptors.end());
+	}
+
+	void MergeHairClosureBoneReferences(
+		std::vector<Smp::ArmorBoneReference>& a_target,
+		std::vector<Smp::ArmorBoneReference> a_source)
+	{
+		for (auto& reference : a_source) {
+			const auto key = Smp::ConfigPaths::LowerString(reference.name);
+			const auto existing = std::ranges::find_if(a_target, [&](const auto& a_current) {
+				return Smp::ConfigPaths::LowerString(a_current.name) == key;
+			});
+			if (existing == a_target.end()) {
+				a_target.push_back(std::move(reference));
+			} else {
+				existing->isSkinned = existing->isSkinned || reference.isSkinned;
+			}
+		}
+	}
+
 	void AppendLiveHairHeadPartCandidates(
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_faceObject,
-		RE::NiNode* a_destinationRoot,
 		RE::BGSHeadPart* a_headPart,
 		std::unordered_set<RE::BGSHeadPart*>& a_visited,
-		Smp::DefaultBBP::NameMap& a_meshNameMap,
-		std::vector<RE::NiPointer<RE::NiAVObject>>& a_meshSourceRoots,
-		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
+		HairHeadPartClosureSources& a_closure)
 	{
-		if (!a_actor || !a_faceObject || !a_destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
+		if (!a_actor || !a_faceObject || !a_closure.destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
 			return;
 		}
 
@@ -887,20 +989,43 @@ namespace
 				meshSourceRoot = sourceRoot;
 			}
 
-			if (sourceRoot && meshSourceRoot) {
-				auto selection = FindHeadPartSourceSelection(sourceRoot.get());
+			if (meshSourceRoot) {
+				auto selection = FindHeadPartSourceSelection(meshSourceRoot.get());
+				if (!selection && sourceRoot && sourceRoot.get() != meshSourceRoot.get()) {
+					selection = FindHeadPartSourceSelection(sourceRoot.get());
+				}
 				auto* sourceGeometry = selection && selection->geometry ?
 					selection->geometry :
 					FindFirstGeometry(meshSourceRoot.get());
-				if (std::ranges::none_of(a_meshSourceRoots, [&](const auto& a_root) {
+				if (std::ranges::none_of(a_closure.meshSourceRoots, [&](const auto& a_root) {
 						return a_root.get() == meshSourceRoot.get();
 					})) {
-					a_meshSourceRoots.emplace_back(meshSourceRoot.get());
+					a_closure.meshSourceRoots.emplace_back(meshSourceRoot.get());
 				}
 				const auto sourceGeometryName = sourceGeometry ?
 					std::string(std::string_view(sourceGeometry->GetName())) :
 					std::string{};
 				auto* liveGeometry = ResolveLiveHeadPartGeometry(a_faceObject, a_headPart, sourceGeometryName);
+				if (liveGeometry && !a_closure.object) {
+					a_closure.object = liveGeometry;
+				}
+				if (liveGeometry &&
+					std::ranges::none_of(a_closure.liveBindingObjects, [&](const auto& a_object) {
+						return a_object.get() == liveGeometry;
+					})) {
+					a_closure.liveBindingObjects.emplace_back(liveGeometry);
+				}
+
+				auto references = Smp::CaptureArmorBoneReferences(
+					meshSourceRoot.get(),
+					a_closure.destinationRoot,
+					modelPath);
+				const auto referenceCount = references.size();
+				MergeHairClosureBoneReferences(a_closure.boneReferences, std::move(references));
+
+				if (selection) {
+					AppendHairClosurePhysicsXml(a_closure.physicsXmlPaths, selection->path);
+				}
 				if (!liveGeometry) {
 					spdlog::debug(
 						"current hair headpart source has no live FaceGen geometry actor={} headPart={:08X} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}' supplementalMeshSource={}",
@@ -915,23 +1040,7 @@ namespace
 					const auto liveGeometryName = std::string(std::string_view(liveGeometry->GetName()));
 					const auto selectedXml = selection ? selection->path.string() : std::string{};
 					if (!sourceGeometryName.empty() && !liveGeometryName.empty()) {
-						a_meshNameMap[sourceGeometryName].emplace(liveGeometryName);
-					}
-
-					std::size_t referenceCount = 0;
-					if (selection) {
-						auto references = Smp::CaptureArmorBoneReferences(sourceRoot.get(), a_destinationRoot, modelPath);
-						referenceCount = references.size();
-						AppendHeadCandidate(
-							a_candidates,
-							liveGeometry,
-							std::move(selection->path),
-							{},
-							liveGeometry,
-							nullptr,
-							Smp::BuildDomain::kHair,
-							a_destinationRoot,
-							std::move(references));
+						a_closure.meshNameMap[sourceGeometryName].emplace(liveGeometryName);
 					}
 					spdlog::debug(
 						"resolved current hair headpart component actor={} headPart={:08X} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}' references={}",
@@ -951,12 +1060,9 @@ namespace
 			AppendLiveHairHeadPartCandidates(
 				a_actor,
 				a_faceObject,
-				a_destinationRoot,
 				extraPart,
 				a_visited,
-				a_meshNameMap,
-				a_meshSourceRoots,
-				a_candidates);
+				a_closure);
 		}
 	}
 
@@ -972,35 +1078,75 @@ namespace
 			return;
 		}
 
-		for (auto* headPart : GetRuntimeHeadParts(npc)) {
-			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
-				continue;
+		const auto runtimeHeadParts = GetRuntimeHeadParts(npc);
+		std::unordered_set<RE::BGSHeadPart*> referencedExtraParts;
+		std::unordered_set<RE::BGSHeadPart*> scannedExtraParts;
+		const auto collectExtraParts = [&](this auto&& a_self, RE::BGSHeadPart* a_headPart) -> void {
+			if (!a_headPart || !scannedExtraParts.insert(a_headPart).second) {
+				return;
+			}
+			for (auto* extraPart : a_headPart->extraParts) {
+				if (!extraPart) {
+					continue;
+				}
+				referencedExtraParts.insert(extraPart);
+				a_self(extraPart);
+			}
+		};
+		for (auto* headPart : runtimeHeadParts) {
+			collectExtraParts(headPart);
+		}
+
+		std::unordered_set<RE::BGSHeadPart*> visited;
+		const auto appendClosure = [&](RE::BGSHeadPart* a_headPart) {
+			if (!a_headPart ||
+				a_headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair ||
+				visited.contains(a_headPart)) {
+				return;
 			}
 
-			std::unordered_set<RE::BGSHeadPart*> visited;
-			Smp::DefaultBBP::NameMap meshNameMap;
-			std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
-			const auto firstCandidate = a_candidates.size();
+			HairHeadPartClosureSources closure{
+				.destinationRoot = destinationRoot,
+			};
 			AppendLiveHairHeadPartCandidates(
 				a_actor,
 				a_faceObject,
-				destinationRoot,
-				headPart,
+				a_headPart,
 				visited,
-				meshNameMap,
-				meshSourceRoots,
-				a_candidates);
+				closure);
 
-			for (auto candidateIndex = firstCandidate; candidateIndex < a_candidates.size(); ++candidateIndex) {
-				auto& candidate = a_candidates[candidateIndex];
-				candidate.meshSourceRoots = meshSourceRoots;
-				for (const auto& [sourceName, liveNames] : meshNameMap) {
-					auto& candidateNames = candidate.meshNameMap[sourceName];
-					for (const auto& liveName : liveNames) {
-						candidateNames.emplace(liveName);
-					}
-				}
+			if (!closure.object || closure.physicsXmlPaths.empty()) {
+				return;
 			}
+
+			HeadPhysicsXmlBuildCandidate candidate;
+			candidate.object = closure.object;
+			candidate.paths = std::move(closure.physicsXmlPaths);
+			candidate.meshNameMap = std::move(closure.meshNameMap);
+			candidate.meshSourceRoots = std::move(closure.meshSourceRoots);
+			candidate.liveBindingObjects = std::move(closure.liveBindingObjects);
+			candidate.sourceObject = closure.object;
+			candidate.destinationRoot = destinationRoot;
+			candidate.boneReferences = std::move(closure.boneReferences);
+			candidate.domain = Smp::BuildDomain::kHair;
+			a_candidates.push_back(std::move(candidate));
+		};
+
+		for (auto* headPart : runtimeHeadParts) {
+			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
+				continue;
+			}
+			if (referencedExtraParts.contains(headPart)) {
+				continue;
+			}
+			appendClosure(headPart);
+		}
+
+		// Malformed/cyclic extra-part graphs may have no unreferenced root.
+		// Keep discovery live-state driven by processing the first unvisited hair
+		// component as a closure rather than dropping the hair entirely.
+		for (auto* headPart : runtimeHeadParts) {
+			appendClosure(headPart);
 		}
 	}
 

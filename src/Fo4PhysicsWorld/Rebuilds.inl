@@ -716,9 +716,11 @@ namespace Smp
 
 		for (auto& pending : pendingHeadRebuilds_) {
 			auto resolvedActor = pending.actorHandle.get();
-			if (resolvedActor && resolvedActor.get() == a_event.actor && pending.type == a_event.type && pending.object.get() == a_event.object) {
+			if (resolvedActor && resolvedActor.get() == a_event.actor) {
+				pending.type = LifecycleEventType::kActorHeadInitialized;
+				pending.object = nullptr;
+				pending.headPart = nullptr;
 				pending.frameDelay = std::max(pending.frameDelay, kHeadInitializedRebuildDelayFrames);
-				pending.headPart = a_event.headPart;
 				pending.cpuCopyRetryCount = 0;
 				return;
 			}
@@ -726,9 +728,7 @@ namespace Smp
 
 		pendingHeadRebuilds_.push_back({
 			.actorHandle = handle,
-			.type = a_event.type,
-			.object = a_event.object,
-			.headPart = a_event.headPart,
+			.type = LifecycleEventType::kActorHeadInitialized,
 			.frameDelay = kHeadInitializedRebuildDelayFrames,
 		});
 	}

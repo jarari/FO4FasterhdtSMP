@@ -4,6 +4,7 @@
 #include "RE/N/NiPointer.h"
 #include "RE/N/NiTransform.h"
 
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,5 +38,6 @@ namespace Smp
 		RE::NiAVObject* a_attachedObject,
 		RE::NiNode* a_skeletonRoot,
 		bool a_firstPerson,
-		std::vector<ArmorBoneReference>& a_references);
+		std::vector<ArmorBoneReference>& a_references,
+		std::span<const RE::NiPointer<RE::NiAVObject>> a_additionalAttachedObjects = {});
 }

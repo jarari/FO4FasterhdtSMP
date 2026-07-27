@@ -88,9 +88,8 @@ namespace Smp
 		using BoundBone = std::pair<std::string, RE::NiNode*>;
 		using BoundBones = std::vector<BoundBone>;
 
-		BoundBones CollectBoundBones(RE::NiAVObject* a_attachedObject)
+		void CollectBoundBonesFromObject(RE::NiAVObject* a_attachedObject, BoundBones& a_boundBones)
 		{
-			BoundBones boundBones;
 			auto collectSkin = [&](RE::BSSkin::Instance* a_skin) {
 				if (!a_skin || a_skin->bones.size() > RE::BSSkin::kMaxExpectedBones) {
 					return;
@@ -100,15 +99,28 @@ namespace Smp
 					if (!bone) {
 						continue;
 					}
-					const auto existing = std::ranges::find_if(boundBones, [bone](const BoundBone& a_entry) {
+					const auto existing = std::ranges::find_if(a_boundBones, [bone](const BoundBone& a_entry) {
 						return a_entry.second == bone;
 					});
-					if (existing == boundBones.end()) {
-						boundBones.emplace_back(std::string(bone->GetName()), bone);
+					if (existing == a_boundBones.end()) {
+						a_boundBones.emplace_back(std::string(bone->GetName()), bone);
 					}
 				}
 			};
 			ForEachSkin(a_attachedObject, collectSkin);
+		}
+
+		BoundBones CollectBoundBones(
+			RE::NiAVObject* a_attachedObject,
+			const std::span<const RE::NiPointer<RE::NiAVObject>> a_additionalAttachedObjects)
+		{
+			BoundBones boundBones;
+			CollectBoundBonesFromObject(a_attachedObject, boundBones);
+			for (const auto& attachedObject : a_additionalAttachedObjects) {
+				if (attachedObject && attachedObject.get() != a_attachedObject) {
+					CollectBoundBonesFromObject(attachedObject.get(), boundBones);
+				}
+			}
 			return boundBones;
 		}
 
@@ -348,7 +360,8 @@ namespace Smp
 		RE::NiAVObject* a_attachedObject,
 		RE::NiNode* a_skeletonRoot,
 		const bool a_firstPerson,
-		std::vector<ArmorBoneReference>& a_references)
+		std::vector<ArmorBoneReference>& a_references,
+		const std::span<const RE::NiPointer<RE::NiAVObject>> a_additionalAttachedObjects)
 	{
 		if (!a_attachedObject || a_references.empty()) {
 			return;
@@ -368,7 +381,7 @@ namespace Smp
 			return;
 		}
 
-		const auto boundBones = CollectBoundBones(a_attachedObject);
+		const auto boundBones = CollectBoundBones(a_attachedObject, a_additionalAttachedObjects);
 		const auto attachedArmorBones = static_cast<std::uint32_t>(std::ranges::count_if(boundBones, [&](const BoundBone& a_entry) {
 			auto* reference = FindMutableArmorBoneReference(a_references, a_entry.first);
 			return reference && reference->isArmorOnly;
@@ -404,6 +417,15 @@ namespace Smp
 				(persistentBone ? persistentBone : boundBone);
 
 			if (!bone) {
+				if (reference.isSkinned) {
+					spdlog::debug(
+						"skipping unresolved skinned armor node '{}' actor={} object={} because only the engine-owned BSSkin bone may be used",
+						reference.name,
+						static_cast<void*>(a_actor),
+						static_cast<void*>(a_attachedObject));
+					continue;
+				}
+
 				auto createdBone = RE::make_nismart<RE::NiNode>(0);
 				createdBone->name = RE::BSFixedString(reference.name);
 				createdBone->local = reference.localToParentBone;

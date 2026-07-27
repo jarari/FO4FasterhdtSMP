@@ -10,7 +10,9 @@ namespace Smp
 		const DefaultBBP::NameMap& a_meshNameMap,
 		const BuildDomain a_domain,
 		const bool a_commitToBullet,
-		const std::span<const RE::NiPointer<RE::NiAVObject>> a_meshSourceRoots)
+		const std::span<const RE::NiPointer<RE::NiAVObject>> a_meshSourceRoots,
+		const std::uint64_t a_requestedBuildGroup,
+		const std::string_view a_sourceKey)
 	{
 		struct BuildTiming
 		{
@@ -122,7 +124,14 @@ namespace Smp
 		std::uint32_t kinematicBodies = 0;
 		std::uint32_t matchedUnderActorRoot = 0;
 		std::uint32_t matchedUnderAttachedObject = 0;
-		std::uint64_t buildGroup = 0;
+		std::uint64_t buildGroup = a_requestedBuildGroup;
+		const auto requestedBuildGroupExisted =
+			buildGroup != 0 &&
+			(BuildGroupHasBodyLocked(a_state, buildGroup) ||
+				BuildGroupHasMeshLocked(a_state, buildGroup) ||
+				std::ranges::any_of(a_state.constraints, [buildGroup](const ConstraintRecord& a_constraint) {
+					return a_constraint.buildGroup == buildGroup;
+				}));
 		const auto hadActorRuntimeBeforeBuild = a_state.HasPhysics();
 		for (const auto& matchedBone : matchedBones) {
 			if (IsNodeInTree(actorRoot, matchedBone.node)) {
@@ -132,7 +141,7 @@ namespace Smp
 				++matchedUnderAttachedObject;
 			}
 		}
-		if (a_domain != BuildDomain::kArmor) {
+		if (buildGroup == 0 && a_domain != BuildDomain::kArmor) {
 			for (const auto& meshRecord : a_state.meshes) {
 				if (meshRecord.domain == a_domain && meshRecord.geometry && IsObjectInTree(a_event.object, meshRecord.geometry)) {
 					buildGroup = meshRecord.buildGroup;
@@ -171,7 +180,7 @@ namespace Smp
 				}
 			}
 		}
-		bool createdBuildGroup = false;
+		bool createdBuildGroup = buildGroup != 0 && !requestedBuildGroupExisted;
 		if (buildGroup == 0) {
 			buildGroup = ++a_state.nextBuildGroup;
 			createdBuildGroup = true;
@@ -237,16 +246,6 @@ namespace Smp
 						buildGroup);
 				}
 				continue;
-			}
-
-			if (a_domain != BuildDomain::kArmor) {
-				const auto existing = std::ranges::find_if(a_state.bodies, [&matchedBone](const BoneRecord& a_body) {
-					return a_body.node == matchedBone.node && a_body.bone;
-				});
-				if (existing != a_state.bodies.end()) {
-					AddBodyBuildGroup(*existing, buildGroup, a_domain, a_event.bipedObject);
-					continue;
-				}
 			}
 
 			const auto* descriptor = FindBoneDescriptor(a_summary, matchedBone.name);
@@ -333,7 +332,7 @@ namespace Smp
 
 		std::vector<MeshRecord> stagedMeshes;
 		phaseStart = Clock::now();
-		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, a_meshSourceRoots, buildGroup, a_domain, stagedBodies, stagedMeshes);
+		const auto cpuCopyPending = BuildMeshesLocked(a_state, a_summary, a_event, a_meshNameMap, a_meshSourceRoots, buildGroup, a_sourceKey, a_domain, stagedBodies, stagedMeshes);
 		timing.meshBuildMs += ElapsedMs(phaseStart, Clock::now());
 		const auto bodyOnlyArmorBuild = a_domain == BuildDomain::kArmor;
 		if (cpuCopyPending) {
@@ -408,7 +407,7 @@ namespace Smp
 			}
 		}
 		std::vector<ConstraintRecord> stagedConstraints;
-		BuildConstraintsLocked(a_state, a_summary, buildGroup, a_domain, {}, stagedConstraints);
+		BuildConstraintsLocked(a_state, a_summary, buildGroup, a_sourceKey, a_domain, {}, stagedConstraints);
 		for (auto& stagedConstraint : stagedConstraints) {
 			a_state.constraints.push_back(std::move(stagedConstraint));
 		}
@@ -672,6 +671,7 @@ namespace Smp
 		const DefaultBBP::NameMap& a_meshNameMap,
 		const std::span<const RE::NiPointer<RE::NiAVObject>> a_meshSourceRoots,
 		const std::uint64_t a_buildGroup,
+		const std::string_view a_sourceKey,
 		const BuildDomain a_domain,
 		std::vector<BoneRecord>& a_stagedBodies,
 		std::vector<MeshRecord>& a_stagedMeshes)
@@ -1026,15 +1026,19 @@ namespace Smp
 
 		for (std::size_t meshDescriptorIndex = 0; meshDescriptorIndex < a_summary.meshDescriptors.size(); ++meshDescriptorIndex) {
 			const auto* meshDescriptor = std::addressof(a_summary.meshDescriptors[meshDescriptorIndex]);
-			const auto existingMesh = std::ranges::find_if(a_state.meshes, [a_buildGroup, meshDescriptorIndex](const MeshRecord& a_mesh) {
-				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
+			const auto existingMesh = std::ranges::find_if(a_state.meshes, [a_buildGroup, a_sourceKey, meshDescriptorIndex](const MeshRecord& a_mesh) {
+				return a_mesh.buildGroup == a_buildGroup &&
+					a_mesh.sourceKey == a_sourceKey &&
+					a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingMesh != a_state.meshes.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [a_buildGroup, meshDescriptorIndex](const MeshRecord& a_mesh) {
-				return a_mesh.buildGroup == a_buildGroup && a_mesh.descriptorIndex == meshDescriptorIndex;
+			const auto existingStagedMesh = std::ranges::find_if(a_stagedMeshes, [a_buildGroup, a_sourceKey, meshDescriptorIndex](const MeshRecord& a_mesh) {
+				return a_mesh.buildGroup == a_buildGroup &&
+					a_mesh.sourceKey == a_sourceKey &&
+					a_mesh.descriptorIndex == meshDescriptorIndex;
 			});
 			if (existingStagedMesh != a_stagedMeshes.end()) {
 				++skippedExisting;
@@ -1388,6 +1392,7 @@ namespace Smp
 				primaryMesh->geometry :
 				nullptr;
 			meshRecord.buildGroup = a_buildGroup;
+			meshRecord.sourceKey = a_sourceKey;
 			meshRecord.descriptorIndex = meshDescriptorIndex;
 			meshRecord.bipedObject = a_event.bipedObject;
 			meshRecord.domain = a_domain;
@@ -1449,6 +1454,7 @@ namespace Smp
 		Fo4SkinnedMeshSystem& a_state,
 		const PhysicsXmlSummary& a_summary,
 		const std::uint64_t a_buildGroup,
+		const std::string_view a_sourceKey,
 		const BuildDomain a_domain,
 		const std::span<BoneRecord> a_stagedBodies,
 		std::vector<ConstraintRecord>& a_stagedConstraints)
@@ -1493,15 +1499,19 @@ namespace Smp
 					descriptor.bodyA,
 					descriptor.bodyB);
 			}
-			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup](const ConstraintRecord& a_constraint) {
-				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
+			const auto existing = std::ranges::find_if(a_state.constraints, [descriptorIndex, a_buildGroup, a_sourceKey](const ConstraintRecord& a_constraint) {
+				return a_constraint.buildGroup == a_buildGroup &&
+					a_constraint.sourceKey == a_sourceKey &&
+					a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existing != a_state.constraints.end()) {
 				++skippedExisting;
 				continue;
 			}
-			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [descriptorIndex, a_buildGroup](const ConstraintRecord& a_constraint) {
-				return a_constraint.buildGroup == a_buildGroup && a_constraint.descriptorIndex == descriptorIndex;
+			const auto existingStaged = std::ranges::find_if(a_stagedConstraints, [descriptorIndex, a_buildGroup, a_sourceKey](const ConstraintRecord& a_constraint) {
+				return a_constraint.buildGroup == a_buildGroup &&
+					a_constraint.sourceKey == a_sourceKey &&
+					a_constraint.descriptorIndex == descriptorIndex;
 			});
 			if (existingStaged != a_stagedConstraints.end()) {
 				++skippedExisting;
@@ -1522,6 +1532,7 @@ namespace Smp
 			ConstraintRecord constraintRecord;
 			constraintRecord.buildGroup = a_buildGroup;
 			constraintRecord.domain = a_domain;
+			constraintRecord.sourceKey = a_sourceKey;
 			constraintRecord.descriptorIndex = descriptorIndex;
 			constraintRecord.bodyA = descriptor.bodyA;
 			constraintRecord.bodyB = descriptor.bodyB;
