@@ -678,7 +678,7 @@ namespace Hooks
 			actor = RE::PlayerCharacter::GetSingleton();
 		}
 		if (actor) {
-			Smp::Fo4PhysicsWorld::GetSingleton()->NoteCharacterCustomizationTarget(actor, a_editMode);
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteCharacterCustomizationTarget(actor);
 		}
 
 		OriginalLooksMenuUtilsShowLooksMenu(a_target, a_editMode, a_target2, a_swapTarget, a_vendor);

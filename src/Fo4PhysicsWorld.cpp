@@ -1150,6 +1150,24 @@ namespace
 		}
 	}
 
+	bool FinalizeLiveHeadPartCandidate(
+		RE::Actor* a_actor,
+		HeadPhysicsXmlBuildCandidate& a_candidate)
+	{
+		if (!a_actor || !a_candidate.object || !a_candidate.destinationRoot || a_candidate.boneReferences.empty()) {
+			return false;
+		}
+
+		Smp::FinalizeArmorSkinBindings(
+			a_actor,
+			a_candidate.object,
+			a_candidate.destinationRoot.get(),
+			false,
+			a_candidate.boneReferences,
+			a_candidate.liveBindingObjects);
+		return true;
+	}
+
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(const Smp::LifecycleEvent& a_event)
 	{
 		if (!a_event.physicsXmlPath.empty()) {

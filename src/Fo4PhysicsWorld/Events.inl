@@ -53,7 +53,7 @@ namespace Smp
 					static_cast<void*>(a_event.object));
 				return RE::BSEventNotifyControl::kContinue;
 			}
-			if (DeferCharacterCustomizationLifecycleLocked(a_event, true, false)) {
+			if (ShouldDeferCharacterCustomizationPhysicsLocked(a_event)) {
 				return RE::BSEventNotifyControl::kContinue;
 			}
 
@@ -186,7 +186,7 @@ namespace Smp
 				static_cast<void*>(a_event.object));
 		} else if (IsResetCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
-			const auto deferForCustomization = DeferCharacterCustomizationLifecycleLocked(a_event, true, true);
+			const auto deferForCustomization = ShouldDeferCharacterCustomizationPhysicsLocked(a_event);
 			bool queuedSoftReload = false;
 			for (auto& actorStatePointer : systems_) {
 				auto& actorState = *actorStatePointer;
@@ -222,12 +222,15 @@ namespace Smp
 				queuedSoftReload);
 		} else if (IsHeadCandidate(a_event.type)) {
 			std::scoped_lock lock(lock_);
-			if (DeferCharacterCustomizationLifecycleLocked(a_event, false, true)) {
+			if (ShouldDeferCharacterCustomizationPhysicsLocked(a_event)) {
+				const auto finalized = FinalizeHeadHierarchyForEventLocked(a_event);
+				MarkPendingHeadRebuildLocked(a_event);
 				spdlog::debug(
-					"deferred head physics rebuild candidate {} for customization target actor={} object={}",
+					"finalized live head hierarchy and deferred physics build {} for customization target actor={} object={} finalized={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
-					static_cast<void*>(a_event.object));
+					static_cast<void*>(a_event.object),
+					finalized);
 				return RE::BSEventNotifyControl::kContinue;
 			}
 			PruneInvalidSystemsLocked();

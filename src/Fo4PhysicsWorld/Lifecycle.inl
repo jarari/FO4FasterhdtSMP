@@ -126,14 +126,13 @@ namespace Smp
 			return;
 		}
 
-		if (DeferCharacterCustomizationLifecycleLocked(a_event, true, false)) {
+		if (ShouldDeferCharacterCustomizationPhysicsLocked(a_event)) {
 			if (actorArmorAttach) {
 				spdlog::debug(
-					"deferred scoped armor system physics resume for customization target attach {} actor={} object={} armorRecords={}",
+					"deferred scoped armor system physics build for customization target attach {} actor={} object={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
-					static_cast<void*>(a_event.object),
-					characterCustomizationArmorRecords_.size());
+					static_cast<void*>(a_event.object));
 			} else {
 				spdlog::debug(
 					"deferred system physics attach candidate {} for customization target actor={} object={}",
@@ -436,6 +435,38 @@ namespace Smp
 		});
 	}
 
+	bool Fo4PhysicsWorld::FinalizeHeadHierarchyForEventLocked(const LifecycleEvent& a_event)
+	{
+		if (!a_event.actor || a_event.firstPerson) {
+			return false;
+		}
+
+		auto* faceNode = a_event.actor->GetFaceNodeSkinned();
+		auto* actorObject = a_event.actor->Get3D(false);
+		auto* destinationRoot = actorObject ? actorObject->IsNode() : nullptr;
+		if (!faceNode || !destinationRoot) {
+			return false;
+		}
+
+		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
+		CollectLiveHairHeadPartCandidates(
+			a_event.actor,
+			reinterpret_cast<RE::NiAVObject*>(faceNode),
+			candidates);
+
+		std::uint32_t finalized = 0;
+		for (auto& candidate : candidates) {
+			finalized += FinalizeLiveHeadPartCandidate(a_event.actor, candidate) ? 1U : 0U;
+		}
+		spdlog::debug(
+			"finalized live headpart hierarchy without physics build actor={} faceNode={} candidates={} finalized={}",
+			static_cast<void*>(a_event.actor),
+			static_cast<void*>(faceNode),
+			candidates.size(),
+			finalized);
+		return finalized > 0;
+	}
+
 	bool Fo4PhysicsWorld::BuildHeadForEventLocked(const LifecycleEvent& a_event)
 	{
 		auto* faceNode = a_event.actor ? a_event.actor->GetFaceNodeSkinned() : nullptr;
@@ -678,14 +709,7 @@ namespace Smp
 			if (candidate.destinationRoot) {
 				scopedEvent.destinationRoot = candidate.destinationRoot.get();
 			}
-			if (!candidate.boneReferences.empty()) {
-				FinalizeArmorSkinBindings(
-					a_event.actor,
-					candidate.object,
-					candidate.destinationRoot.get(),
-					false,
-					candidate.boneReferences,
-					candidate.liveBindingObjects);
+			if (FinalizeLiveHeadPartCandidate(a_event.actor, candidate)) {
 				scopedEvent.armorBoneReferences = candidate.boneReferences;
 			}
 			const auto requestedBuildGroup =

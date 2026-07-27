@@ -76,7 +76,7 @@ namespace Smp
 		void WriteBackSystems(RE::Actor* a_actor, WritebackSource a_source = WritebackSource::kUnknown);
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
-		void NoteCharacterCustomizationTarget(RE::Actor* a_actor, std::uint32_t a_editMode);
+		void NoteCharacterCustomizationTarget(RE::Actor* a_actor);
 		bool ReloadPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, std::string_view a_physicsFilePath, bool a_persist, bool a_verbose);
 		bool SwapPhysicsFile(RE::Actor* a_actor, std::string_view a_oldPhysicsFilePath, std::string_view a_newPhysicsFilePath, bool a_persist, bool a_verbose);
 		[[nodiscard]] std::string QueryCurrentPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, bool a_verbose);
@@ -99,6 +99,7 @@ namespace Smp
 		void ResetLocked();
 		void NoteLifecycleCandidate(const LifecycleEvent& a_event);
 		void BuildForEventLocked(const LifecycleEvent& a_event);
+		bool FinalizeHeadHierarchyForEventLocked(const LifecycleEvent& a_event);
 		bool BuildHeadForEventLocked(const LifecycleEvent& a_event);
 		bool IsBuildCandidateLocked(const LifecycleEvent& a_event, bool a_requireObject);
 

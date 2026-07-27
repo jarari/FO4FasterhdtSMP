@@ -300,10 +300,6 @@ namespace Smp
 				it = suspendedActors_.erase(it);
 				continue;
 			}
-			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
-				++it;
-				continue;
-			}
 			if (existingState) {
 				if ((existingState->suspended || existingState->IsInactive()) && !it->armorRecords.empty()) {
 					for (auto& record : it->armorRecords) {
@@ -369,9 +365,6 @@ namespace Smp
 		const auto* player = RE::PlayerCharacter::GetSingleton();
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;
-			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actorState.actor)) {
-				continue;
-			}
 			const auto needsReactivation = actorState.IsInactive();
 			const auto needsRebuild = actorState.suspended && !actorState.armorRecords.empty();
 			if ((!needsReactivation && !needsRebuild) || actorState.actor == player) {

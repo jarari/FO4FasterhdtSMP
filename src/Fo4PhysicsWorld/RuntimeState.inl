@@ -3,17 +3,17 @@
 
 namespace Smp
 {
-	void Fo4PhysicsWorld::NoteCharacterCustomizationTarget(RE::Actor* a_actor, const std::uint32_t a_editMode)
+	void Fo4PhysicsWorld::NoteCharacterCustomizationTarget(RE::Actor* a_actor)
 	{
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		NoteCharacterCustomizationTargetLocked(a_actor, a_editMode);
+		NoteCharacterCustomizationTargetLocked(a_actor);
 		if (characterCustomizationMenuDepth_ > 0) {
 			SuspendCharacterCustomizationTargetLocked();
 		}
 	}
 
-	bool Fo4PhysicsWorld::NoteCharacterCustomizationTargetLocked(RE::Actor* a_actor, const std::uint32_t a_editMode)
+	bool Fo4PhysicsWorld::NoteCharacterCustomizationTargetLocked(RE::Actor* a_actor)
 	{
 		if (!a_actor) {
 			return false;
@@ -25,11 +25,9 @@ namespace Smp
 		}
 
 		characterCustomizationTarget_ = handle;
-		characterCustomizationEditMode_ = a_editMode;
 		spdlog::debug(
-			"captured character customization target actor={} editMode={} menuDepth={}",
+			"captured character customization target actor={} menuDepth={}",
 			static_cast<void*>(a_actor),
-			a_editMode,
 			characterCustomizationMenuDepth_);
 		return true;
 	}
@@ -58,7 +56,7 @@ namespace Smp
 		return ResolveCharacterCustomizationTargetLocked() == a_actor;
 	}
 
-	bool Fo4PhysicsWorld::DeferCharacterCustomizationLifecycleLocked(const LifecycleEvent& a_event, const bool a_actorDirty, const bool a_headDirty)
+	bool Fo4PhysicsWorld::ShouldDeferCharacterCustomizationPhysicsLocked(const LifecycleEvent& a_event)
 	{
 		if (characterCustomizationMenuDepth_ == 0 || !a_event.actor || a_event.firstPerson) {
 			return false;
@@ -66,7 +64,7 @@ namespace Smp
 
 		auto* target = ResolveCharacterCustomizationTargetLocked();
 		if (!target) {
-			NoteCharacterCustomizationTargetLocked(a_event.actor, characterCustomizationEditMode_);
+			NoteCharacterCustomizationTargetLocked(a_event.actor);
 			target = a_event.actor;
 			SuspendCharacterCustomizationTargetLocked();
 			spdlog::debug(
@@ -79,28 +77,11 @@ namespace Smp
 			return false;
 		}
 
-		if (a_actorDirty) {
-			characterCustomizationActorDirty_ = true;
-			if (IsArmorAttachCandidate(a_event.type)) {
-				for (auto& record : CollectQueuedArmorRecordsForAttachLocked(a_event)) {
-					record.buildGroups.clear();
-					record.cpuCopyRetryCount = 0;
-					MergeArmorPhysicsRecord(characterCustomizationArmorRecords_, std::move(record));
-				}
-			}
-		}
-		if (a_headDirty) {
-			characterCustomizationHeadDirty_ = true;
-		}
-
 		ResetStepClockLocked();
 		spdlog::debug(
-			"deferred target character customization lifecycle {} actor={} actorDirty={} headDirty={} capturedArmorRecords={}",
+			"deferred target character customization physics build {} actor={}",
 			ToString(a_event.type),
-			static_cast<void*>(a_event.actor),
-			characterCustomizationActorDirty_,
-			characterCustomizationHeadDirty_,
-			characterCustomizationArmorRecords_.size());
+			static_cast<void*>(a_event.actor));
 		return true;
 	}
 
@@ -111,26 +92,36 @@ namespace Smp
 			return;
 		}
 
+		const auto discardedSuspendedCandidates = std::erase_if(
+			suspendedActors_,
+			[target](const SuspendedActorCandidate& a_candidate) {
+				const auto actor = a_candidate.actorHandle.get();
+				return actor && actor.get() == target && !a_candidate.firstPerson;
+			});
 		std::uint32_t suspendedStates = 0;
+		std::uint32_t discardedArmorRecords = 0;
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;
-			if (actorState.actor != target || actorState.firstPerson || !actorState.HasPhysics()) {
+			if (actorState.actor != target || actorState.firstPerson) {
 				continue;
 			}
-			if (actorState.suspended) {
-				continue;
+			if (actorState.HasPhysics() && !actorState.suspended) {
+				SuspendSystemLocked(actorState);
+				++suspendedStates;
 			}
-			SuspendSystemLocked(actorState);
-			++suspendedStates;
+			discardedArmorRecords += static_cast<std::uint32_t>(actorState.armorRecords.size());
+			actorState.armorRecords.clear();
 		}
 
-		if (suspendedStates > 0) {
+		if (suspendedStates > 0 || discardedArmorRecords > 0 || discardedSuspendedCandidates > 0) {
 			ResetStepClockLocked();
 		}
 		spdlog::debug(
-			"suspended {} target system actor states for character customization actor={} trackedStates={}",
-			suspendedStates,
+			"suspended target system physics for character customization actor={} suspendedStates={} discardedArmorRecords={} discardedSuspendedCandidates={} trackedStates={}",
 			static_cast<void*>(target),
+			suspendedStates,
+			discardedArmorRecords,
+			discardedSuspendedCandidates,
 			systems_.size());
 	}
 
@@ -138,9 +129,8 @@ namespace Smp
 	{
 		auto* target = ResolveCharacterCustomizationTargetLocked();
 		if (!target) {
-			const auto discardedRecords = characterCustomizationArmorRecords_.size();
 			ClearCharacterCustomizationTargetLocked();
-			spdlog::debug("skipping character customization target reload because target actor is unresolved discardedArmorRecords={}", discardedRecords);
+			spdlog::debug("skipping character customization target reload because target actor is unresolved");
 			return;
 		}
 
@@ -148,14 +138,6 @@ namespace Smp
 			ClearCharacterCustomizationTargetLocked();
 			return;
 		}
-
-		std::vector<ArmorPhysicsRecord> armorRecords;
-		for (auto& record : characterCustomizationArmorRecords_) {
-			record.buildGroups.clear();
-			record.cpuCopyRetryCount = 0;
-			MergeArmorPhysicsRecord(armorRecords, std::move(record));
-		}
-		characterCustomizationArmorRecords_.clear();
 
 		std::uint32_t clearedStates = 0;
 		std::uint32_t skippedFirstPerson = 0;
@@ -169,26 +151,19 @@ namespace Smp
 				continue;
 			}
 
-			for (auto record : actorState.armorRecords) {
-				record.buildGroups.clear();
-				record.cpuCopyRetryCount = 0;
-				MergeArmorPhysicsRecord(armorRecords, std::move(record));
-			}
 			ClearSystemLocked(actorState);
-			actorState.armorRecords = armorRecords;
 			++clearedStates;
 		}
 
+		std::erase_if(suspendedActors_, [target](const SuspendedActorCandidate& a_candidate) {
+			const auto actor = a_candidate.actorHandle.get();
+			return actor && actor.get() == target && !a_candidate.firstPerson;
+		});
 		std::erase_if(systems_, [](const auto& a_state) {
 			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
 
-		const auto queuedArmorRecordCount = armorRecords.size();
-		const auto actorDirty = characterCustomizationActorDirty_ || queuedArmorRecordCount > 0;
-		const auto observedHeadDirty = characterCustomizationHeadDirty_;
-		if (actorDirty) {
-			MarkPendingActorRebuildLocked(target, false, std::move(armorRecords), true, true, true);
-		}
+		MarkPendingActorRebuildLocked(target, false, {}, true, true, true);
 		MarkPendingHeadRebuildLocked(LifecycleEvent{
 			.type = LifecycleEventType::kActorHeadInitialized,
 			.actor = target,
@@ -196,11 +171,8 @@ namespace Smp
 		});
 		ResetStepClockLocked();
 		spdlog::debug(
-			"queued targeted system physics reload after character customization actor={} actorDirty={} observedHeadDirty={} headReloadQueued=true armorRecords={} clearedStates={} skippedFirstPerson={}",
+			"queued live-state system physics reload after character customization actor={} forceArmorRescan=true headReloadQueued=true clearedStates={} skippedFirstPerson={}",
 			static_cast<void*>(target),
-			actorDirty,
-			observedHeadDirty,
-			queuedArmorRecordCount,
 			clearedStates,
 			skippedFirstPerson);
 		ClearCharacterCustomizationTargetLocked();
@@ -209,10 +181,6 @@ namespace Smp
 	void Fo4PhysicsWorld::ClearCharacterCustomizationTargetLocked()
 	{
 		characterCustomizationTarget_.reset();
-		characterCustomizationEditMode_ = 0;
-		characterCustomizationActorDirty_ = false;
-		characterCustomizationHeadDirty_ = false;
-		characterCustomizationArmorRecords_.clear();
 	}
 
 	void Fo4PhysicsWorld::SuspendSystemLocked(Fo4SkinnedMeshSystem& a_state)

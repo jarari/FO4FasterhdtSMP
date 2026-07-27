@@ -74,10 +74,6 @@
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		RE::ActorHandle characterCustomizationTarget_;
-		std::uint32_t characterCustomizationEditMode_{ 0 };
-		bool characterCustomizationActorDirty_{ false };
-		bool characterCustomizationHeadDirty_{ false };
-		std::vector<ArmorPhysicsRecord> characterCustomizationArmorRecords_;
 		std::uint32_t loadingMenuDepth_{ 0 };
 		bool loadingPhysicsSuspended_{ false };
 		bool registered_{ false };
