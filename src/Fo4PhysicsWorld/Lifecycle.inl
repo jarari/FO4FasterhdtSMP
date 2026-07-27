@@ -55,6 +55,7 @@ namespace Smp
 		suspendedActors_.clear();
 		pendingActorRebuilds_.clear();
 		pendingHeadRebuilds_.clear();
+		pendingActor3DModelUpdates_.clear();
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
 		candidateEvents_ = 0;
@@ -112,6 +113,29 @@ namespace Smp
 
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
 		const auto actorArmorAttach = armorAttach && a_event.actor && !a_event.firstPerson;
+		const auto actorModelUpdatePending =
+			a_event.actor &&
+			std::ranges::any_of(pendingActor3DModelUpdates_, [&a_event](const PendingActor3DModelUpdate& a_pending) {
+				const auto actor = a_pending.actorHandle.get();
+				return actor && actor.get() == a_event.actor;
+			});
+		if (actorModelUpdatePending) {
+			if (actorArmorAttach) {
+				auto armorRecords = CollectQueuedArmorRecordsForAttachLocked(a_event);
+				MarkPendingActorRebuildLocked(
+					a_event.actor,
+					a_event.firstPerson,
+					std::move(armorRecords),
+					false,
+					false);
+			}
+			spdlog::debug(
+				"deferred system physics attach candidate {} until actor 3D model update completion actor={} object={}",
+				ToString(a_event.type),
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_event.object));
+			return;
+		}
 		if (actorArmorAttach && loadingPhysicsSuspended_) {
 			auto armorRecords = CollectQueuedArmorRecordsForAttachLocked(a_event);
 			const auto queuedRecords = armorRecords.size();

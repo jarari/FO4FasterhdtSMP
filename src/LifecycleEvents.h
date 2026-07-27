@@ -4,6 +4,7 @@
 #include "RE/B/BSPointerHandle.h"
 #include "RE/N/NiPointer.h"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -50,6 +51,7 @@ namespace Smp
 
 	RE::BSTEventSource<LifecycleEvent>& GetLifecycleEventSource();
 	void NotifyLifecycleEvent(const LifecycleEvent& a_event);
+	std::size_t DiscardQueuedLifecycleEvents(RE::Actor* a_actor);
 	void DrainQueuedLifecycleEvents();
 	const char* ToString(LifecycleEventType a_type);
 }

@@ -6,6 +6,7 @@
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsXmlSelection.h"
+#include "RE/A/AIProcess.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/H/hkArray.h"
@@ -35,6 +36,7 @@ namespace Hooks
 	using ActorLoad3D_t = RE::NiAVObject* (*)(RE::TESObjectREFR*, bool);
 	using Set3D_t = void (*)(RE::TESObjectREFR*, RE::NiAVObject*, bool);
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
+	using AIProcessDoUpdate3dModel_t = void (*)(RE::AIProcess*, RE::Actor*, std::uint16_t);
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
@@ -52,6 +54,7 @@ namespace Hooks
 	Set3D_t                        OriginalPlayerCharacterSet3D{ nullptr };
 	OnHeadInitialized_t            OriginalActorOnHeadInitialized{ nullptr };
 	OnHeadInitialized_t            OriginalPlayerCharacterOnHeadInitialized{ nullptr };
+	AIProcessDoUpdate3dModel_t      OriginalAIProcessDoUpdate3dModel{ nullptr };
 	Reset3D_t                      OriginalReset3D{ nullptr };
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
@@ -290,6 +293,7 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
 		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
+		LogRelocationTarget("AIProcess::DoUpdate3dModel", Address::AIProcessDoUpdate3dModel.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
 		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
@@ -703,6 +707,26 @@ namespace Hooks
 		});
 	}
 
+	void HookedAIProcessDoUpdate3dModel(RE::AIProcess* a_process, RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	{
+		constexpr std::uint16_t kFullSkeletonModelUpdateFlags = 0x520;
+		if (!a_actor || (a_updateFlags & kFullSkeletonModelUpdateFlags) != kFullSkeletonModelUpdateFlags) {
+			OriginalAIProcessDoUpdate3dModel(a_process, a_actor, a_updateFlags);
+			return;
+		}
+
+		const auto discardedLifecycleEvents = Smp::DiscardQueuedLifecycleEvents(a_actor);
+		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
+		physicsWorld->PrepareActor3DModelUpdate(a_actor, a_updateFlags);
+		OriginalAIProcessDoUpdate3dModel(a_process, a_actor, a_updateFlags);
+		physicsWorld->QueueActor3DModelUpdateCompletion(a_actor, a_updateFlags);
+		spdlog::debug(
+			"queued actor 3D model update completion after AIProcess::DoUpdate3dModel actor={} flags=0x{:X} discardedQueuedLifecycleEvents={}",
+			static_cast<void*>(a_actor),
+			a_updateFlags,
+			discardedLifecycleEvents);
+	}
+
 	bool InstallLifecycleHooks()
 	{
 		LogHookTargets();
@@ -760,6 +784,13 @@ namespace Hooks
 		if (!OriginalReset3D) {
 			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Address::Reset3D, Address::Reset3DPrologueSize.value(), reinterpret_cast<void*>(&HookedReset3D));
 		}
+		if (!OriginalAIProcessDoUpdate3dModel) {
+			OriginalAIProcessDoUpdate3dModel = CreateBranchGateway5<AIProcessDoUpdate3dModel_t>(
+				"AIProcess::DoUpdate3dModel",
+				Address::AIProcessDoUpdate3dModel,
+				Address::AIProcessDoUpdate3dModelPrologueSize.value(),
+				reinterpret_cast<void*>(&HookedAIProcessDoUpdate3dModel));
+		}
 		if (!OriginalSetFaceGenBoneName) {
 			OriginalSetFaceGenBoneName = CreateBranchGateway5<SetFaceGenBoneName_t>(
 				"BSFaceGenModelExtraData::SetBoneName",
@@ -794,6 +825,7 @@ namespace Hooks
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
 			OriginalFaceGenSkinAllGeometry &&
+			OriginalAIProcessDoUpdate3dModel &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
 			OriginalSetFaceGenBoneName &&

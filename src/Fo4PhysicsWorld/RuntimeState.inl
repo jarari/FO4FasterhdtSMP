@@ -3,6 +3,136 @@
 
 namespace Smp
 {
+	void Fo4PhysicsWorld::PrepareActor3DModelUpdate(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+
+		std::uint32_t clearedStates = 0;
+		for (auto& actorStatePointer : systems_) {
+			auto& actorState = *actorStatePointer;
+			if (actorState.actor != a_actor || actorState.firstPerson) {
+				continue;
+			}
+
+			ClearSystemLocked(actorState);
+			++clearedStates;
+		}
+		std::erase_if(systems_, [](const auto& a_state) {
+			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
+		});
+
+		const auto discardedSuspended = std::erase_if(
+			suspendedActors_,
+			[a_actor](const SuspendedActorCandidate& a_candidate) {
+				const auto actor = a_candidate.actorHandle.get();
+				return actor && actor.get() == a_actor && !a_candidate.firstPerson;
+			});
+		const auto discardedActorRebuilds = std::erase_if(
+			pendingActorRebuilds_,
+			[a_actor](const PendingActorRebuild& a_pending) {
+				const auto actor = a_pending.actorHandle.get();
+				return actor && actor.get() == a_actor && !a_pending.firstPerson;
+			});
+		const auto discardedHeadRebuilds = std::erase_if(
+			pendingHeadRebuilds_,
+			[a_actor](const PendingHeadRebuild& a_pending) {
+				const auto actor = a_pending.actorHandle.get();
+				return actor && actor.get() == a_actor;
+			});
+		const auto discardedModelUpdates = std::erase_if(
+			pendingActor3DModelUpdates_,
+			[a_actor](const PendingActor3DModelUpdate& a_pending) {
+				const auto actor = a_pending.actorHandle.get();
+				return actor && actor.get() == a_actor;
+			});
+
+		ResetStepClockLocked();
+		spdlog::debug(
+			"prepared actor 3D model update actor={} flags=0x{:X} clearedStates={} discardedSuspended={} discardedActorRebuilds={} discardedHeadRebuilds={} discardedModelUpdates={}",
+			static_cast<void*>(a_actor),
+			a_updateFlags,
+			clearedStates,
+			discardedSuspended,
+			discardedActorRebuilds,
+			discardedHeadRebuilds,
+			discardedModelUpdates);
+	}
+
+	void Fo4PhysicsWorld::QueueActor3DModelUpdateCompletion(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		auto actorHandle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		if (!actorHandle) {
+			return;
+		}
+
+		for (auto& pending : pendingActor3DModelUpdates_) {
+			const auto actor = pending.actorHandle.get();
+			if (actor && actor.get() == a_actor) {
+				pending.updateFlags |= a_updateFlags;
+				return;
+			}
+		}
+
+		pendingActor3DModelUpdates_.push_back({
+			.actorHandle = actorHandle,
+			.updateFlags = a_updateFlags,
+		});
+	}
+
+	void Fo4PhysicsWorld::CompletePendingActor3DModelUpdates()
+	{
+		std::vector<PendingActor3DModelUpdate> pendingUpdates;
+		{
+			std::scoped_lock lock(lock_);
+			pendingUpdates.swap(pendingActor3DModelUpdates_);
+		}
+
+		for (const auto& pending : pendingUpdates) {
+			const auto actor = pending.actorHandle.get();
+			if (actor) {
+				CompleteActor3DModelUpdate(actor.get(), pending.updateFlags);
+			}
+		}
+	}
+
+	void Fo4PhysicsWorld::CompleteActor3DModelUpdate(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	{
+		if (!a_actor) {
+			return;
+		}
+
+		std::scoped_lock lock(lock_);
+		if (!InitializeLocked()) {
+			return;
+		}
+
+		// ReEquipAll attachment events were drained before this completion and
+		// recorded their XML/bone context in the existing pending rebuild. Keep
+		// those records; the forced rescan is only the fallback when none exist.
+		MarkPendingActorRebuildLocked(a_actor, false, {}, true, true, false);
+		MarkPendingHeadRebuildLocked(LifecycleEvent{
+			.type = LifecycleEventType::kActorHeadInitialized,
+			.actor = a_actor,
+			.firstPerson = false,
+		});
+		ResetStepClockLocked();
+		spdlog::debug(
+			"completed actor 3D model update at main-frame sync actor={} flags=0x{:X} forceArmorRescan=true headReloadQueued=true",
+			static_cast<void*>(a_actor),
+			a_updateFlags);
+	}
+
 	void Fo4PhysicsWorld::NoteCharacterCustomizationTarget(RE::Actor* a_actor)
 	{
 		WaitForAsyncStep();

@@ -87,6 +87,22 @@ namespace Smp
 		GetLifecycleEventQueue().push_back(std::move(retained));
 	}
 
+	std::size_t DiscardQueuedLifecycleEvents(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return 0;
+		}
+
+		std::scoped_lock lock(GetLifecycleEventQueueLock());
+		return std::erase_if(GetLifecycleEventQueue(), [a_actor](const LifecycleEvent& a_event) {
+			if (a_event.actor == a_actor) {
+				return true;
+			}
+			const auto retainedActor = a_event.retainedActor.get();
+			return retainedActor && retainedActor.get() == a_actor;
+		});
+	}
+
 	void DrainQueuedLifecycleEvents()
 	{
 		std::vector<LifecycleEvent> events;

@@ -72,6 +72,7 @@
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
+		std::vector<PendingActor3DModelUpdate> pendingActor3DModelUpdates_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		RE::ActorHandle characterCustomizationTarget_;
 		std::uint32_t loadingMenuDepth_{ 0 };

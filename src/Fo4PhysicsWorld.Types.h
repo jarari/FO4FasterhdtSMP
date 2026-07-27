@@ -26,3 +26,9 @@
 			std::uint32_t frameDelay{ 0 };
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
+
+		struct PendingActor3DModelUpdate
+		{
+			RE::ActorHandle actorHandle;
+			std::uint16_t updateFlags{ 0 };
+		};

@@ -1958,15 +1958,19 @@ namespace
 
 		const auto havokBoneCount = std::min(skeleton->bones.size, skeleton->referencePose.size);
 		std::unordered_map<std::string, RE::NiTransform> referenceLocals;
+		std::unordered_map<std::string, std::int32_t> referenceIndices;
 		referenceLocals.reserve(static_cast<std::size_t>(havokBoneCount));
+		referenceIndices.reserve(static_cast<std::size_t>(havokBoneCount));
 		for (std::int32_t index = 0; index < havokBoneCount; ++index) {
 			const auto* boneName = HkStringPtrData(skeleton->bones.data[index].name);
 			if (!boneName || *boneName == '\0') {
 				continue;
 			}
+			const auto normalizedName = Smp::NormalizePhysicsName(boneName);
 			referenceLocals.insert_or_assign(
-				Smp::NormalizePhysicsName(boneName),
+				normalizedName,
 				ToNiTransform(skeleton->referencePose.data[index]));
+			referenceIndices.insert_or_assign(std::move(normalizedName), index);
 		}
 		if (referenceLocals.empty()) {
 			return false;
@@ -2043,6 +2047,46 @@ namespace
 			return found != flattenedIndices.end() && computeActorWorld(found->second, a_world);
 		};
 
+		std::vector<RE::NiTransform> canonicalHavokWorlds(
+			static_cast<std::size_t>(havokBoneCount),
+			RE::NiTransform::IDENTITY);
+		std::vector<std::uint8_t> havokWorldState(static_cast<std::size_t>(havokBoneCount), 0);
+		const auto computeHavokWorld = [&](this auto&& a_self, const std::int32_t a_index, RE::NiTransform& a_world) -> bool {
+			if (a_index < 0 || a_index >= havokBoneCount) {
+				return false;
+			}
+			const auto index = static_cast<std::size_t>(a_index);
+			if (havokWorldState[index] == 2) {
+				a_world = canonicalHavokWorlds[index];
+				return true;
+			}
+			if (havokWorldState[index] == 1) {
+				return false;
+			}
+
+			havokWorldState[index] = 1;
+			RE::NiTransform parentWorld = a_flattened->world;
+			const auto parentIndex =
+				a_index < skeleton->parentIndices.size ?
+					skeleton->parentIndices.data[a_index] :
+					static_cast<std::int16_t>(-1);
+			if (parentIndex >= 0 && !a_self(parentIndex, parentWorld)) {
+				havokWorldState[index] = 0;
+				return false;
+			}
+
+			a_world = ComposeFo4NiTransform(
+				parentWorld,
+				ToNiTransform(skeleton->referencePose.data[a_index]));
+			canonicalHavokWorlds[index] = a_world;
+			havokWorldState[index] = 2;
+			return true;
+		};
+		const auto findHavokWorld = [&](const std::string_view a_name, RE::NiTransform& a_world) {
+			const auto found = referenceIndices.find(Smp::NormalizePhysicsName(a_name));
+			return found != referenceIndices.end() && computeHavokWorld(found->second, a_world);
+		};
+
 		std::unordered_map<std::string, const Smp::ArmorBoneReference*> capturedReferences;
 		capturedReferences.reserve(a_boneReferences.size());
 		for (const auto& reference : a_boneReferences) {
@@ -2101,6 +2145,7 @@ namespace
 
 		std::uint32_t appliedArmorBones = 0;
 		std::uint32_t appliedActorBones = 0;
+		std::uint32_t appliedHavokHierarchyFallbackBones = 0;
 		std::uint32_t appliedCapturedSharedFallbackBones = 0;
 		std::uint32_t resolvedMatchedBones = 0;
 		std::uint32_t requiredMatchedBones = 0;
@@ -2116,6 +2161,11 @@ namespace
 				resolved = findActorWorld(matchedBone.name, canonicalWorld);
 				if (resolved) {
 					++appliedActorBones;
+				} else {
+					resolved = findHavokWorld(matchedBone.name, canonicalWorld);
+					if (resolved) {
+						++appliedHavokHierarchyFallbackBones;
+					}
 				}
 			} else if (reference != capturedReferences.end() && reference->second->isArmorOnly) {
 				resolved = computeCapturedWorld(*reference->second, canonicalWorld);
@@ -2145,7 +2195,7 @@ namespace
 		}
 
 		spdlog::debug(
-			"built detached Havok reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
+			"built detached Havok reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} havokHierarchyFallbackBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_flattened),
 			havokBoneCount,
@@ -2154,6 +2204,7 @@ namespace
 			retainedFlattenedLocals,
 			appliedArmorBones,
 			appliedActorBones,
+			appliedHavokHierarchyFallbackBones,
 			appliedCapturedSharedFallbackBones,
 			resolvedMatchedBones,
 			a_matchedBones.size(),
