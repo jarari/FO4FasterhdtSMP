@@ -166,6 +166,7 @@ namespace Smp
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
 		std::uint64_t buildGroup{ 0 };
+		bool isHeadPartClosure{ false };
 	};
 
 	struct BuildResult

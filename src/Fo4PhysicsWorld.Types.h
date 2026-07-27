@@ -22,7 +22,6 @@
 			RE::ActorHandle actorHandle;
 			LifecycleEventType type{ LifecycleEventType::kActorHeadInitialized };
 			RE::NiPointer<RE::NiAVObject> object;
-			RE::BGSHeadPart* headPart{ nullptr };
 			std::uint32_t frameDelay{ 0 };
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};

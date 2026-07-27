@@ -712,7 +712,6 @@ namespace Smp
 			if (resolvedActor && resolvedActor.get() == a_event.actor) {
 				pending.type = LifecycleEventType::kActorHeadInitialized;
 				pending.object = nullptr;
-				pending.headPart = nullptr;
 				pending.frameDelay = std::max(pending.frameDelay, kHeadInitializedRebuildDelayFrames);
 				pending.cpuCopyRetryCount = 0;
 				return;
@@ -1130,10 +1129,10 @@ namespace Smp
 			}
 			if (hairSlotArmorBuild) {
 				std::vector<std::uint64_t> staleHeadBuildGroups;
-				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
+				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, staleHeadBuildGroups);
 				if (replacedHeadParts > 0) {
 					spdlog::debug(
-						"pending hair-slot armor rebuild is replacing tracked head/hair system groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+						"pending hair-slot armor rebuild is replacing tracked hair headpart groups actor={} bipedObject={} object={} xml='{}' hairRecords={} groups={}",
 						static_cast<void*>(a_actor),
 						std::to_underlying(record.bipedObject),
 						static_cast<void*>(rebuildObject),
@@ -1499,7 +1498,6 @@ namespace Smp
 				.type = it->type,
 				.actor = actor,
 				.object = it->object ? it->object.get() : reinterpret_cast<RE::NiAVObject*>(faceNode),
-				.headPart = it->headPart,
 				.firstPerson = false,
 			};
 			bool cpuCopyPending = false;

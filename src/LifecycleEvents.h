@@ -34,7 +34,6 @@ namespace Smp
 		RE::BIPED_OBJECT   bipedObject{ RE::BIPED_OBJECT::kTotal };
 		RE::NiAVObject*    object{ nullptr };
 		RE::NiAVObject*    sourceObject{ nullptr };
-		RE::BGSHeadPart*   headPart{ nullptr };
 		std::vector<ArmorBoneReference> armorBoneReferences;
 		RE::NiNode*        destinationRoot{ nullptr };
 		RE::NiNode*        sourceRoot{ nullptr };

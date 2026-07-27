@@ -852,11 +852,12 @@ namespace Smp
 
 	std::uint32_t Fo4PhysicsWorld::CollectHeadPartGroupsLocked(
 		const Fo4SkinnedMeshSystem& a_state,
+		const BuildDomain a_domain,
 		std::vector<std::uint64_t>& a_buildGroups) const
 	{
 		std::uint32_t matchedRecords = 0;
 		for (const auto& record : a_state.headPartRecords) {
-			if (record.buildGroup == 0) {
+			if (record.domain != a_domain || record.buildGroup == 0) {
 				continue;
 			}
 

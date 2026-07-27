@@ -238,6 +238,7 @@ namespace
 		RE::NiPointer<RE::NiNode> destinationRoot;
 		std::vector<Smp::ArmorBoneReference> boneReferences;
 		Smp::BuildDomain domain{ Smp::BuildDomain::kHead };
+		bool isHeadPartClosure{ false };
 	};
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
@@ -367,6 +368,20 @@ namespace
 			nullptr;
 	}
 
+	bool IsSupportedHeadPartClosureRoot(RE::BGSHeadPart* a_headPart)
+	{
+		return a_headPart &&
+			a_headPart->type.get() != RE::BGSHeadPart::HeadPartType::kMisc;
+	}
+
+	Smp::BuildDomain GetHeadPartBuildDomain(RE::BGSHeadPart* a_headPart)
+	{
+		return a_headPart &&
+				a_headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair ?
+			Smp::BuildDomain::kHair :
+			Smp::BuildDomain::kHead;
+	}
+
 	std::span<RE::BGSHeadPart*> GetRuntimeHeadParts(const RE::TESNPC* a_npc)
 	{
 		if (!a_npc) {
@@ -409,17 +424,73 @@ namespace
 			std::span<RE::BGSHeadPart*>{};
 	}
 
-	void AddHeadpartClosureKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
+	template <class Visitor>
+	void VisitHeadPartClosure(
+		RE::BGSHeadPart* a_headPart,
+		std::unordered_set<RE::BGSHeadPart*>& a_visited,
+		Visitor&& a_visitor)
 	{
-		if (!a_headPart) {
+		if (!a_headPart || !a_visited.insert(a_headPart).second) {
 			return;
 		}
 
-		AddHeadpartKey(a_keys, GetHeadPartModelPath(a_headPart));
-		AddHeadpartKey(a_keys, std::string(std::string_view(a_headPart->formEditorID)));
+		a_visitor(a_headPart);
 		for (auto* extraPart : a_headPart->extraParts) {
-			AddHeadpartClosureKeys(extraPart, a_keys);
+			VisitHeadPartClosure(extraPart, a_visited, a_visitor);
 		}
+	}
+
+	std::vector<RE::BGSHeadPart*> CollectRuntimeHeadPartClosureRoots(const RE::TESNPC* a_npc)
+	{
+		const auto runtimeHeadParts = GetRuntimeHeadParts(a_npc);
+		std::unordered_set<RE::BGSHeadPart*> referencedExtraParts;
+		std::unordered_set<RE::BGSHeadPart*> scannedParts;
+		for (auto* headPart : runtimeHeadParts) {
+			VisitHeadPartClosure(
+				headPart,
+				scannedParts,
+				[&](RE::BGSHeadPart* a_part) {
+					for (auto* extraPart : a_part->extraParts) {
+						if (extraPart) {
+							referencedExtraParts.insert(extraPart);
+						}
+					}
+				});
+		}
+
+		std::vector<RE::BGSHeadPart*> roots;
+		std::unordered_set<RE::BGSHeadPart*> claimedParts;
+		const auto claimRoot = [&](RE::BGSHeadPart* a_headPart) {
+			if (!IsSupportedHeadPartClosureRoot(a_headPart) || claimedParts.contains(a_headPart)) {
+				return;
+			}
+			roots.push_back(a_headPart);
+			VisitHeadPartClosure(a_headPart, claimedParts, [](RE::BGSHeadPart*) {});
+		};
+
+		for (auto* headPart : runtimeHeadParts) {
+			if (!referencedExtraParts.contains(headPart)) {
+				claimRoot(headPart);
+			}
+		}
+		// Cyclic graphs, or supported parts referenced only by a misc root, have
+		// no eligible unreferenced root. Claim the first unowned supported part.
+		for (auto* headPart : runtimeHeadParts) {
+			claimRoot(headPart);
+		}
+		return roots;
+	}
+
+	void AddHeadpartClosureKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
+	{
+		std::unordered_set<RE::BGSHeadPart*> visited;
+		VisitHeadPartClosure(
+			a_headPart,
+			visited,
+			[&](RE::BGSHeadPart* a_part) {
+				AddHeadpartKey(a_keys, GetHeadPartModelPath(a_part));
+				AddHeadpartKey(a_keys, std::string(std::string_view(a_part->formEditorID)));
+			});
 	}
 
 	std::vector<std::string> BuildHairHeadpartKeys(RE::Actor* a_actor)
@@ -430,8 +501,8 @@ namespace
 			return keys;
 		}
 
-		for (auto* headPart : GetRuntimeHeadParts(npc)) {
-			if (headPart && headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair) {
+		for (auto* headPart : CollectRuntimeHeadPartClosureRoots(npc)) {
+			if (GetHeadPartBuildDomain(headPart) == Smp::BuildDomain::kHair) {
 				AddHeadpartClosureKeys(headPart, keys);
 			}
 		}
@@ -830,18 +901,26 @@ namespace
 		return nullptr;
 	}
 
-	struct HairHeadPartClosureSources
+	struct HeadPartClosureSources
 	{
+		struct ModelSource
+		{
+			RE::NiPointer<RE::NiAVObject> root;
+			std::string nifPath;
+		};
+
 		RE::NiAVObject* object{ nullptr };
 		RE::NiNode* destinationRoot{ nullptr };
+		Smp::BuildDomain domain{ Smp::BuildDomain::kHead };
 		Smp::DefaultBBP::NameMap meshNameMap;
 		std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
+		std::vector<ModelSource> modelSources;
 		std::vector<RE::NiPointer<RE::NiAVObject>> liveBindingObjects;
 		std::vector<std::filesystem::path> physicsXmlPaths;
 		std::vector<Smp::ArmorBoneReference> boneReferences;
 	};
 
-	void AppendHairClosurePhysicsXml(
+	void AppendHeadPartClosurePhysicsXml(
 		std::vector<std::filesystem::path>& a_paths,
 		const std::filesystem::path& a_path)
 	{
@@ -915,7 +994,7 @@ namespace
 			a_source.constraintDescriptors.end());
 	}
 
-	void MergeHairClosureBoneReferences(
+	void MergeHeadPartClosureBoneReferences(
 		std::vector<Smp::ArmorBoneReference>& a_target,
 		std::vector<Smp::ArmorBoneReference> a_source)
 	{
@@ -932,12 +1011,12 @@ namespace
 		}
 	}
 
-	void AppendLiveHairHeadPartCandidates(
+	void AppendLiveHeadPartClosureComponents(
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_faceObject,
 		RE::BGSHeadPart* a_headPart,
 		std::unordered_set<RE::BGSHeadPart*>& a_visited,
-		HairHeadPartClosureSources& a_closure)
+		HeadPartClosureSources& a_closure)
 	{
 		if (!a_actor || !a_faceObject || !a_closure.destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
 			return;
@@ -956,7 +1035,7 @@ namespace
 			const auto meshError = RE::BSModelDB::Demand(modelPath, std::addressof(meshSourceRoot), meshArgs);
 			if (meshError != RE::BSResource::ErrorCode::kNone || !meshSourceRoot) {
 				spdlog::warn(
-					"failed to load current hair headpart mesh source actor={} headPart={:08X} nif='{}' error={}",
+					"failed to load current headpart mesh source actor={} headPart={:08X} nif='{}' error={}",
 					static_cast<void*>(a_actor),
 					a_headPart->GetFormID(),
 					modelPath,
@@ -970,7 +1049,7 @@ namespace
 			if (faceGenError != RE::BSResource::ErrorCode::kNone || !sourceRoot) {
 				if (meshSourceRoot) {
 					spdlog::warn(
-						"failed to load current hair headpart FaceGen source actor={} headPart={:08X} nif='{}' error={}; using complete model source",
+						"failed to load current headpart FaceGen source actor={} headPart={:08X} nif='{}' error={}; using complete model source",
 						static_cast<void*>(a_actor),
 						a_headPart->GetFormID(),
 						modelPath,
@@ -978,7 +1057,7 @@ namespace
 					sourceRoot = meshSourceRoot;
 				} else {
 					spdlog::warn(
-						"failed to load current hair headpart model actor={} headPart={:08X} nif='{}' error={}",
+						"failed to load current headpart model actor={} headPart={:08X} nif='{}' error={}",
 						static_cast<void*>(a_actor),
 						a_headPart->GetFormID(),
 						modelPath,
@@ -1001,6 +1080,10 @@ namespace
 						return a_root.get() == meshSourceRoot.get();
 					})) {
 					a_closure.meshSourceRoots.emplace_back(meshSourceRoot.get());
+					a_closure.modelSources.push_back({
+						.root = meshSourceRoot.get(),
+						.nifPath = modelPath,
+					});
 				}
 				const auto sourceGeometryName = sourceGeometry ?
 					std::string(std::string_view(sourceGeometry->GetName())) :
@@ -1016,21 +1099,15 @@ namespace
 					a_closure.liveBindingObjects.emplace_back(liveGeometry);
 				}
 
-				auto references = Smp::CaptureArmorBoneReferences(
-					meshSourceRoot.get(),
-					a_closure.destinationRoot,
-					modelPath);
-				const auto referenceCount = references.size();
-				MergeHairClosureBoneReferences(a_closure.boneReferences, std::move(references));
-
 				if (selection) {
-					AppendHairClosurePhysicsXml(a_closure.physicsXmlPaths, selection->path);
+					AppendHeadPartClosurePhysicsXml(a_closure.physicsXmlPaths, selection->path);
 				}
 				if (!liveGeometry) {
 					spdlog::debug(
-						"current hair headpart source has no live FaceGen geometry actor={} headPart={:08X} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}' supplementalMeshSource={}",
+						"current headpart source has no live FaceGen geometry actor={} headPart={:08X} type={} editorID='{}' nif='{}' sourceGeometry='{}' xml='{}' supplementalMeshSource={}",
 						static_cast<void*>(a_actor),
 						a_headPart->GetFormID(),
+						std::to_underlying(a_headPart->type.get()),
 						std::string_view(a_headPart->formEditorID),
 						modelPath,
 						sourceGeometryName,
@@ -1043,21 +1120,22 @@ namespace
 						a_closure.meshNameMap[sourceGeometryName].emplace(liveGeometryName);
 					}
 					spdlog::debug(
-						"resolved current hair headpart component actor={} headPart={:08X} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}' references={}",
+						"resolved current headpart component actor={} headPart={:08X} type={} domain={} nif='{}' xml='{}' sourceGeometry='{}' liveGeometry={} name='{}'",
 						static_cast<void*>(a_actor),
 						a_headPart->GetFormID(),
+						std::to_underlying(a_headPart->type.get()),
+						BuildDomainName(a_closure.domain),
 						modelPath,
 						selectedXml,
 						sourceGeometryName,
 						static_cast<void*>(liveGeometry),
-						liveGeometryName,
-						referenceCount);
+						liveGeometryName);
 				}
 			}
 		}
 
 		for (auto* extraPart : a_headPart->extraParts) {
-			AppendLiveHairHeadPartCandidates(
+			AppendLiveHeadPartClosureComponents(
 				a_actor,
 				a_faceObject,
 				extraPart,
@@ -1066,7 +1144,7 @@ namespace
 		}
 	}
 
-	void CollectLiveHairHeadPartCandidates(
+	void CollectLiveHeadPartCandidates(
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_faceObject,
 		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
@@ -1078,37 +1156,20 @@ namespace
 			return;
 		}
 
-		const auto runtimeHeadParts = GetRuntimeHeadParts(npc);
-		std::unordered_set<RE::BGSHeadPart*> referencedExtraParts;
-		std::unordered_set<RE::BGSHeadPart*> scannedExtraParts;
-		const auto collectExtraParts = [&](this auto&& a_self, RE::BGSHeadPart* a_headPart) -> void {
-			if (!a_headPart || !scannedExtraParts.insert(a_headPart).second) {
-				return;
-			}
-			for (auto* extraPart : a_headPart->extraParts) {
-				if (!extraPart) {
-					continue;
-				}
-				referencedExtraParts.insert(extraPart);
-				a_self(extraPart);
-			}
-		};
-		for (auto* headPart : runtimeHeadParts) {
-			collectExtraParts(headPart);
-		}
-
+		const auto closureRoots = CollectRuntimeHeadPartClosureRoots(npc);
 		std::unordered_set<RE::BGSHeadPart*> visited;
 		const auto appendClosure = [&](RE::BGSHeadPart* a_headPart) {
 			if (!a_headPart ||
-				a_headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair ||
+				!IsSupportedHeadPartClosureRoot(a_headPart) ||
 				visited.contains(a_headPart)) {
 				return;
 			}
 
-			HairHeadPartClosureSources closure{
+			HeadPartClosureSources closure{
 				.destinationRoot = destinationRoot,
+				.domain = GetHeadPartBuildDomain(a_headPart),
 			};
-			AppendLiveHairHeadPartCandidates(
+			AppendLiveHeadPartClosureComponents(
 				a_actor,
 				a_faceObject,
 				a_headPart,
@@ -1117,6 +1178,14 @@ namespace
 
 			if (!closure.object || closure.physicsXmlPaths.empty()) {
 				return;
+			}
+
+			for (const auto& source : closure.modelSources) {
+				auto references = Smp::CaptureArmorBoneReferences(
+					source.root.get(),
+					closure.destinationRoot,
+					source.nifPath);
+				MergeHeadPartClosureBoneReferences(closure.boneReferences, std::move(references));
 			}
 
 			HeadPhysicsXmlBuildCandidate candidate;
@@ -1128,24 +1197,12 @@ namespace
 			candidate.sourceObject = closure.object;
 			candidate.destinationRoot = destinationRoot;
 			candidate.boneReferences = std::move(closure.boneReferences);
-			candidate.domain = Smp::BuildDomain::kHair;
+			candidate.domain = closure.domain;
+			candidate.isHeadPartClosure = true;
 			a_candidates.push_back(std::move(candidate));
 		};
 
-		for (auto* headPart : runtimeHeadParts) {
-			if (!headPart || headPart->type.get() != RE::BGSHeadPart::HeadPartType::kHair) {
-				continue;
-			}
-			if (referencedExtraParts.contains(headPart)) {
-				continue;
-			}
-			appendClosure(headPart);
-		}
-
-		// Malformed/cyclic extra-part graphs may have no unreferenced root.
-		// Keep discovery live-state driven by processing the first unvisited hair
-		// component as a closure rather than dropping the hair entirely.
-		for (auto* headPart : runtimeHeadParts) {
+		for (auto* headPart : closureRoots) {
 			appendClosure(headPart);
 		}
 	}

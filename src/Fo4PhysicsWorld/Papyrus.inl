@@ -381,7 +381,8 @@ namespace Smp
 			if (!actorState->firstPerson && (a_full || !actorState->headPartRecords.empty())) {
 				if (!a_full) {
 					std::vector<std::uint64_t> headBuildGroups;
-					CollectHeadPartGroupsLocked(*actorState, headBuildGroups);
+					CollectHeadPartGroupsLocked(*actorState, BuildDomain::kHead, headBuildGroups);
+					CollectHeadPartGroupsLocked(*actorState, BuildDomain::kHair, headBuildGroups);
 					if (!headBuildGroups.empty()) {
 						std::vector<AttachmentBoneLocalPose> cachedHeadPoses;
 						for (const auto& localPose : actorState->attachmentBoneLocalPoses) {

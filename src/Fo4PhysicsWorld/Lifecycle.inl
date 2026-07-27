@@ -299,10 +299,10 @@ namespace Smp
 				}
 				if (hairSlotArmorBuild) {
 					std::vector<std::uint64_t> staleHeadBuildGroups;
-					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, staleHeadBuildGroups);
+					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, staleHeadBuildGroups);
 					if (replacedHeadParts > 0) {
 						spdlog::debug(
-							"hair-slot armor attach is replacing tracked head/hair system groups actor={} bipedObject={} object={} xml='{}' headPartRecords={} groups={}",
+							"hair-slot armor attach is replacing tracked hair headpart groups actor={} bipedObject={} object={} xml='{}' hairRecords={} groups={}",
 							static_cast<void*>(a_event.actor),
 							std::to_underlying(scopedEvent.bipedObject),
 							static_cast<void*>(a_object),
@@ -473,7 +473,7 @@ namespace Smp
 		}
 
 		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
-		CollectLiveHairHeadPartCandidates(
+		CollectLiveHeadPartCandidates(
 			a_event.actor,
 			reinterpret_cast<RE::NiAVObject*>(faceNode),
 			candidates);
@@ -523,26 +523,9 @@ namespace Smp
 		}
 		actorState.faceNode = faceObject;
 
-		const auto suppressHeadForHairArmor =
+		const auto suppressHairHeadParts =
 			HasActiveHairSlotArmorLocked(actorState) ||
 			(disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_event.actor));
-		if (suppressHeadForHairArmor) {
-			std::vector<std::uint64_t> removedGroups;
-			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, removedGroups);
-			if (!removedGroups.empty()) {
-				ClearBuildGroupsLocked(actorState, removedGroups);
-			}
-			spdlog::debug(
-				"skipping head/hair system rebuild while hair-slot armor is active actor={} faceNode={} removedHeadPartRecords={} removedGroups={}",
-				static_cast<void*>(a_event.actor),
-				static_cast<void*>(faceNode),
-				removedHeadParts,
-				removedGroups.size());
-			std::erase_if(systems_, [](const auto& a_state) {
-				return !a_state->suspended && !a_state->HasPhysics();
-			});
-			return false;
-		}
 
 		const auto touchedHeadGeometry = a_event.type == LifecycleEventType::kHeadSkinSingleGeometry;
 		const auto touchedObjectValid = !touchedHeadGeometry || !a_event.object || IsObjectInTree(faceObject, a_event.object);
@@ -557,13 +540,56 @@ namespace Smp
 
 		const auto hairKeys = BuildHairHeadpartKeys(a_event.actor);
 		std::vector<HeadPhysicsXmlBuildCandidate> candidates;
-		const auto headPartIsHair = a_event.headPart && a_event.headPart->type.get() == RE::BGSHeadPart::HeadPartType::kHair;
-		CollectLiveHairHeadPartCandidates(a_event.actor, faceObject, candidates);
+		CollectLiveHeadPartCandidates(a_event.actor, faceObject, candidates);
 		CollectHeadPhysicsXmlSelections(
 			touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject,
 			hairKeys,
-			candidates,
-			headPartIsHair);
+			candidates);
+
+		if (suppressHairHeadParts) {
+			std::vector<std::uint64_t> removedGroups;
+			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, removedGroups);
+			if (!removedGroups.empty()) {
+				ClearBuildGroupsLocked(actorState, removedGroups);
+			}
+			const auto removedCandidates = std::erase_if(candidates, [](const HeadPhysicsXmlBuildCandidate& a_candidate) {
+				return a_candidate.domain == BuildDomain::kHair;
+			});
+			spdlog::debug(
+				"suppressed hair headpart physics while preserving non-hair headparts actor={} faceNode={} removedRecords={} removedGroups={} removedCandidates={}",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(faceNode),
+				removedHeadParts,
+				removedGroups.size(),
+				removedCandidates);
+		}
+
+		std::vector<std::uint64_t> staleClosureGroups;
+		for (const auto& record : actorState.headPartRecords) {
+			if (!record.isHeadPartClosure || record.buildGroup == 0) {
+				continue;
+			}
+			const auto recordXmlKey = ConfigPaths::LowerString(record.physicsXmlPath);
+			const auto stillCurrent = std::ranges::any_of(candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
+				return a_candidate.isHeadPartClosure &&
+					a_candidate.domain == record.domain &&
+					a_candidate.object == record.object.get() &&
+					std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_path) {
+						return ConfigPaths::LowerString(a_path.string()) == recordXmlKey;
+					});
+			});
+			if (!stillCurrent && std::ranges::find(staleClosureGroups, record.buildGroup) == staleClosureGroups.end()) {
+				staleClosureGroups.push_back(record.buildGroup);
+			}
+		}
+		if (!staleClosureGroups.empty()) {
+			ClearBuildGroupsLocked(actorState, staleClosureGroups);
+			spdlog::debug(
+				"cleared {} stale headpart closure build groups for actor={} before rebuilding current headpart state",
+				staleClosureGroups.size(),
+				static_cast<void*>(a_event.actor));
+		}
+
 		if (candidates.empty()) {
 			if (!actorState.headPartRecords.empty()) {
 				if (!touchedHeadGeometry) {
@@ -594,36 +620,18 @@ namespace Smp
 		}
 
 		auto* loader = PhysicsXmlLoader::GetSingleton();
-		std::vector<std::uint64_t> staleHairGroups;
-		for (const auto& record : actorState.headPartRecords) {
-			if (record.domain != BuildDomain::kHair || record.buildGroup == 0) {
-				continue;
-			}
-			const auto recordXmlKey = ConfigPaths::LowerString(record.physicsXmlPath);
-			const auto stillCurrent = std::ranges::any_of(candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
-				return a_candidate.domain == BuildDomain::kHair &&
-					a_candidate.object == record.object.get() &&
-					std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_path) {
-						return ConfigPaths::LowerString(a_path.string()) == recordXmlKey;
-					});
-			});
-			if (!stillCurrent && std::ranges::find(staleHairGroups, record.buildGroup) == staleHairGroups.end()) {
-				staleHairGroups.push_back(record.buildGroup);
-			}
-		}
-		if (!staleHairGroups.empty()) {
-			ClearBuildGroupsLocked(actorState, staleHairGroups);
-			spdlog::debug(
-				"cleared {} stale hair closure build groups for actor={} before rebuilding current headpart state",
-				staleHairGroups.size(),
-				static_cast<void*>(a_event.actor));
-		}
-
 		std::uint32_t built = 0;
 		std::uint32_t skippedExisting = 0;
 		std::uint32_t skippedDuplicateXml = 0;
 		bool cpuCopyPending = false;
-		std::vector<std::pair<BuildDomain, std::string>> scannedPhysicsFiles;
+		struct ScannedPhysicsFile
+		{
+			BuildDomain domain;
+			std::string pathKey;
+			RE::NiAVObject* object;
+			bool isHeadPartClosure;
+		};
+		std::vector<ScannedPhysicsFile> scannedPhysicsFiles;
 		for (auto& candidate : candidates) {
 			std::vector<std::pair<std::filesystem::path, std::string>> selectedXmls;
 			for (const auto& path : candidate.paths) {
@@ -633,7 +641,13 @@ namespace Smp
 				}
 				const auto selectedXmlKey = ConfigPaths::LowerString(selectedXml);
 				const auto duplicatePhysicsFile = std::ranges::any_of(scannedPhysicsFiles, [&](const auto& a_entry) {
-					return a_entry.first == candidate.domain && a_entry.second == selectedXmlKey;
+					if (a_entry.domain != candidate.domain || a_entry.pathKey != selectedXmlKey) {
+						return false;
+					}
+					if (a_entry.isHeadPartClosure && candidate.isHeadPartClosure) {
+						return a_entry.object == candidate.object;
+					}
+					return true;
 				});
 				if (duplicatePhysicsFile) {
 					++skippedDuplicateXml;
@@ -642,6 +656,8 @@ namespace Smp
 				const auto trackedByAnotherObject = std::ranges::any_of(actorState.headPartRecords, [&](const HeadPartPhysicsRecord& a_record) {
 					return a_record.object.get() != candidate.object &&
 						a_record.domain == candidate.domain &&
+						a_record.isHeadPartClosure == candidate.isHeadPartClosure &&
+						!candidate.isHeadPartClosure &&
 						a_record.buildGroup != 0 &&
 						ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
 				});
@@ -649,7 +665,12 @@ namespace Smp
 					++skippedDuplicateXml;
 					continue;
 				}
-				scannedPhysicsFiles.push_back({ candidate.domain, selectedXmlKey });
+				scannedPhysicsFiles.push_back({
+					.domain = candidate.domain,
+					.pathKey = selectedXmlKey,
+					.object = candidate.object,
+					.isHeadPartClosure = candidate.isHeadPartClosure,
+				});
 				selectedXmls.emplace_back(path, std::move(selectedXmlKey));
 			}
 			if (selectedXmls.empty()) {
@@ -662,6 +683,7 @@ namespace Smp
 					return a_record.object.get() == candidate.object &&
 						a_record.sourceObject.get() == candidate.sourceObject.get() &&
 						a_record.domain == candidate.domain &&
+						a_record.isHeadPartClosure == candidate.isHeadPartClosure &&
 						a_record.buildGroup != 0 &&
 						ConfigPaths::LowerString(a_record.physicsXmlPath) == a_selectedXml.second;
 				});
@@ -711,6 +733,7 @@ namespace Smp
 			for (const auto& record : actorState.headPartRecords) {
 				if (record.object.get() == candidate.object &&
 					record.domain == candidate.domain &&
+					record.isHeadPartClosure == candidate.isHeadPartClosure &&
 					record.buildGroup != 0 &&
 					std::ranges::find(replacedGroups, record.buildGroup) == replacedGroups.end()) {
 					replacedGroups.push_back(record.buildGroup);
@@ -760,6 +783,7 @@ namespace Smp
 						.sourceObject = candidate.sourceObject,
 						.sourceRoot = candidate.sourceRoot,
 						.buildGroup = buildResult.buildGroup,
+						.isHeadPartClosure = candidate.isHeadPartClosure,
 					});
 				}
 				++built;
