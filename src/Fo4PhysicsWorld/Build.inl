@@ -942,7 +942,18 @@ namespace Smp
 			if (a_detachedSource && a_domain != BuildDomain::kArmor) {
 				fallbackNode = nullptr;
 				fallbackTransform = nullptr;
-				if (auto* actorBone = FindFlattenedBoneByName(liveActorSkeleton, a_decodedBone.name)) {
+				// Headpart candidates reuse armor references to materialize
+				// source-only bones that are not present in the flattened tree.
+				const auto resolvedReference = std::ranges::find_if(
+					a_event.armorBoneReferences,
+					[&a_decodedBone](const ArmorBoneReference& a_reference) {
+						return a_reference.resolvedNode &&
+							PhysicsNamesEqual(a_reference.name, a_decodedBone.name);
+					});
+				if (resolvedReference != a_event.armorBoneReferences.end()) {
+					fallbackNode = resolvedReference->resolvedNode.get();
+					fallbackTransform = std::addressof(fallbackNode->world);
+				} else if (auto* actorBone = FindFlattenedBoneByName(liveActorSkeleton, a_decodedBone.name)) {
 					fallbackNode = actorBone->node.get();
 					fallbackTransform = std::addressof(actorBone->world);
 				}
