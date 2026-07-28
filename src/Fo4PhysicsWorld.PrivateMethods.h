@@ -66,6 +66,7 @@
 		void ClearHeadPhysicsTrackingLocked(Fo4SkinnedMeshSystem& a_state, std::string_view a_reason);
 		void ClearBuildGroupsLocked(Fo4SkinnedMeshSystem& a_state, const std::vector<std::uint64_t>& a_buildGroups, bool a_resetToStoredLocalPose = true);
 		void ClearAllSystemsLocked();
+		void NoteSaveLoadActorLocked(const LifecycleEvent& a_event);
 		void ResumeFromLoadingMenuLocked();
 		bool BuildGroupHasMeshLocked(const Fo4SkinnedMeshSystem& a_state, std::uint64_t a_buildGroup) const;
 		bool BuildGroupHasBodyLocked(const Fo4SkinnedMeshSystem& a_state, std::uint64_t a_buildGroup) const;

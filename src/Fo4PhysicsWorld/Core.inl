@@ -115,6 +115,82 @@ namespace Smp
 		ResetLocked();
 	}
 
+	void Fo4PhysicsWorld::BeginSaveLoad()
+	{
+		WaitForAsyncStep();
+
+		std::size_t clearedSystems = 0;
+		std::size_t preservedHeadCaches = 0;
+		std::size_t dirtyActors = 0;
+		std::size_t discardedEvents = 0;
+		{
+			std::scoped_lock lock(lock_);
+			saveLoadInProgress_ = true;
+			loadingPhysicsSuspended_ = true;
+			loadingMenuDepth_ = 0;
+			saveLoadActors_.clear();
+			discardedEvents = DiscardAllQueuedLifecycleEvents();
+
+			std::vector<RetainedHeadSkeletonCache> retainedHeadCaches;
+			for (const auto& actorStatePointer : systems_) {
+				const auto& actorState = *actorStatePointer;
+				auto* actor = actorState.actor;
+				auto* faceNode = actor && !actorState.firstPerson ? actor->GetFaceNodeSkinned() : nullptr;
+				if (!actor || !faceNode || actorState.headPartRecords.empty() || !actorState.actorHandle) {
+					continue;
+				}
+
+				RetainedHeadSkeletonCache cache{
+					.actorHandle = actorState.actorHandle,
+					.retainedFaceIdentity = reinterpret_cast<std::uintptr_t>(faceNode),
+				};
+				for (const auto& record : actorState.headPartRecords) {
+					for (const auto& boneName : record.requiredBoneNames) {
+						MergePhysicsName(cache.requiredHeadBoneNames, boneName);
+					}
+					for (const auto& reference : record.boneReferences) {
+						MergeBoneReferenceRecipe(cache.headBoneReferences, reference);
+					}
+				}
+				if (!cache.headBoneReferences.empty()) {
+					retainedHeadCaches.push_back(std::move(cache));
+				}
+			}
+
+			clearedSystems = systems_.size();
+			ClearAllSystemsLocked();
+			retainedHeadSkeletonCaches_ = std::move(retainedHeadCaches);
+			preservedHeadCaches = retainedHeadSkeletonCaches_.size();
+			pendingActorRebuilds_.clear();
+			pendingHeadRebuilds_.clear();
+			pendingSkeletonTransitions_.clear();
+			characterCustomizationMenuDepth_ = 0;
+			characterCustomizationTarget_.reset();
+
+			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
+				NoteSaveLoadActorLocked(LifecycleEvent{
+					.type = LifecycleEventType::kActorSet3D,
+					.actor = player,
+					.object = player->Get3D(false),
+					.firstPerson = false,
+				});
+			}
+
+			if (dynamicsWorld_) {
+				dynamicsWorld_->clearForces();
+			}
+			dirtyActors = saveLoadActors_.size();
+			ResetStepClockLocked();
+		}
+
+		spdlog::debug(
+			"began save-load physics transaction clearedSystems={} preservedHeadCaches={} dirtyActors={} discardedQueuedLifecycleEvents={}",
+			clearedSystems,
+			preservedHeadCaches,
+			dirtyActors,
+			discardedEvents);
+	}
+
 	void Fo4PhysicsWorld::ResetSystems()
 	{
 		WaitForAsyncStep();

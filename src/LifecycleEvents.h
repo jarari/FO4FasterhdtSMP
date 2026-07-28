@@ -51,6 +51,7 @@ namespace Smp
 	RE::BSTEventSource<LifecycleEvent>& GetLifecycleEventSource();
 	void NotifyLifecycleEvent(const LifecycleEvent& a_event);
 	std::size_t DiscardQueuedLifecycleEvents(RE::Actor* a_actor);
+	std::size_t DiscardAllQueuedLifecycleEvents();
 	void DrainQueuedLifecycleEvents();
 	const char* ToString(LifecycleEventType a_type);
 }

@@ -64,6 +64,7 @@ namespace Smp
 		bool Initialize();
 		void ApplyConfig(const RuntimeSettings& a_settings);
 		void Reset();
+		void BeginSaveLoad();
 		void ResetSystems();
 		void SetDisabled(bool a_disabled);
 		[[nodiscard]] bool IsDisabled();

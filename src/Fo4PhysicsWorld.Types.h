@@ -26,6 +26,22 @@
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
 
+		struct SaveLoadArmorRecord
+		{
+			RE::BipedAnim* bipedIdentity{ nullptr };
+			RE::NiAVObject* objectIdentity{ nullptr };
+			ArmorPhysicsRecord record;
+		};
+
+		struct SaveLoadActorCandidate
+		{
+			RE::ActorHandle actorHandle;
+			bool firstPerson{ false };
+			bool rebuildArmor{ false };
+			bool rebuildHead{ false };
+			std::vector<SaveLoadArmorRecord> armorRecords;
+		};
+
 		struct PendingSkeletonTransition
 		{
 			RE::ActorHandle actorHandle;

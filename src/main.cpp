@@ -609,7 +609,7 @@ void OnInit(F4SE::MessagingInterface::Message* a_msg)
 		case F4SE::MessagingInterface::kPostPostLoad:
 			break;
 		case F4SE::MessagingInterface::kPreLoadGame:
-			spdlog::debug("pre-load-game detected; keeping live physics state until the engine sends detach/attach events");
+			Smp::Fo4PhysicsWorld::GetSingleton()->BeginSaveLoad();
 			break;
 		case F4SE::MessagingInterface::kPostLoadGame:
 		case F4SE::MessagingInterface::kGameLoaded:

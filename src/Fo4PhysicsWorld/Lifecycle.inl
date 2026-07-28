@@ -57,8 +57,10 @@ namespace Smp
 		pendingHeadRebuilds_.clear();
 		pendingSkeletonTransitions_.clear();
 		retainedHeadSkeletonCaches_.clear();
+		saveLoadActors_.clear();
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
+		saveLoadInProgress_ = false;
 		candidateEvents_ = 0;
 		simulationFrame_ = 1;
 		currentMaxActiveActors_ = maxActiveActors_;

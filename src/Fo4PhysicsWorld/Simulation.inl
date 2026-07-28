@@ -35,7 +35,9 @@ namespace Smp
 		{
 			std::scoped_lock lock(lock_);
 			if (loadingPhysicsSuspended_) {
-				ResumeFromLoadingMenuLocked();
+				if (loadingMenuDepth_ == 0) {
+					ResumeFromLoadingMenuLocked();
+				}
 				return;
 			}
 

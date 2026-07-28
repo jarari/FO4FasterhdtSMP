@@ -1655,8 +1655,158 @@ namespace Smp
 		retainedHeadSkeletonCaches_.clear();
 	}
 
+	void Fo4PhysicsWorld::NoteSaveLoadActorLocked(const LifecycleEvent& a_event)
+	{
+		if (!a_event.actor) {
+			return;
+		}
+
+		const auto actor3DReady =
+			(a_event.type == LifecycleEventType::kActorLoad3D ||
+			 a_event.type == LifecycleEventType::kActorSet3D) &&
+			a_event.object;
+		const auto headReady = !a_event.firstPerson && IsHeadCandidate(a_event.type);
+		const auto armorAttach =
+			!a_event.firstPerson &&
+			IsArmorAttachCandidate(a_event.type) &&
+			a_event.biped &&
+			a_event.object &&
+			!a_event.physicsXmlPath.empty();
+		if (!actor3DReady && !headReady && !armorAttach) {
+			return;
+		}
+
+		auto actorHandle = a_event.actor == RE::PlayerCharacter::GetSingleton() ?
+			RE::PlayerCharacter::GetPlayerHandle() :
+			RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_event.actor);
+		if (!actorHandle) {
+			return;
+		}
+
+		auto found = std::ranges::find_if(
+			saveLoadActors_,
+			[&](const SaveLoadActorCandidate& a_candidate) {
+				const auto actor = a_candidate.actorHandle.get();
+				return actor &&
+					actor.get() == a_event.actor &&
+					a_candidate.firstPerson == a_event.firstPerson;
+			});
+		if (found == saveLoadActors_.end()) {
+			saveLoadActors_.push_back({
+				.actorHandle = actorHandle,
+				.firstPerson = a_event.firstPerson,
+			});
+			found = std::prev(saveLoadActors_.end());
+		}
+
+		found->rebuildArmor = found->rebuildArmor || actor3DReady || armorAttach;
+		found->rebuildHead = found->rebuildHead || actor3DReady || headReady;
+		if (!armorAttach) {
+			return;
+		}
+
+		auto armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
+		StripQueuedArmorRuntimePointers(armorRecords);
+		for (auto& record : armorRecords) {
+			const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
+			auto existing = std::ranges::find_if(
+				found->armorRecords,
+				[&](const SaveLoadArmorRecord& a_existing) {
+					return a_existing.bipedIdentity == a_event.biped &&
+						a_existing.objectIdentity == a_event.object &&
+						a_existing.record.bipedObject == record.bipedObject &&
+						ConfigPaths::LowerString(a_existing.record.physicsXmlPath) == normalizedXml;
+				});
+			if (existing != found->armorRecords.end()) {
+				existing->record = std::move(record);
+				continue;
+			}
+
+			found->armorRecords.push_back({
+				.bipedIdentity = a_event.biped,
+				.objectIdentity = a_event.object,
+				.record = std::move(record),
+			});
+		}
+	}
+
 	void Fo4PhysicsWorld::ResumeFromLoadingMenuLocked()
 	{
+		if (saveLoadInProgress_) {
+			std::size_t queuedArmorRebuilds = 0;
+			std::size_t queuedHeadRebuilds = 0;
+			std::size_t skippedUnreadyArmorActors = 0;
+			std::size_t acceptedArmorRecords = 0;
+			std::size_t rejectedArmorRecords = 0;
+			for (const auto& candidate : saveLoadActors_) {
+				const auto resolvedActor = candidate.actorHandle.get();
+				if (!resolvedActor) {
+					++skippedUnreadyArmorActors;
+					continue;
+				}
+
+				auto* actor = resolvedActor.get();
+				auto* root = actor->Get3D(candidate.firstPerson);
+				auto* biped = actor->GetBiped(candidate.firstPerson).get();
+				if (candidate.rebuildArmor && root && biped) {
+					std::vector<ArmorPhysicsRecord> currentArmorRecords;
+					for (const auto& captured : candidate.armorRecords) {
+						if (captured.bipedIdentity != biped ||
+							captured.record.bipedObject == RE::BIPED_OBJECT::kTotal) {
+							++rejectedArmorRecords;
+							continue;
+						}
+						auto* bipObject = biped->GetBipObject(captured.record.bipedObject);
+						auto* partClone = bipObject ? bipObject->partClone.get() : nullptr;
+						if (!partClone || partClone != captured.objectIdentity) {
+							++rejectedArmorRecords;
+							continue;
+						}
+						MergeArmorPhysicsRecord(currentArmorRecords, captured.record);
+						++acceptedArmorRecords;
+					}
+					MarkPendingActorRebuildLocked(
+						actor,
+						candidate.firstPerson,
+						std::move(currentArmorRecords),
+						true,
+						true,
+						true);
+					++queuedArmorRebuilds;
+				} else if (candidate.rebuildArmor) {
+					++skippedUnreadyArmorActors;
+				}
+
+				auto* faceNode = !candidate.firstPerson ? actor->GetFaceNodeSkinned() : nullptr;
+				if (candidate.rebuildHead && root && faceNode) {
+					MarkPendingHeadRebuildLocked(LifecycleEvent{
+						.type = LifecycleEventType::kActorHeadInitialized,
+						.actor = actor,
+						.object = reinterpret_cast<RE::NiAVObject*>(faceNode),
+						.firstPerson = false,
+					});
+					++queuedHeadRebuilds;
+				}
+			}
+
+			saveLoadActors_.clear();
+			saveLoadInProgress_ = false;
+			loadingPhysicsSuspended_ = false;
+			loadingMenuDepth_ = 0;
+			if (dynamicsWorld_) {
+				dynamicsWorld_->clearForces();
+			}
+			ResetStepClockLocked();
+			spdlog::debug(
+				"completed save-load physics transaction from live actor state armorRebuilds={} headRebuilds={} acceptedArmorRecords={} rejectedArmorRecords={} skippedUnreadyArmorActors={}",
+				queuedArmorRebuilds,
+				queuedHeadRebuilds,
+				acceptedArmorRecords,
+				rejectedArmorRecords,
+				skippedUnreadyArmorActors);
+			return;
+		}
+
 		std::size_t resetBodies = 0;
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;

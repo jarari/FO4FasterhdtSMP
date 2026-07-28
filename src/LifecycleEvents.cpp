@@ -103,6 +103,14 @@ namespace Smp
 		});
 	}
 
+	std::size_t DiscardAllQueuedLifecycleEvents()
+	{
+		std::scoped_lock lock(GetLifecycleEventQueueLock());
+		const auto discarded = GetLifecycleEventQueue().size();
+		GetLifecycleEventQueue().clear();
+		return discarded;
+	}
+
 	void DrainQueuedLifecycleEvents()
 	{
 		std::vector<LifecycleEvent> events;
