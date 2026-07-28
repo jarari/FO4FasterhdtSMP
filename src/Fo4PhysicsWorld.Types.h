@@ -26,8 +26,26 @@
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
 
-		struct PendingActor3DModelUpdate
+		struct PendingSkeletonTransition
 		{
 			RE::ActorHandle actorHandle;
-			std::uint16_t updateFlags{ 0 };
+			RE::NiPointer<RE::NiAVObject> oldRoot;
+			RE::NiPointer<RE::NiAVObject> retainedFace;
+			RE::NiPointer<RE::NiAVObject> newRoot;
+			RE::NiPointer<RE::BSFlattenedBoneTree> skeletonRoot;
+			std::vector<ArmorBoneReference> headBoneReferences;
+			std::vector<std::string> requiredHeadBoneNames;
+			std::vector<RetainedSkinBinding> retainedSkinBindings;
+			std::uint32_t frameAge{ 0 };
+			std::uint32_t loadedFrameAge{ 0 };
+			bool armorRebuildQueued{ false };
+			bool faceSkinned{ false };
+		};
+
+		struct RetainedHeadSkeletonCache
+		{
+			RE::ActorHandle actorHandle;
+			std::uintptr_t retainedFaceIdentity{ 0 };
+			std::vector<ArmorBoneReference> headBoneReferences;
+			std::vector<std::string> requiredHeadBoneNames;
 		};

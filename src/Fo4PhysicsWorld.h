@@ -6,6 +6,7 @@
 
 #include <btBulletDynamicsCommon.h>
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -28,8 +29,11 @@ class btTypedConstraint;
 
 namespace RE
 {
+	class BSFaceGenNiNode;
+	class BSFlattenedBoneTree;
 	class MenuOpenCloseEvent;
 	class NiAVObject;
+	class NiNode;
 	class TESObjectARMA;
 }
 
@@ -77,8 +81,10 @@ namespace Smp
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
 		void NoteCharacterCustomizationTarget(RE::Actor* a_actor);
-		void PrepareActor3DModelUpdate(RE::Actor* a_actor, std::uint16_t a_updateFlags);
-		void QueueActor3DModelUpdateCompletion(RE::Actor* a_actor, std::uint16_t a_updateFlags);
+		bool BeginActorSkeletonTransition(RE::Actor* a_actor, RE::NiAVObject* a_oldRoot, RE::BSFaceGenNiNode* a_retainedFace);
+		void NoteActorSkeletonLoaded(RE::Actor* a_actor, RE::NiAVObject* a_newRoot);
+		RE::Actor* PrepareRetainedFaceForSkeleton(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton);
+		void CompleteRetainedFaceSkinning(RE::Actor* a_actor, RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton);
 		bool ReloadPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, std::string_view a_physicsFilePath, bool a_persist, bool a_verbose);
 		bool SwapPhysicsFile(RE::Actor* a_actor, std::string_view a_oldPhysicsFilePath, std::string_view a_newPhysicsFilePath, bool a_persist, bool a_verbose);
 		[[nodiscard]] std::string QueryCurrentPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, bool a_verbose);
@@ -104,8 +110,7 @@ namespace Smp
 		bool FinalizeHeadHierarchyForEventLocked(const LifecycleEvent& a_event);
 		bool BuildHeadForEventLocked(const LifecycleEvent& a_event);
 		bool IsBuildCandidateLocked(const LifecycleEvent& a_event, bool a_requireObject);
-		void CompletePendingActor3DModelUpdates();
-		void CompleteActor3DModelUpdate(RE::Actor* a_actor, std::uint16_t a_updateFlags);
+		void CompletePendingSkeletonTransitions();
 
 		#include "Fo4PhysicsWorld.Types.h"
 		#include "Fo4PhysicsWorld.PrivateMethods.h"

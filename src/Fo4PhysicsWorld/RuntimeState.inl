@@ -3,15 +3,83 @@
 
 namespace Smp
 {
-	void Fo4PhysicsWorld::PrepareActor3DModelUpdate(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	bool Fo4PhysicsWorld::BeginActorSkeletonTransition(
+		RE::Actor* a_actor,
+		RE::NiAVObject* a_oldRoot,
+		RE::BSFaceGenNiNode* a_retainedFace)
 	{
-		if (!a_actor) {
-			return;
+		if (!a_actor || !a_oldRoot) {
+			return false;
 		}
 
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
 
+		const auto resolvesActor = [a_actor](const RE::ActorHandle& a_handle) {
+			const auto actor = a_handle.get();
+			return actor && actor.get() == a_actor;
+		};
+		const auto hasTrackedState =
+			std::ranges::any_of(systems_, [a_actor](const auto& a_state) {
+				return a_state->actor == a_actor && !a_state->firstPerson;
+			}) ||
+			std::ranges::any_of(suspendedActors_, [&](const SuspendedActorCandidate& a_candidate) {
+				return !a_candidate.firstPerson && resolvesActor(a_candidate.actorHandle);
+			}) ||
+			std::ranges::any_of(pendingActorRebuilds_, [&](const PendingActorRebuild& a_pending) {
+				return !a_pending.firstPerson && resolvesActor(a_pending.actorHandle);
+			}) ||
+			std::ranges::any_of(pendingHeadRebuilds_, [&](const PendingHeadRebuild& a_pending) {
+				return resolvesActor(a_pending.actorHandle);
+			}) ||
+			std::ranges::any_of(pendingSkeletonTransitions_, [&](const PendingSkeletonTransition& a_pending) {
+				return resolvesActor(a_pending.actorHandle);
+			}) ||
+			std::ranges::any_of(retainedHeadSkeletonCaches_, [&](const RetainedHeadSkeletonCache& a_cached) {
+				return resolvesActor(a_cached.actorHandle);
+			});
+		if (!hasTrackedState) {
+			return false;
+		}
+
+		auto actorHandle = a_actor == RE::PlayerCharacter::GetSingleton() ?
+			RE::PlayerCharacter::GetPlayerHandle() :
+			RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
+		if (!actorHandle) {
+			return false;
+		}
+
+		std::vector<ArmorBoneReference> headBoneReferences;
+		std::vector<std::string> requiredHeadBoneNames;
+		RE::NiPointer<RE::NiAVObject> retainedFace{ reinterpret_cast<RE::NiAVObject*>(a_retainedFace) };
+		auto retainedSkinBindings = CaptureRetainedSkinBindings(retainedFace.get());
+
+		const auto retainedFaceIdentity = reinterpret_cast<std::uintptr_t>(retainedFace.get());
+		std::erase_if(
+			retainedHeadSkeletonCaches_,
+			[&](const RetainedHeadSkeletonCache& a_cached) {
+				const auto actor = a_cached.actorHandle.get();
+				return !actor ||
+					(actor.get() == a_actor &&
+						retainedFaceIdentity != 0 &&
+						a_cached.retainedFaceIdentity != retainedFaceIdentity);
+			});
+		for (const auto& cached : retainedHeadSkeletonCaches_) {
+			const auto actor = cached.actorHandle.get();
+			if (!actor ||
+				actor.get() != a_actor ||
+				cached.retainedFaceIdentity != retainedFaceIdentity) {
+				continue;
+			}
+			for (const auto& boneName : cached.requiredHeadBoneNames) {
+				MergePhysicsName(requiredHeadBoneNames, boneName);
+			}
+			for (const auto& reference : cached.headBoneReferences) {
+				MergeBoneReferenceRecipe(headBoneReferences, reference);
+			}
+		}
+
+		std::uint32_t retainedHeadRecords = 0;
 		std::uint32_t clearedStates = 0;
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;
@@ -19,11 +87,25 @@ namespace Smp
 				continue;
 			}
 
+			retainedHeadRecords += static_cast<std::uint32_t>(actorState.headPartRecords.size());
+			for (const auto& record : actorState.headPartRecords) {
+				for (const auto& boneName : record.requiredBoneNames) {
+					MergePhysicsName(requiredHeadBoneNames, boneName);
+				}
+				for (const auto& reference : record.boneReferences) {
+					MergeBoneReferenceRecipe(headBoneReferences, reference);
+				}
+			}
+
 			ClearSystemLocked(actorState);
 			++clearedStates;
 		}
-		std::erase_if(systems_, [](const auto& a_state) {
-			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
+		std::erase_if(systems_, [a_actor](const auto& a_state) {
+			return a_state->actor == a_actor &&
+				!a_state->firstPerson &&
+				!a_state->suspended &&
+				!a_state->HasPhysics() &&
+				a_state->armorRecords.empty();
 		});
 
 		const auto discardedSuspended = std::erase_if(
@@ -44,93 +126,362 @@ namespace Smp
 				const auto actor = a_pending.actorHandle.get();
 				return actor && actor.get() == a_actor;
 			});
-		const auto discardedModelUpdates = std::erase_if(
-			pendingActor3DModelUpdates_,
-			[a_actor](const PendingActor3DModelUpdate& a_pending) {
+		if (retainedFace && !headBoneReferences.empty()) {
+			const auto cached = std::ranges::find_if(
+				retainedHeadSkeletonCaches_,
+				[&](const RetainedHeadSkeletonCache& a_cached) {
+					const auto actor = a_cached.actorHandle.get();
+					return actor &&
+						actor.get() == a_actor &&
+						a_cached.retainedFaceIdentity ==
+							reinterpret_cast<std::uintptr_t>(retainedFace.get());
+				});
+			if (cached != retainedHeadSkeletonCaches_.end()) {
+				cached->headBoneReferences = headBoneReferences;
+				cached->requiredHeadBoneNames = requiredHeadBoneNames;
+			} else {
+				retainedHeadSkeletonCaches_.push_back({
+					.actorHandle = actorHandle,
+					.retainedFaceIdentity = reinterpret_cast<std::uintptr_t>(retainedFace.get()),
+					.headBoneReferences = headBoneReferences,
+					.requiredHeadBoneNames = requiredHeadBoneNames,
+				});
+			}
+		}
+		const auto supersededTransitions = std::erase_if(
+			pendingSkeletonTransitions_,
+			[a_actor](const PendingSkeletonTransition& a_pending) {
 				const auto actor = a_pending.actorHandle.get();
 				return actor && actor.get() == a_actor;
 			});
 
+		pendingSkeletonTransitions_.push_back({
+			.actorHandle = actorHandle,
+			.oldRoot = a_oldRoot,
+			.retainedFace = retainedFace,
+			.headBoneReferences = std::move(headBoneReferences),
+			.requiredHeadBoneNames = std::move(requiredHeadBoneNames),
+			.retainedSkinBindings = std::move(retainedSkinBindings),
+			.faceSkinned = !retainedFace,
+		});
+
 		ResetStepClockLocked();
 		spdlog::debug(
-			"prepared actor 3D model update actor={} flags=0x{:X} clearedStates={} discardedSuspended={} discardedActorRebuilds={} discardedHeadRebuilds={} discardedModelUpdates={}",
+			"began actor skeleton transition actor={} oldRoot={} retainedFace={} clearedStates={} retainedHeadRecords={} retainedBoneRecipes={} requiredHeadBones={} retainedSkinInstances={} discardedSuspended={} discardedActorRebuilds={} discardedHeadRebuilds={} supersededTransitions={}",
 			static_cast<void*>(a_actor),
-			a_updateFlags,
+			static_cast<void*>(a_oldRoot),
+			static_cast<void*>(retainedFace.get()),
 			clearedStates,
+			retainedHeadRecords,
+			pendingSkeletonTransitions_.back().headBoneReferences.size(),
+			pendingSkeletonTransitions_.back().requiredHeadBoneNames.size(),
+			pendingSkeletonTransitions_.back().retainedSkinBindings.size(),
 			discardedSuspended,
 			discardedActorRebuilds,
 			discardedHeadRebuilds,
-			discardedModelUpdates);
+			supersededTransitions);
+		return true;
 	}
 
-	void Fo4PhysicsWorld::QueueActor3DModelUpdateCompletion(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
+	void Fo4PhysicsWorld::NoteActorSkeletonLoaded(RE::Actor* a_actor, RE::NiAVObject* a_newRoot)
 	{
-		if (!a_actor) {
+		if (!a_actor || !a_newRoot) {
 			return;
+		}
+
+		std::scoped_lock lock(lock_);
+		for (auto& pending : pendingSkeletonTransitions_) {
+			const auto actor = pending.actorHandle.get();
+			if (actor && actor.get() == a_actor) {
+				pending.newRoot = a_newRoot;
+				pending.skeletonRoot = NiObject::FindFlattenedBoneTree(a_newRoot);
+				pending.loadedFrameAge = 0;
+				if (pending.skeletonRoot) {
+					spdlog::debug(
+						"associated actor skeleton transition with loaded root actor={} oldRoot={} newRoot={} skeletonRoot={} retainedFace={}",
+						static_cast<void*>(a_actor),
+						static_cast<void*>(pending.oldRoot.get()),
+						static_cast<void*>(a_newRoot),
+						static_cast<void*>(pending.skeletonRoot.get()),
+						static_cast<void*>(pending.retainedFace.get()));
+				} else {
+					spdlog::error(
+						"loaded actor skeleton transition has no BSFlattenedBoneTree actor={} oldRoot={} newRoot={} retainedFace={}",
+						static_cast<void*>(a_actor),
+						static_cast<void*>(pending.oldRoot.get()),
+						static_cast<void*>(a_newRoot),
+						static_cast<void*>(pending.retainedFace.get()));
+				}
+				return;
+			}
+		}
+	}
+
+	RE::Actor* Fo4PhysicsWorld::PrepareRetainedFaceForSkeleton(
+		RE::BSFaceGenNiNode* a_faceNode,
+		RE::NiNode* a_skeleton)
+	{
+		if (!a_faceNode || !a_skeleton) {
+			return nullptr;
 		}
 
 		WaitForAsyncStep();
 		std::scoped_lock lock(lock_);
-		auto actorHandle = RE::BSPointerHandleManagerInterface<RE::Actor>::GetHandle(a_actor);
-		if (!actorHandle) {
-			return;
-		}
-
-		for (auto& pending : pendingActor3DModelUpdates_) {
-			const auto actor = pending.actorHandle.get();
-			if (actor && actor.get() == a_actor) {
-				pending.updateFlags |= a_updateFlags;
-				return;
+		for (auto& pending : pendingSkeletonTransitions_) {
+			if (pending.retainedFace.get() != reinterpret_cast<RE::NiAVObject*>(a_faceNode)) {
+				continue;
 			}
-		}
 
-		pendingActor3DModelUpdates_.push_back({
-			.actorHandle = actorHandle,
-			.updateFlags = a_updateFlags,
-		});
+			const auto actor = pending.actorHandle.get();
+			if (!actor) {
+				continue;
+			}
+			auto* currentRoot = actor->Get3D(false);
+			if (!pending.newRoot ||
+				!pending.skeletonRoot ||
+				currentRoot != pending.newRoot.get() ||
+				a_skeleton != pending.newRoot.get()) {
+				spdlog::warn(
+					"ignored retained-face bone materialization for mismatched transition parameters actor={} currentRoot={} transitionRoot={} skeletonRoot={} skeleton={} faceNode={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(currentRoot),
+					static_cast<void*>(pending.newRoot.get()),
+					static_cast<void*>(pending.skeletonRoot.get()),
+					static_cast<void*>(a_skeleton),
+					static_cast<void*>(a_faceNode));
+				return nullptr;
+			}
+			auto* root = pending.skeletonRoot.get();
+
+			const auto createdBones = MaterializeRetainedHeadPartBones(
+				actor.get(),
+				a_faceNode,
+				root,
+				pending.headBoneReferences,
+				pending.requiredHeadBoneNames);
+			const auto preRebindResult = RebindRetainedSkinBindings(
+				root,
+				pending.retainedSkinBindings);
+			if (preRebindResult.unresolvedSlots > 0 ||
+				preRebindResult.boneSizeMismatches > 0 ||
+				preRebindResult.transformSizeMismatches > 0) {
+				spdlog::warn(
+					"prepared retained face with unresolved pre-vanilla bindings actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(a_faceNode),
+					static_cast<void*>(root),
+					static_cast<void*>(a_skeleton),
+					createdBones,
+					pending.headBoneReferences.size(),
+					pending.requiredHeadBoneNames.size(),
+					preRebindResult.instances,
+					preRebindResult.boneSlots,
+					preRebindResult.reboundSlots,
+					preRebindResult.unresolvedSlots,
+					preRebindResult.unnamedSlots,
+					preRebindResult.boneSizeMismatches,
+					preRebindResult.transformSizeMismatches);
+			} else {
+				spdlog::debug(
+					"prepared retained face for replacement skeleton actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} instances={} boneSlots={} reboundSlots={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(a_faceNode),
+					static_cast<void*>(root),
+					static_cast<void*>(a_skeleton),
+					createdBones,
+					pending.headBoneReferences.size(),
+					pending.requiredHeadBoneNames.size(),
+					preRebindResult.instances,
+					preRebindResult.boneSlots,
+					preRebindResult.reboundSlots);
+			}
+			return actor.get();
+		}
+		return nullptr;
 	}
 
-	void Fo4PhysicsWorld::CompletePendingActor3DModelUpdates()
+	void Fo4PhysicsWorld::CompleteRetainedFaceSkinning(
+		RE::Actor* a_actor,
+		RE::BSFaceGenNiNode* a_faceNode,
+		RE::NiNode* a_skeleton)
 	{
-		std::vector<PendingActor3DModelUpdate> pendingUpdates;
-		{
-			std::scoped_lock lock(lock_);
-			pendingUpdates.swap(pendingActor3DModelUpdates_);
-		}
-
-		for (const auto& pending : pendingUpdates) {
-			const auto actor = pending.actorHandle.get();
-			if (actor) {
-				CompleteActor3DModelUpdate(actor.get(), pending.updateFlags);
-			}
-		}
-	}
-
-	void Fo4PhysicsWorld::CompleteActor3DModelUpdate(RE::Actor* a_actor, const std::uint16_t a_updateFlags)
-	{
-		if (!a_actor) {
+		if (!a_actor || !a_faceNode || !a_skeleton) {
 			return;
 		}
 
 		std::scoped_lock lock(lock_);
-		if (!InitializeLocked()) {
+		for (auto& pending : pendingSkeletonTransitions_) {
+			const auto actor = pending.actorHandle.get();
+			if (!actor ||
+				actor.get() != a_actor ||
+				pending.retainedFace.get() != reinterpret_cast<RE::NiAVObject*>(a_faceNode) ||
+				!pending.newRoot ||
+				!pending.skeletonRoot) {
+				continue;
+			}
+			auto* currentRoot = actor->Get3D(false);
+			if (currentRoot != pending.newRoot.get() ||
+				a_skeleton != pending.newRoot.get()) {
+				spdlog::warn(
+					"could not complete retained-face skinning because transition parameters changed actor={} currentRoot={} transitionRoot={} skeletonRoot={} skeleton={} faceNode={}",
+					static_cast<void*>(a_actor),
+					static_cast<void*>(currentRoot),
+					static_cast<void*>(pending.newRoot.get()),
+					static_cast<void*>(pending.skeletonRoot.get()),
+					static_cast<void*>(a_skeleton),
+					static_cast<void*>(a_faceNode));
+				continue;
+			}
+			auto* root = pending.skeletonRoot.get();
+
+			const auto rebindResult = RebindRetainedSkinBindings(
+				root,
+				pending.retainedSkinBindings);
+			pending.faceSkinned =
+				rebindResult.unresolvedSlots == 0 &&
+				rebindResult.boneSizeMismatches == 0 &&
+				rebindResult.transformSizeMismatches == 0;
+			if (rebindResult.unresolvedSlots > 0 ||
+				rebindResult.boneSizeMismatches > 0 ||
+				rebindResult.transformSizeMismatches > 0) {
+				spdlog::warn(
+					"completed retained-face skinning with unresolved bindings actor={} faceNode={} root={} skeleton={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
+					static_cast<void*>(a_actor),
+					static_cast<void*>(a_faceNode),
+					static_cast<void*>(root),
+					static_cast<void*>(a_skeleton),
+					rebindResult.instances,
+					rebindResult.boneSlots,
+					rebindResult.reboundSlots,
+					rebindResult.unresolvedSlots,
+					rebindResult.unnamedSlots,
+					rebindResult.boneSizeMismatches,
+					rebindResult.transformSizeMismatches);
+			} else {
+				spdlog::debug(
+					"completed retained-face skinning on replacement skeleton actor={} faceNode={} root={} skeleton={} instances={} boneSlots={} reboundSlots={}",
+					static_cast<void*>(a_actor),
+					static_cast<void*>(a_faceNode),
+					static_cast<void*>(root),
+					static_cast<void*>(a_skeleton),
+					rebindResult.instances,
+					rebindResult.boneSlots,
+					rebindResult.reboundSlots);
+			}
 			return;
 		}
+	}
 
-		// ReEquipAll attachment events were drained before this completion and
-		// recorded their XML/bone context in the existing pending rebuild. Keep
-		// those records; the forced rescan is only the fallback when none exist.
-		MarkPendingActorRebuildLocked(a_actor, false, {}, true, true, false);
-		MarkPendingHeadRebuildLocked(LifecycleEvent{
-			.type = LifecycleEventType::kActorHeadInitialized,
-			.actor = a_actor,
-			.firstPerson = false,
-		});
-		ResetStepClockLocked();
-		spdlog::debug(
-			"completed actor 3D model update at main-frame sync actor={} flags=0x{:X} forceArmorRescan=true headReloadQueued=true",
-			static_cast<void*>(a_actor),
-			a_updateFlags);
+	void Fo4PhysicsWorld::CompletePendingSkeletonTransitions()
+	{
+		std::scoped_lock lock(lock_);
+		std::erase_if(
+			retainedHeadSkeletonCaches_,
+			[](const RetainedHeadSkeletonCache& a_cached) {
+				return !a_cached.actorHandle.get();
+			});
+		for (auto it = pendingSkeletonTransitions_.begin(); it != pendingSkeletonTransitions_.end();) {
+			++it->frameAge;
+			if (it->newRoot) {
+				++it->loadedFrameAge;
+			}
+
+			const auto actor = it->actorHandle.get();
+			if (!actor) {
+				it = pendingSkeletonTransitions_.erase(it);
+				continue;
+			}
+
+			auto* currentRoot = actor->Get3D(false);
+			if (!it->newRoot || !currentRoot) {
+				if (it->frameAge < kSkeletonTransitionLoadTimeoutFrames) {
+					++it;
+					continue;
+				}
+				spdlog::debug(
+					"expired unloaded actor skeleton transition actor={} oldRoot={} newRoot={} frameAge={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(it->oldRoot.get()),
+					static_cast<void*>(it->newRoot.get()),
+					it->frameAge);
+				it = pendingSkeletonTransitions_.erase(it);
+				continue;
+			}
+			if (currentRoot != it->newRoot.get()) {
+				spdlog::debug(
+					"discarded superseded actor skeleton transition actor={} transitionRoot={} currentRoot={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(it->newRoot.get()),
+					static_cast<void*>(currentRoot));
+				it = pendingSkeletonTransitions_.erase(it);
+				continue;
+			}
+
+			auto* currentFace = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned());
+			if (it->retainedFace &&
+				currentFace &&
+				currentFace != it->retainedFace.get() &&
+				IsObjectInTree(it->newRoot.get(), currentFace)) {
+				spdlog::debug(
+					"actor skeleton transition replaced rather than retained the face actor={} oldFace={} newFace={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(it->retainedFace.get()),
+					static_cast<void*>(currentFace));
+				const auto replacedFaceIdentity =
+					reinterpret_cast<std::uintptr_t>(it->retainedFace.get());
+				std::erase_if(
+					retainedHeadSkeletonCaches_,
+					[&](const RetainedHeadSkeletonCache& a_cached) {
+						const auto cachedActor = a_cached.actorHandle.get();
+						return cachedActor &&
+							cachedActor.get() == actor.get() &&
+							a_cached.retainedFaceIdentity == replacedFaceIdentity;
+					});
+				it->retainedFace = nullptr;
+				it->faceSkinned = true;
+			}
+
+			const auto faceReady = !it->retainedFace || it->faceSkinned;
+			const auto faceTimedOut =
+				!faceReady &&
+				it->loadedFrameAge >= kRetainedFaceSkinningTimeoutFrames;
+			if (!faceReady) {
+				if (faceTimedOut && !it->armorRebuildQueued) {
+					MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
+					it->armorRebuildQueued = true;
+					ResetStepClockLocked();
+					spdlog::warn(
+						"released armor rebuild after retained-face skinning timeout actor={} newRoot={} retainedFace={} loadedFrameAge={}; preserving the old skeleton until every retained skin slot is rebound",
+						static_cast<void*>(actor.get()),
+						static_cast<void*>(it->newRoot.get()),
+						static_cast<void*>(it->retainedFace.get()),
+						it->loadedFrameAge);
+				}
+				++it;
+				continue;
+			}
+
+			// Attachment events emitted while Load3D rebuilt the biped were drained
+			// before this point and merged into the pending rebuild. The live rescan
+			// is the final safety net for engine attach paths that emit no event.
+			if (!it->armorRebuildQueued) {
+				MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
+			}
+			MarkPendingHeadRebuildLocked(LifecycleEvent{
+				.type = LifecycleEventType::kActorHeadInitialized,
+				.actor = actor.get(),
+				.object = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()),
+				.firstPerson = false,
+			});
+			ResetStepClockLocked();
+			spdlog::debug(
+				"completed actor skeleton transition actor={} oldRoot={} newRoot={} forceArmorRescan={} headReloadQueued=true",
+				static_cast<void*>(actor.get()),
+				static_cast<void*>(it->oldRoot.get()),
+				static_cast<void*>(it->newRoot.get()),
+				!it->armorRebuildQueued);
+			it = pendingSkeletonTransitions_.erase(it);
+		}
 	}
 
 	void Fo4PhysicsWorld::NoteCharacterCustomizationTarget(RE::Actor* a_actor)
@@ -1301,6 +1652,7 @@ namespace Smp
 		}
 		systems_.clear();
 		suspendedActors_.clear();
+		retainedHeadSkeletonCaches_.clear();
 	}
 
 	void Fo4PhysicsWorld::ResumeFromLoadingMenuLocked()

@@ -305,28 +305,6 @@ namespace
 		return current;
 	}
 
-	RE::BSFlattenedBoneTree* FindFlattenedBoneTree(RE::NiAVObject* a_root)
-	{
-		if (!a_root) {
-			return nullptr;
-		}
-		if (auto* flattened = netimmerse_cast<RE::BSFlattenedBoneTree*>(a_root)) {
-			return flattened;
-		}
-
-		auto* node = a_root->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-
-		for (auto& child : node->children) {
-			if (auto* found = FindFlattenedBoneTree(child.get())) {
-				return found;
-			}
-		}
-		return nullptr;
-	}
-
 	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByWorldTransform(RE::BSFlattenedBoneTree* a_tree, const RE::NiTransform* a_worldTransform)
 	{
 		const auto boneCount = a_tree ? a_tree->boneCountExpanded : 0;
@@ -366,9 +344,9 @@ namespace
 			spdlog::warn("ignoring suspicious FO4 skin bone data with {} transforms", a_skin->boneData->transforms.size());
 		}
 
-		auto* flattened = FindFlattenedBoneTree(a_skin->rootNode);
+		auto* flattened = Smp::NiObject::FindFlattenedBoneTree(a_skin->rootNode);
 		if (!flattened) {
-			flattened = FindFlattenedBoneTree(GetTopRoot(a_extractionRoot));
+			flattened = Smp::NiObject::FindFlattenedBoneTree(GetTopRoot(a_extractionRoot));
 		}
 
 		a_bones.reserve(a_skin->bones.size());

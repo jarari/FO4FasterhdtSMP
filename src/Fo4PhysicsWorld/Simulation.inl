@@ -7,7 +7,7 @@ namespace Smp
 	{
 		WaitForAsyncStep();
 		DrainQueuedLifecycleEvents();
-		CompletePendingActor3DModelUpdates();
+		CompletePendingSkeletonTransitions();
 		ProcessPendingRebuilds();
 		{
 			std::scoped_lock lock(lock_);

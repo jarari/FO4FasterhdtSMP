@@ -85,7 +85,7 @@ namespace Smp
 		}
 		auto* engineSkeletonRoot = a_event.destinationRoot;
 		if (!engineSkeletonRoot) {
-			engineSkeletonRoot = FindFlattenedBoneTreeInScene(actorRoot);
+			engineSkeletonRoot = NiObject::FindFlattenedBoneTree(actorRoot);
 		}
 		ResolveEnginePreparedBones(matchedBones, a_summary.boneNames, actorRoot, engineSkeletonRoot);
 		timing.xmlSkinResolveMs += ElapsedMs(phaseStart, Clock::now());
@@ -99,9 +99,9 @@ namespace Smp
 			return {};
 		}
 		const auto referencePoseStart = Clock::now();
-		auto* flattened = FindFlattenedBoneTreeInScene(engineSkeletonRoot);
+		auto* flattened = NiObject::FindFlattenedBoneTree(engineSkeletonRoot);
 		if (!flattened) {
-			flattened = FindFlattenedBoneTreeInScene(actorRoot);
+			flattened = NiObject::FindFlattenedBoneTree(actorRoot);
 		}
 		if (!BuildDetachedHavokReferencePose(
 				a_event.actor,
@@ -892,9 +892,9 @@ namespace Smp
 		};
 		RE::BSFlattenedBoneTree* liveActorSkeleton = nullptr;
 		if (!a_meshSourceRoots.empty()) {
-			liveActorSkeleton = FindFlattenedBoneTreeInScene(a_event.destinationRoot);
+			liveActorSkeleton = NiObject::FindFlattenedBoneTree(a_event.destinationRoot);
 			if (!liveActorSkeleton && a_event.actor) {
-				liveActorSkeleton = FindFlattenedBoneTreeInScene(a_event.actor->Get3D(a_event.firstPerson));
+				liveActorSkeleton = NiObject::FindFlattenedBoneTree(a_event.actor->Get3D(a_event.firstPerson));
 			}
 		}
 		auto createFallbackSkinBody = [&](const Smp::Fo4DecodedSkinBone& a_decodedBone, const std::string& a_meshName, const bool a_detachedSource) -> BoneRecord* {

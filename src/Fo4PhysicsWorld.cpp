@@ -28,7 +28,6 @@
 #include "RE/B/bhkPickData.h"
 #include "RE/B/BSFlattenedBoneTree.h"
 #include "RE/B/BSModelDB.h"
-#include "RE/B/BSUtilities.h"
 #include "RE/B/BSTimer.h"
 #include "RE/C/CFilter.h"
 #include "RE/C/COL_LAYER.h"
@@ -86,6 +85,8 @@ namespace
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
+	constexpr std::uint32_t kSkeletonTransitionLoadTimeoutFrames = 120;
+	constexpr std::uint32_t kRetainedFaceSkinningTimeoutFrames = 30;
 	constexpr std::uint64_t kPapyrusArmorPoseCacheBuildGroup = std::numeric_limits<std::uint64_t>::max();
 	constexpr std::uint64_t kPapyrusHeadPoseCacheBuildGroup = kPapyrusArmorPoseCacheBuildGroup - 1;
 	using Clock = std::chrono::steady_clock;
@@ -241,11 +242,51 @@ namespace
 		bool isHeadPartClosure{ false };
 	};
 
+	void ResetBoneReferenceRuntimeState(Smp::ArmorBoneReference& a_reference)
+	{
+		a_reference.resolvedNode.reset();
+		a_reference.isArmorOnly = false;
+		a_reference.parentBoneIsArmorOnly = false;
+		a_reference.createdByUs = false;
+	}
+
+	void MergeBoneReferenceRecipe(
+		std::vector<Smp::ArmorBoneReference>& a_references,
+		Smp::ArmorBoneReference a_reference)
+	{
+		ResetBoneReferenceRuntimeState(a_reference);
+		const auto existing = std::ranges::find_if(
+			a_references,
+			[&](const Smp::ArmorBoneReference& a_current) {
+				return Smp::PhysicsNamesEqual(a_current.name, a_reference.name);
+			});
+		if (existing == a_references.end()) {
+			a_references.push_back(std::move(a_reference));
+			return;
+		}
+
+		existing->isSkinned = existing->isSkinned || a_reference.isSkinned;
+		if (existing->parentBoneName.empty() && !a_reference.parentBoneName.empty()) {
+			existing->parentBoneName = std::move(a_reference.parentBoneName);
+			existing->localToParentBone = a_reference.localToParentBone;
+		}
+	}
+
+	void MergePhysicsName(std::vector<std::string>& a_names, const std::string_view a_name)
+	{
+		if (a_name.empty() ||
+			std::ranges::any_of(a_names, [&](const std::string& a_existing) {
+				return Smp::PhysicsNamesEqual(a_existing, a_name);
+			})) {
+			return;
+		}
+		a_names.emplace_back(a_name);
+	}
+
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object);
 	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor);
 	bool IsReadableMemory(const void* a_address, std::size_t a_minSize);
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object);
-	RE::BSFlattenedBoneTree* FindFlattenedBoneTreeInScene(RE::NiAVObject* a_object);
 	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
 		RE::BSFlattenedBoneTree* a_tree,
 		std::string_view a_name);
@@ -1215,14 +1256,14 @@ namespace
 			return false;
 		}
 
-		Smp::FinalizeArmorSkinBindings(
+		return Smp::FinalizeArmorSkinBindings(
 			a_actor,
 			a_candidate.object,
 			a_candidate.destinationRoot.get(),
 			false,
 			a_candidate.boneReferences,
-			a_candidate.liveBindingObjects);
-		return true;
+			a_candidate.liveBindingObjects,
+			false);
 	}
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(const Smp::LifecycleEvent& a_event)
@@ -2331,27 +2372,6 @@ namespace
 		return MakeArmorModelCacheKey(a_bipedObject, a_bipObject->part->GetModel());
 	}
 
-	RE::BSFlattenedBoneTree* FindFlattenedBoneTreeInScene(RE::NiAVObject* a_object)
-	{
-		if (!a_object) {
-			return nullptr;
-		}
-		if (auto* flattened = netimmerse_cast<RE::BSFlattenedBoneTree*>(a_object)) {
-			return flattened;
-		}
-
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return nullptr;
-		}
-		for (auto& child : node->children) {
-			if (auto* flattened = FindFlattenedBoneTreeInScene(child.get())) {
-				return flattened;
-			}
-		}
-		return nullptr;
-	}
-
 	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
 		RE::BSFlattenedBoneTree* a_tree,
 		const std::string_view a_name)
@@ -2377,9 +2397,9 @@ namespace
 		RE::NiAVObject* a_actorRoot,
 		RE::NiNode* a_skeletonRoot)
 	{
-		auto* flattened = FindFlattenedBoneTreeInScene(a_skeletonRoot);
+		auto* flattened = Smp::NiObject::FindFlattenedBoneTree(a_skeletonRoot);
 		if (!flattened) {
-			flattened = FindFlattenedBoneTreeInScene(a_actorRoot);
+			flattened = Smp::NiObject::FindFlattenedBoneTree(a_actorRoot);
 		}
 
 		for (auto& matchedBone : a_matchedBones) {

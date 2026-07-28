@@ -6,7 +6,6 @@
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsXmlSelection.h"
-#include "RE/A/AIProcess.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BSGeometry.h"
 #include "RE/H/hkArray.h"
@@ -36,7 +35,6 @@ namespace Hooks
 	using ActorLoad3D_t = RE::NiAVObject* (*)(RE::TESObjectREFR*, bool);
 	using Set3D_t = void (*)(RE::TESObjectREFR*, RE::NiAVObject*, bool);
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
-	using AIProcessDoUpdate3dModel_t = void (*)(RE::AIProcess*, RE::Actor*, std::uint16_t);
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
@@ -54,7 +52,6 @@ namespace Hooks
 	Set3D_t                        OriginalPlayerCharacterSet3D{ nullptr };
 	OnHeadInitialized_t            OriginalActorOnHeadInitialized{ nullptr };
 	OnHeadInitialized_t            OriginalPlayerCharacterOnHeadInitialized{ nullptr };
-	AIProcessDoUpdate3dModel_t      OriginalAIProcessDoUpdate3dModel{ nullptr };
 	Reset3D_t                      OriginalReset3D{ nullptr };
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
@@ -293,7 +290,6 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
 		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
-		LogRelocationTarget("AIProcess::DoUpdate3dModel", Address::AIProcessDoUpdate3dModel.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
 		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
@@ -531,10 +527,50 @@ namespace Hooks
 		});
 	}
 
+	void BeginSkeletonTransitionIfNeeded(RE::TESObjectREFR* a_ref, RE::NiAVObject* a_replacementRoot)
+	{
+		auto* actor = AsActor(a_ref);
+		auto* oldRoot = actor ? actor->Get3D(false) : nullptr;
+		if (!actor || !oldRoot || oldRoot == a_replacementRoot) {
+			return;
+		}
+
+		// This is the last boundary where stale writeback slots and headpart
+		// recipes still refer to a live old skeleton.
+		auto* faceNode = actor->GetFaceNodeSkinned();
+		auto discardedLifecycleEvents = Smp::DiscardQueuedLifecycleEvents(actor);
+		const auto transitionStarted = Smp::Fo4PhysicsWorld::GetSingleton()->BeginActorSkeletonTransition(
+			actor,
+			oldRoot,
+			faceNode);
+		discardedLifecycleEvents += Smp::DiscardQueuedLifecycleEvents(actor);
+		if (!transitionStarted) {
+			if (discardedLifecycleEvents > 0) {
+				spdlog::trace(
+					"discarded {} queued old-root lifecycle events at untracked Set3D boundary actor={} oldRoot={} replacementRoot={}",
+					discardedLifecycleEvents,
+					static_cast<void*>(actor),
+					static_cast<void*>(oldRoot),
+					static_cast<void*>(a_replacementRoot));
+			}
+			return;
+		}
+
+		SeedFaceGenActor(a_ref);
+		spdlog::debug(
+			"observed actor skeleton replacement boundary before Set3D actor={} oldRoot={} replacementRoot={} retainedFace={} discardedQueuedLifecycleEvents={}",
+			static_cast<void*>(actor),
+			static_cast<void*>(oldRoot),
+			static_cast<void*>(a_replacementRoot),
+			static_cast<void*>(faceNode),
+			discardedLifecycleEvents);
+	}
+
 	RE::NiAVObject* HookedActorLoad3D(RE::TESObjectREFR* a_ref, bool a_backgroundLoading)
 	{
 		auto* loaded3D = OriginalActorLoad3D(a_ref, a_backgroundLoading);
 		if (auto* actor = AsActor(a_ref)) {
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, loaded3D);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorLoad3D,
 				.actor = actor,
@@ -548,6 +584,7 @@ namespace Hooks
 	{
 		auto* loaded3D = OriginalPlayerCharacterLoad3D(a_ref, a_backgroundLoading);
 		if (auto* actor = AsActor(a_ref)) {
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, loaded3D);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorLoad3D,
 				.actor = actor,
@@ -559,8 +596,10 @@ namespace Hooks
 
 	void HookedActorSet3D(RE::TESObjectREFR* a_ref, RE::NiAVObject* a_object, bool a_queue3DTasks)
 	{
+		BeginSkeletonTransitionIfNeeded(a_ref, a_object);
 		OriginalActorSet3D(a_ref, a_object, a_queue3DTasks);
 		if (auto* actor = AsActor(a_ref)) {
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, a_object);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorSet3D,
 				.actor = actor,
@@ -572,8 +611,10 @@ namespace Hooks
 
 	void HookedPlayerCharacterSet3D(RE::TESObjectREFR* a_ref, RE::NiAVObject* a_object, bool a_queue3DTasks)
 	{
+		BeginSkeletonTransitionIfNeeded(a_ref, a_object);
 		OriginalPlayerCharacterSet3D(a_ref, a_object, a_queue3DTasks);
 		if (auto* actor = AsActor(a_ref)) {
+			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, a_object);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorSet3D,
 				.actor = actor,
@@ -617,9 +658,18 @@ namespace Hooks
 
 	void HookedFaceGenSkinAllGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, bool a_arg3)
 	{
+		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
+		// Vanilla only fixes skin instances on direct geometry children. Targets
+		// must exist and every retained slot must be safe before that pass because
+		// its metadata fallback dereferences the current bone. Rebind again after
+		// vanilla to cover nested geometry and verify the final target set.
+		auto* transitionActor = physicsWorld->PrepareRetainedFaceForSkeleton(a_faceNode, a_skeleton);
 		OriginalFaceGenSkinAllGeometry(a_faceNode, a_skeleton, a_arg3);
+		if (transitionActor) {
+			physicsWorld->CompleteRetainedFaceSkinning(transitionActor, a_faceNode, a_skeleton);
+		}
 
-		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		auto* actor = transitionActor ? transitionActor : ResolveFaceGenActor(a_faceNode, a_skeleton);
 		if (!actor) {
 			spdlog::trace(
 				"skipped skinned head full-geometry event because actor is unresolved faceNode={} skeleton={}",
@@ -707,26 +757,6 @@ namespace Hooks
 		});
 	}
 
-	void HookedAIProcessDoUpdate3dModel(RE::AIProcess* a_process, RE::Actor* a_actor, const std::uint16_t a_updateFlags)
-	{
-		constexpr std::uint16_t kFullSkeletonModelUpdateFlags = 0x520;
-		if (!a_actor || (a_updateFlags & kFullSkeletonModelUpdateFlags) != kFullSkeletonModelUpdateFlags) {
-			OriginalAIProcessDoUpdate3dModel(a_process, a_actor, a_updateFlags);
-			return;
-		}
-
-		const auto discardedLifecycleEvents = Smp::DiscardQueuedLifecycleEvents(a_actor);
-		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
-		physicsWorld->PrepareActor3DModelUpdate(a_actor, a_updateFlags);
-		OriginalAIProcessDoUpdate3dModel(a_process, a_actor, a_updateFlags);
-		physicsWorld->QueueActor3DModelUpdateCompletion(a_actor, a_updateFlags);
-		spdlog::debug(
-			"queued actor 3D model update completion after AIProcess::DoUpdate3dModel actor={} flags=0x{:X} discardedQueuedLifecycleEvents={}",
-			static_cast<void*>(a_actor),
-			a_updateFlags,
-			discardedLifecycleEvents);
-	}
-
 	bool InstallLifecycleHooks()
 	{
 		LogHookTargets();
@@ -784,13 +814,6 @@ namespace Hooks
 		if (!OriginalReset3D) {
 			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Address::Reset3D, Address::Reset3DPrologueSize.value(), reinterpret_cast<void*>(&HookedReset3D));
 		}
-		if (!OriginalAIProcessDoUpdate3dModel) {
-			OriginalAIProcessDoUpdate3dModel = CreateBranchGateway5<AIProcessDoUpdate3dModel_t>(
-				"AIProcess::DoUpdate3dModel",
-				Address::AIProcessDoUpdate3dModel,
-				Address::AIProcessDoUpdate3dModelPrologueSize.value(),
-				reinterpret_cast<void*>(&HookedAIProcessDoUpdate3dModel));
-		}
 		if (!OriginalSetFaceGenBoneName) {
 			OriginalSetFaceGenBoneName = CreateBranchGateway5<SetFaceGenBoneName_t>(
 				"BSFaceGenModelExtraData::SetBoneName",
@@ -825,7 +848,6 @@ namespace Hooks
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
 			OriginalFaceGenSkinAllGeometry &&
-			OriginalAIProcessDoUpdate3dModel &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
 			OriginalSetFaceGenBoneName &&

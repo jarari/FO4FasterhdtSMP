@@ -165,6 +165,8 @@ namespace Smp
 		RE::NiPointer<RE::NiAVObject> object;
 		RE::NiPointer<RE::NiAVObject> sourceObject;
 		RE::NiPointer<RE::NiAVObject> sourceRoot;
+		std::vector<ArmorBoneReference> boneReferences;
+		std::vector<std::string> requiredBoneNames;
 		std::uint64_t buildGroup{ 0 };
 		bool isHeadPartClosure{ false };
 	};

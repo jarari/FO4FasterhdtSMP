@@ -1,8 +1,10 @@
 #include "Fo4NiObjectUtils.h"
 
+#include "Address.h"
 #include "ConfigPaths.h"
 #include "PhysicsName.h"
 #include "RE/B/BSFixedString.h"
+#include "RE/B/BSFlattenedBoneTree.h"
 #include "RE/N/NiAVObject.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiStringExtraData.h"
@@ -10,6 +12,11 @@
 
 namespace Smp::NiObject
 {
+	RE::BSFlattenedBoneTree* FindFlattenedBoneTree(RE::NiAVObject* a_root)
+	{
+		return Address::BSFlattenedBoneTreeFind(a_root, 1);
+	}
+
 	std::optional<std::string> FindStringExtraData(RE::NiAVObject* a_object, const std::string_view a_name)
 	{
 		if (!a_object || !a_object->extra) {

@@ -55,7 +55,8 @@ namespace Smp
 		suspendedActors_.clear();
 		pendingActorRebuilds_.clear();
 		pendingHeadRebuilds_.clear();
-		pendingActor3DModelUpdates_.clear();
+		pendingSkeletonTransitions_.clear();
+		retainedHeadSkeletonCaches_.clear();
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
 		candidateEvents_ = 0;
@@ -113,13 +114,13 @@ namespace Smp
 
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
 		const auto actorArmorAttach = armorAttach && a_event.actor && !a_event.firstPerson;
-		const auto actorModelUpdatePending =
+		const auto actorSkeletonTransitionPending =
 			a_event.actor &&
-			std::ranges::any_of(pendingActor3DModelUpdates_, [&a_event](const PendingActor3DModelUpdate& a_pending) {
+			std::ranges::any_of(pendingSkeletonTransitions_, [&a_event](const PendingSkeletonTransition& a_pending) {
 				const auto actor = a_pending.actorHandle.get();
 				return actor && actor.get() == a_event.actor;
 			});
-		if (actorModelUpdatePending) {
+		if (actorSkeletonTransitionPending) {
 			if (actorArmorAttach) {
 				auto armorRecords = CollectQueuedArmorRecordsForAttachLocked(a_event);
 				MarkPendingActorRebuildLocked(
@@ -130,7 +131,7 @@ namespace Smp
 					false);
 			}
 			spdlog::debug(
-				"deferred system physics attach candidate {} until actor 3D model update completion actor={} object={}",
+				"deferred system physics attach candidate {} until actor skeleton transition completion actor={} object={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(a_event.object));
@@ -546,6 +547,49 @@ namespace Smp
 			hairKeys,
 			candidates);
 
+		std::size_t candidateRecipeCount = 0;
+		std::vector<ArmorBoneReference> cachedBoneReferences;
+		for (const auto& candidate : candidates) {
+			candidateRecipeCount += candidate.boneReferences.size();
+			for (const auto& reference : candidate.boneReferences) {
+				MergeBoneReferenceRecipe(cachedBoneReferences, reference);
+			}
+		}
+		if (actorState.actorHandle && !cachedBoneReferences.empty()) {
+			const auto faceIdentity = reinterpret_cast<std::uintptr_t>(faceObject);
+			std::erase_if(
+				retainedHeadSkeletonCaches_,
+				[&](const RetainedHeadSkeletonCache& a_cached) {
+					const auto actor = a_cached.actorHandle.get();
+					return !actor ||
+						(actor.get() == a_event.actor &&
+							a_cached.retainedFaceIdentity != faceIdentity);
+				});
+			auto cached = std::ranges::find_if(
+				retainedHeadSkeletonCaches_,
+				[&](const RetainedHeadSkeletonCache& a_cached) {
+					const auto actor = a_cached.actorHandle.get();
+					return actor &&
+						actor.get() == a_event.actor &&
+						a_cached.retainedFaceIdentity == faceIdentity;
+				});
+			if (cached == retainedHeadSkeletonCaches_.end()) {
+				retainedHeadSkeletonCaches_.push_back({
+					.actorHandle = actorState.actorHandle,
+					.retainedFaceIdentity = faceIdentity,
+				});
+				cached = std::prev(retainedHeadSkeletonCaches_.end());
+			}
+			cached->headBoneReferences = std::move(cachedBoneReferences);
+			cached->requiredHeadBoneNames.clear();
+			spdlog::debug(
+				"cached retained-head skeleton recipes actor={} faceNode={} candidateRecipes={} cachedRecipes={} before hair suppression",
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(faceNode),
+				candidateRecipeCount,
+				cached->headBoneReferences.size());
+		}
+
 		if (suppressHairHeadParts) {
 			std::vector<std::uint64_t> removedGroups;
 			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, removedGroups);
@@ -775,6 +819,10 @@ namespace Smp
 				sourceKey);
 			cpuCopyPending = cpuCopyPending || buildResult.cpuCopyPending;
 			if (buildResult.succeeded) {
+				auto storedBoneReferences = candidate.boneReferences;
+				for (auto& reference : storedBoneReferences) {
+					ResetBoneReferenceRuntimeState(reference);
+				}
 				for (const auto& loadedPath : loadedPaths) {
 					actorState.headPartRecords.push_back({
 						.domain = candidate.domain,
@@ -782,6 +830,8 @@ namespace Smp
 						.object = candidate.object,
 						.sourceObject = candidate.sourceObject,
 						.sourceRoot = candidate.sourceRoot,
+						.boneReferences = storedBoneReferences,
+						.requiredBoneNames = mergedSummary.boneNames,
 						.buildGroup = buildResult.buildGroup,
 						.isHeadPartClosure = candidate.isHeadPartClosure,
 					});

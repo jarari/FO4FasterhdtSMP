@@ -1,6 +1,7 @@
 #pragma once
 
 #include "REL/Relocation.h"
+#include "RE/B/BSFixedString.h"
 #include "REX/FModule.h"
 
 #include <cstddef>
@@ -9,7 +10,9 @@
 namespace RE
 {
 	class Actor;
+	class BSFlattenedBoneTree;
 	class NiAVObject;
+	class NiNode;
 	class NiPoint3;
 }
 
@@ -38,15 +41,19 @@ namespace Smp::Address
 	};
 
 	using ActorCalculateLOS_t = RE::NiAVObject*(RE::Actor*, const RE::NiPoint3&, RE::NiPoint3&, float);
+	using BSFlattenedBoneTreeGetOrCreateBoneNode_t =
+		RE::NiNode*(RE::BSFlattenedBoneTree*, const RE::BSFixedString&, bool&);
+	using BSFlattenedBoneTreeFind_t = RE::BSFlattenedBoneTree*(RE::NiAVObject*, std::int32_t);
 
 	extern REL::Relocation<ActorCalculateLOS_t*> ActorCalculateLOS;
+	extern REL::Relocation<BSFlattenedBoneTreeGetOrCreateBoneNode_t*> BSFlattenedBoneTreeGetOrCreateBoneNode;
+	extern REL::Relocation<BSFlattenedBoneTreeFind_t*> BSFlattenedBoneTreeFind;
 
 	extern REL::Relocation<std::uintptr_t> MainOnIdle;
 	extern REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects;
 	extern REL::Relocation<std::uintptr_t> BipedAnimAttachSkinnedObject;
 	extern REL::Relocation<std::uintptr_t> BipedAnimAttachToParent;
 	extern REL::Relocation<std::uintptr_t> BipedAnimRemovePart;
-	extern REL::Relocation<std::uintptr_t> AIProcessDoUpdate3dModel;
 	extern REL::Relocation<std::uintptr_t> Reset3D;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName;
@@ -59,7 +66,6 @@ namespace Smp::Address
 	extern const VariantOffset BipedAnimAttachSkinnedObjectPrologueSize;
 	extern const VariantOffset BipedAnimAttachToParentPrologueSize;
 	extern const VariantOffset BipedAnimRemovePartPrologueSize;
-	extern const VariantOffset AIProcessDoUpdate3dModelPrologueSize;
 	extern const VariantOffset Reset3DPrologueSize;
 	extern const VariantOffset BSFaceGenModelExtraDataSetBoneNamePrologueSize;
 	extern const VariantOffset LooksMenuUtilsShowLooksMenuPrologueSize;
