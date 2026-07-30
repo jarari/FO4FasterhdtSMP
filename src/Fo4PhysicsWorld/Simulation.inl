@@ -652,7 +652,7 @@ namespace Smp
 		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
-			if (loadingPhysicsSuspended_) {
+			if (disabled_ || loadingPhysicsSuspended_) {
 				ResetStepClockLocked();
 				return;
 			}
@@ -702,7 +702,7 @@ namespace Smp
 		WaitForAsyncStep();
 		{
 			std::scoped_lock lock(lock_);
-			if (loadingPhysicsSuspended_) {
+			if (disabled_ || loadingPhysicsSuspended_) {
 				ResetStepClockLocked();
 				return;
 			}
