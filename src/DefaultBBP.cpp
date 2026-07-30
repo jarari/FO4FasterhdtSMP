@@ -2,6 +2,7 @@
 
 #include "ConfigPaths.h"
 #include "PhysicsName.h"
+#include "ResourceFile.h"
 
 #include "RE/N/NiStringExtraData.h"
 
@@ -127,15 +128,11 @@ namespace Smp
 				continue;
 			}
 
-			if (auto resolved = Smp::ConfigPaths::ResolveExistingConfigPath(file, true)) {
-				spdlog::info("defaultBBP selected {} for shape {}", resolved->string(), shape);
-				return Match{
-					.physicsXml = *resolved,
-					.meshNameMap = std::move(nameMap),
-				};
-			}
-
-			spdlog::warn("defaultBBP matched shape {} but XML file does not exist: {}", shape, file);
+			spdlog::info("defaultBBP selected {} for shape {}", file, shape);
+			return Match{
+				.physicsXml = std::filesystem::path(file),
+				.meshNameMap = std::move(nameMap),
+			};
 		}
 
 		return std::nullopt;
@@ -148,22 +145,23 @@ namespace Smp
 		}
 		loaded_ = true;
 
-		const auto path = Smp::ConfigPaths::ResolveExistingConfigPath("defaultBBPs.xml", true);
-		if (!path) {
+		const auto candidates = Smp::ConfigPaths::MakeConfigPathCandidates("defaultBBPs.xml", true);
+		const auto resource = Smp::ResourceFile::ReadFirst(candidates);
+		if (!resource) {
 			spdlog::debug("defaultBBP map not found at Data/F4SE/Plugins/FO4FasterHdtSMP/defaultBBPs.xml or Data/SKSE/Plugins/hdtSkinnedMeshConfigs/defaultBBPs.xml; direct XML/config matching only");
 			return;
 		}
 
 		tinyxml2::XMLDocument document;
-		const auto error = document.LoadFile(path->string().c_str());
+		const auto error = document.Parse(resource->bytes.data(), resource->bytes.size());
 		if (error != tinyxml2::XML_SUCCESS) {
-			spdlog::warn("failed to parse defaultBBP map {}: {}", path->string(), document.ErrorStr());
+			spdlog::warn("failed to parse defaultBBP map {}: {}", resource->resourcePath, document.ErrorStr());
 			return;
 		}
 
 		const auto root = document.FirstChildElement("default-bbps");
 		if (!root) {
-			spdlog::warn("defaultBBP map {} does not contain a <default-bbps> root", path->string());
+			spdlog::warn("defaultBBP map {} does not contain a <default-bbps> root", resource->resourcePath);
 			return;
 		}
 
@@ -205,6 +203,11 @@ namespace Smp
 			}
 		}
 
-		spdlog::info("loaded defaultBBP map {} maps={} remaps={}", path->string(), maps_.size(), remaps_.size());
+		spdlog::info(
+			"loaded defaultBBP map {} maps={} remaps={} source={}",
+			resource->resourcePath,
+			maps_.size(),
+			remaps_.size(),
+			resource->fromArchive ? "archive" : "loose");
 	}
 }

@@ -215,7 +215,7 @@ namespace Smp
 	private:
 		struct CachedSummary
 		{
-			std::filesystem::file_time_type timestamp{};
+			std::optional<std::filesystem::file_time_type> timestamp;
 			PhysicsXmlSummary summary;
 		};
 

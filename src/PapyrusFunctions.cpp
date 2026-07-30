@@ -1,6 +1,7 @@
 #include "PapyrusFunctions.h"
 
 #include "Fo4PhysicsWorld.h"
+#include "ResourceFile.h"
 
 #include <limits>
 #include <mutex>
@@ -261,7 +262,15 @@ namespace
 						return;
 					}
 					if (resolvedActorFormID && !originalPath.empty() && !overridePath.empty()) {
-						loadedOverrides[*resolvedActorFormID][std::move(originalPath)] = std::move(overridePath);
+						auto& actorOverrides = loadedOverrides[*resolvedActorFormID];
+						const auto existing = std::ranges::find_if(actorOverrides, [&](const auto& a_entry) {
+							return Smp::ResourceFile::PathsEqual(a_entry.first, originalPath);
+						});
+						if (existing != actorOverrides.end()) {
+							existing->second = std::move(overridePath);
+						} else {
+							actorOverrides[std::move(originalPath)] = std::move(overridePath);
+						}
 					}
 				}
 			}
@@ -335,13 +344,19 @@ namespace Smp::Papyrus
 
 		std::scoped_lock lock(overrideLock);
 		auto& actorOverrides = physicsFileOverrides[a_actorFormID];
-		for (const auto& [originalPath, overridePath] : actorOverrides) {
-			if (overridePath == a_oldPhysicsFilePath) {
-				a_oldPhysicsFilePath = originalPath;
-				break;
-			}
+		auto storedOriginalPath = std::move(a_oldPhysicsFilePath);
+		auto existing = std::ranges::find_if(actorOverrides, [&](const auto& a_entry) {
+			return ResourceFile::PathsEqual(a_entry.first, storedOriginalPath);
+		});
+		if (existing == actorOverrides.end()) {
+			existing = std::ranges::find_if(actorOverrides, [&](const auto& a_entry) {
+				return ResourceFile::PathsEqual(a_entry.second, storedOriginalPath);
+			});
 		}
-		actorOverrides[std::move(a_oldPhysicsFilePath)] = std::move(a_newPhysicsFilePath);
+		if (existing != actorOverrides.end()) {
+			storedOriginalPath = existing->first;
+		}
+		actorOverrides[std::move(storedOriginalPath)] = std::move(a_newPhysicsFilePath);
 		return true;
 	}
 
@@ -355,7 +370,9 @@ namespace Smp::Papyrus
 			return std::nullopt;
 		}
 
-		const auto override = actor->second.find(std::string(a_physicsFilePath));
+		const auto override = std::ranges::find_if(actor->second, [&](const auto& a_entry) {
+			return ResourceFile::PathsEqual(a_entry.first, a_physicsFilePath);
+		});
 		if (override == actor->second.end() || override->second.empty()) {
 			return std::nullopt;
 		}

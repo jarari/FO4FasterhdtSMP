@@ -245,17 +245,6 @@ namespace Smp
 				return false;
 			}
 
-			spdlog::info(
-				"loading system physics XML {} for actor={} object={}",
-				selectedXml,
-				static_cast<void*>(a_event.actor),
-				static_cast<void*>(a_object));
-			const auto selectedSummary = loader->LoadSummary(selectedXml);
-			if (!selectedSummary) {
-				spdlog::warn("skipping system physics candidate because selected XML failed to load: {}", selectedXml);
-				return false;
-			}
-
 			auto scopedEvent = a_event;
 			scopedEvent.object = a_object;
 			scopedEvent.physicsXmlPath = selectedXml;
@@ -275,9 +264,35 @@ namespace Smp
 				scopedEvent.biped = ResolveEventBiped(scopedEvent);
 			}
 			auto& actorState = GetOrCreateSystemLocked(a_event.actor, a_event.firstPerson);
+			const auto scopedArmorBuild =
+				armorAttach || scopedEvent.bipedObject != RE::BIPED_OBJECT::kTotal;
+			const auto hairSlotArmorBuild =
+				scopedArmorBuild && IsHairBipedObject(scopedEvent.bipedObject);
+
+			spdlog::info(
+				"loading system physics XML {} for actor={} object={}",
+				selectedXml,
+				static_cast<void*>(a_event.actor),
+				static_cast<void*>(a_object));
+			const auto selectedSummary = loader->LoadSummary(selectedXml);
+			if (!selectedSummary) {
+				spdlog::warn("skipping system physics candidate because selected XML failed to load: {}", selectedXml);
+				if (scopedArmorBuild) {
+					RecordArmorLocked(
+						actorState,
+						scopedEvent.bipedObject,
+						selectedXml,
+						a_selection.meshNameMap,
+						a_object,
+						scopedEvent.sourceObject,
+						scopedEvent.armorBoneReferences,
+						0);
+					DeactivateBuiltSystemIfInactiveLocked(actorState, scopedEvent);
+				}
+				return false;
+			}
+
 			std::vector<std::uint64_t> staleArmorBuildGroups;
-			const auto scopedArmorBuild = armorAttach || scopedEvent.bipedObject != RE::BIPED_OBJECT::kTotal;
-			const auto hairSlotArmorBuild = scopedArmorBuild && IsHairBipedObject(scopedEvent.bipedObject);
 			if (scopedArmorBuild) {
 				if (IsAttachmentCurrentLocked(actorState, scopedEvent.bipedObject, a_object, scopedEvent.sourceObject, selectedXml)) {
 					spdlog::debug(
@@ -420,7 +435,7 @@ namespace Smp
 			if (auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson)) {
 				ClearSystemLocked(*actorState);
 				std::erase_if(systems_, [](const auto& a_state) {
-					return !a_state->suspended && !a_state->HasPhysics();
+					return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 				});
 			}
 		}
@@ -438,7 +453,7 @@ namespace Smp
 				equippedArmorCandidates.size(),
 				builtEquipped);
 			std::erase_if(systems_, [](const auto& a_state) {
-				return !a_state->suspended && !a_state->HasPhysics();
+				return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 			});
 			if (selectedXml.empty()) {
 				return;
@@ -458,7 +473,7 @@ namespace Smp
 			.sourceRoot = a_event.sourceRoot,
 		});
 		std::erase_if(systems_, [](const auto& a_state) {
-			return !a_state->suspended && !a_state->HasPhysics();
+			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
 	}
 
@@ -615,13 +630,13 @@ namespace Smp
 			if (!record.isHeadPartClosure || record.buildGroup == 0) {
 				continue;
 			}
-			const auto recordXmlKey = ConfigPaths::LowerString(record.physicsXmlPath);
+			const auto recordXmlKey = ResourceFile::ComparisonKey(record.physicsXmlPath);
 			const auto stillCurrent = std::ranges::any_of(candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
 				return a_candidate.isHeadPartClosure &&
 					a_candidate.domain == record.domain &&
 					a_candidate.object == record.object.get() &&
 					std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_path) {
-						return ConfigPaths::LowerString(a_path.string()) == recordXmlKey;
+						return ResourceFile::ComparisonKey(a_path.string()) == recordXmlKey;
 					});
 			});
 			if (!stillCurrent && std::ranges::find(staleClosureGroups, record.buildGroup) == staleClosureGroups.end()) {
@@ -660,7 +675,7 @@ namespace Smp
 				static_cast<void*>(a_event.object),
 				hairKeys.size());
 			std::erase_if(systems_, [](const auto& a_state) {
-				return !a_state->suspended && !a_state->HasPhysics();
+				return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 			});
 			return false;
 		}
@@ -685,7 +700,7 @@ namespace Smp
 				if (selectedXml.empty()) {
 					continue;
 				}
-				const auto selectedXmlKey = ConfigPaths::LowerString(selectedXml);
+				const auto selectedXmlKey = ResourceFile::ComparisonKey(selectedXml);
 				const auto duplicatePhysicsFile = std::ranges::any_of(scannedPhysicsFiles, [&](const auto& a_entry) {
 					if (a_entry.domain != candidate.domain || a_entry.pathKey != selectedXmlKey) {
 						return false;
@@ -705,7 +720,7 @@ namespace Smp
 						a_record.isHeadPartClosure == candidate.isHeadPartClosure &&
 						!candidate.isHeadPartClosure &&
 						a_record.buildGroup != 0 &&
-						ConfigPaths::LowerString(a_record.physicsXmlPath) == selectedXmlKey;
+						ResourceFile::ComparisonKey(a_record.physicsXmlPath) == selectedXmlKey;
 				});
 				if (trackedByAnotherObject) {
 					++skippedDuplicateXml;
@@ -731,7 +746,7 @@ namespace Smp
 						a_record.domain == candidate.domain &&
 						a_record.isHeadPartClosure == candidate.isHeadPartClosure &&
 						a_record.buildGroup != 0 &&
-						ConfigPaths::LowerString(a_record.physicsXmlPath) == a_selectedXml.second;
+						ResourceFile::ComparisonKey(a_record.physicsXmlPath) == a_selectedXml.second;
 				});
 				if (record == actorState.headPartRecords.end()) {
 					return false;
@@ -854,7 +869,7 @@ namespace Smp
 			hairKeys.size(),
 			cpuCopyPending);
 		std::erase_if(systems_, [](const auto& a_state) {
-			return !a_state->suspended && !a_state->HasPhysics();
+			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
 		return cpuCopyPending;
 	}

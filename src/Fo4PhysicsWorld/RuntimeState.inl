@@ -1708,14 +1708,14 @@ namespace Smp
 		auto armorRecords = CollectSuspendedArmorRecordsLocked(a_event);
 		StripQueuedArmorRuntimePointers(armorRecords);
 		for (auto& record : armorRecords) {
-			const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
+			const auto normalizedXml = ResourceFile::ComparisonKey(record.physicsXmlPath);
 			auto existing = std::ranges::find_if(
 				found->armorRecords,
 				[&](const SaveLoadArmorRecord& a_existing) {
 					return a_existing.bipedIdentity == a_event.biped &&
 						a_existing.objectIdentity == a_event.object &&
 						a_existing.record.bipedObject == record.bipedObject &&
-						ConfigPaths::LowerString(a_existing.record.physicsXmlPath) == normalizedXml;
+						ResourceFile::ComparisonKey(a_existing.record.physicsXmlPath) == normalizedXml;
 				});
 			if (existing != found->armorRecords.end()) {
 				existing->record = std::move(record);

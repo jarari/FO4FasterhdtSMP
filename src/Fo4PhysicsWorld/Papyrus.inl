@@ -81,7 +81,7 @@ namespace Smp
 				}
 
 				armorAddonFound = true;
-				if (record->physicsXmlPath == a_physicsFilePath) {
+				if (ResourceFile::PathsEqual(record->physicsXmlPath, a_physicsFilePath)) {
 					LogDynamicHdtResult(a_verbose, "Physics file paths are identical; replacement was skipped.");
 					succeeded = true;
 					break;
@@ -151,14 +151,14 @@ namespace Smp
 				actorFound = true;
 
 				auto record = std::ranges::find_if(actorState->armorRecords, [&](const ArmorPhysicsRecord& a_record) {
-					return a_record.physicsXmlPath == a_oldPhysicsFilePath;
+					return ResourceFile::PathsEqual(a_record.physicsXmlPath, a_oldPhysicsFilePath);
 				});
 				if (record == actorState->armorRecords.end()) {
 					continue;
 				}
 
 				physicsFileFound = true;
-				if (record->physicsXmlPath == a_newPhysicsFilePath) {
+				if (ResourceFile::PathsEqual(record->physicsXmlPath, a_newPhysicsFilePath)) {
 					LogDynamicHdtResult(a_verbose, "Physics file paths are identical; replacement was skipped.");
 					succeeded = true;
 					break;
@@ -176,7 +176,7 @@ namespace Smp
 				succeeded = true;
 				break;
 			}
-			if (succeeded && physicsFileFound && a_oldPhysicsFilePath != a_newPhysicsFilePath) {
+			if (succeeded && physicsFileFound && !ResourceFile::PathsEqual(a_oldPhysicsFilePath, a_newPhysicsFilePath)) {
 				TryRebuildPendingActorsLocked(a_actor);
 			}
 		}

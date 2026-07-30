@@ -1,6 +1,7 @@
 #include "PhysicsXml.h"
 
 #include "ConfigPaths.h"
+#include "ResourceFile.h"
 
 #include <tinyxml2.h>
 
@@ -14,7 +15,6 @@
 namespace
 {
 	using Smp::ConfigPaths::LowerString;
-	using Smp::ConfigPaths::PathExists;
 	using Smp::ConfigPaths::Trim;
 
 	bool ParseInt(std::string a_value, int& a_out)
@@ -823,36 +823,48 @@ namespace Smp
 			return std::nullopt;
 		}
 
-		const auto resolvedPath = Smp::ConfigPaths::ResolveConfigPath(a_path, true);
-		const auto cacheKey = resolvedPath.string();
-		const auto currentTimestamp = GetLastWriteTime(resolvedPath);
-		if (currentTimestamp) {
-			if (const auto found = summaryCache_.find(cacheKey); found != summaryCache_.end()) {
-				if (found->second.timestamp == *currentTimestamp) {
-					return found->second.summary;
-				}
-				spdlog::debug("physics XML timestamp changed, reloading {}", cacheKey);
-			}
-		}
-
-		PhysicsXmlSummary loaded;
-		loaded.path = resolvedPath;
-		if (!PathExists(loaded.path)) {
-			spdlog::warn("physics XML not found: {}", a_path);
+		const std::filesystem::path logicalPath(a_path);
+		if (!Smp::ConfigPaths::IsXmlPath(logicalPath)) {
+			spdlog::warn("physics XML path does not have an .xml extension: {}", a_path);
 			return std::nullopt;
 		}
 
+		const auto cacheKey = Smp::ResourceFile::ComparisonKey(a_path);
+		const auto loosePath = Smp::ConfigPaths::ResolveExistingConfigPath(a_path, true);
+		const auto currentTimestamp = loosePath ? GetLastWriteTime(*loosePath) : std::nullopt;
+		if (const auto found = summaryCache_.find(cacheKey); found != summaryCache_.end()) {
+			if (found->second.timestamp == currentTimestamp) {
+				return found->second.summary;
+			}
+			spdlog::debug("physics XML resource changed, reloading {}", a_path);
+		}
+
+		const auto candidates = Smp::ConfigPaths::MakeConfigPathCandidates(logicalPath, true);
+		const auto resource = Smp::ResourceFile::ReadFirst(candidates);
+		if (!resource) {
+			spdlog::warn("physics XML resource not found: {}", a_path);
+			summaryCache_.erase(cacheKey);
+			return std::nullopt;
+		}
+
+		PhysicsXmlSummary loaded;
+		loaded.path = logicalPath;
+
 		tinyxml2::XMLDocument document;
-		const auto error = document.LoadFile(loaded.path.string().c_str());
+		const auto error = document.Parse(resource->bytes.data(), resource->bytes.size());
 		if (error != tinyxml2::XML_SUCCESS) {
-			spdlog::error("failed to parse physics XML {}: {}", loaded.path.string(), document.ErrorStr());
+			spdlog::error(
+				"failed to parse physics XML resource {} (requested as {}): {}",
+				resource->resourcePath,
+				a_path,
+				document.ErrorStr());
 			return std::nullopt;
 		}
 
 		const auto system = document.FirstChildElement("system");
 		loaded.validSystemRoot = system != nullptr;
 		if (!system) {
-			spdlog::warn("physics XML {} does not contain a <system> root", loaded.path.string());
+			spdlog::warn("physics XML {} does not contain a <system> root", a_path);
 			return std::nullopt;
 		}
 
@@ -989,15 +1001,10 @@ namespace Smp
 				AddUniqueBoneName(loaded, descriptor.bodyB.c_str());
 			}
 		}
-		if (const auto loadedTimestamp = currentTimestamp ? currentTimestamp : GetLastWriteTime(loaded.path)) {
-			auto [entry, inserted] = summaryCache_.insert_or_assign(cacheKey, CachedSummary{
-				.timestamp = *loadedTimestamp,
-				.summary = std::move(loaded),
-			});
-			return entry->second.summary;
-		}
-
-		summaryCache_.erase(cacheKey);
-		return loaded;
+		const auto entry = summaryCache_.insert_or_assign(cacheKey, CachedSummary{
+			.timestamp = currentTimestamp,
+			.summary = std::move(loaded),
+		});
+		return entry.first->second.summary;
 	}
 }

@@ -446,17 +446,17 @@ namespace Smp
 			return (!a_lhs.attachedObject || !a_rhs.attachedObject || a_lhs.attachedObject.get() == a_rhs.attachedObject.get()) &&
 				(!a_lhs.sourceObject || !a_rhs.sourceObject || a_lhs.sourceObject.get() == a_rhs.sourceObject.get());
 		};
-		const auto normalizedXml = ConfigPaths::LowerString(a_record.physicsXmlPath);
+		const auto normalizedXml = ResourceFile::ComparisonKey(a_record.physicsXmlPath);
 		auto existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml](const ArmorPhysicsRecord& a_existing) {
 			return a_existing.bipedObject == a_record.bipedObject &&
 				a_existing.attachedObject.get() == a_record.attachedObject.get() &&
 				a_existing.sourceObject.get() == a_record.sourceObject.get() &&
-				ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml;
+				ResourceFile::ComparisonKey(a_existing.physicsXmlPath) == normalizedXml;
 		});
 		if (existing == a_records.end()) {
 			existing = std::ranges::find_if(a_records, [&a_record, &normalizedXml, &runtimeObjectsCompatible](const ArmorPhysicsRecord& a_existing) {
 				return a_existing.bipedObject == a_record.bipedObject &&
-					ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
+					ResourceFile::ComparisonKey(a_existing.physicsXmlPath) == normalizedXml &&
 					runtimeObjectsCompatible(a_record, a_existing);
 			});
 		}
@@ -779,7 +779,7 @@ namespace Smp
 			return;
 		}
 
-		const auto normalizedXml = ConfigPaths::LowerString(a_physicsXmlPath);
+		const auto normalizedXml = ResourceFile::ComparisonKey(a_physicsXmlPath);
 		const auto appendBuildGroup = [](std::vector<std::uint64_t>& a_buildGroups, const std::uint64_t a_buildGroup) {
 			if (a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) == a_buildGroups.end()) {
 				a_buildGroups.push_back(a_buildGroup);
@@ -789,7 +789,7 @@ namespace Smp
 			return a_record.bipedObject == a_bipedObject &&
 				a_record.attachedObject.get() == a_attachedObject &&
 				a_record.sourceObject.get() == a_sourceObject &&
-				ConfigPaths::LowerString(a_record.physicsXmlPath) == normalizedXml;
+				ResourceFile::ComparisonKey(a_record.physicsXmlPath) == normalizedXml;
 		});
 		if (existing != a_state.armorRecords.end()) {
 			existing->physicsXmlPath = std::move(a_physicsXmlPath);
@@ -826,7 +826,8 @@ namespace Smp
 			return nullptr;
 		}
 
-		const auto normalizedXml = a_physicsXmlPath.empty() ? std::string{} : ConfigPaths::LowerString(std::string(a_physicsXmlPath));
+		const auto normalizedXml =
+			a_physicsXmlPath.empty() ? std::string{} : ResourceFile::ComparisonKey(a_physicsXmlPath);
 		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
 			if (a_record.bipedObject != a_bipedObject) {
 				return false;
@@ -837,7 +838,7 @@ namespace Smp
 			if (a_sourceObject && a_record.sourceObject && a_record.sourceObject.get() != a_sourceObject) {
 				return false;
 			}
-			if (!normalizedXml.empty() && ConfigPaths::LowerString(a_record.physicsXmlPath) != normalizedXml) {
+			if (!normalizedXml.empty() && ResourceFile::ComparisonKey(a_record.physicsXmlPath) != normalizedXml) {
 				return false;
 			}
 			return true;
@@ -856,7 +857,8 @@ namespace Smp
 			return nullptr;
 		}
 
-		const auto normalizedXml = a_physicsXmlPath.empty() ? std::string{} : ConfigPaths::LowerString(std::string(a_physicsXmlPath));
+		const auto normalizedXml =
+			a_physicsXmlPath.empty() ? std::string{} : ResourceFile::ComparisonKey(a_physicsXmlPath);
 		const auto found = std::ranges::find_if(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
 			if (a_record.bipedObject != a_bipedObject) {
 				return false;
@@ -867,7 +869,7 @@ namespace Smp
 			if (a_sourceObject && a_record.sourceObject && a_record.sourceObject.get() != a_sourceObject) {
 				return false;
 			}
-			if (!normalizedXml.empty() && ConfigPaths::LowerString(a_record.physicsXmlPath) != normalizedXml) {
+			if (!normalizedXml.empty() && ResourceFile::ComparisonKey(a_record.physicsXmlPath) != normalizedXml) {
 				return false;
 			}
 			return true;
@@ -887,7 +889,7 @@ namespace Smp
 			return false;
 		}
 
-		const auto sameXml = ConfigPaths::LowerString(record->physicsXmlPath) == ConfigPaths::LowerString(std::string(a_physicsXmlPath));
+		const auto sameXml = ResourceFile::PathsEqual(record->physicsXmlPath, a_physicsXmlPath);
 		if (!sameXml) {
 			return false;
 		}
@@ -988,10 +990,10 @@ namespace Smp
 					continue;
 				}
 
-				const auto normalizedXml = ConfigPaths::LowerString(record.physicsXmlPath);
+				const auto normalizedXml = ResourceFile::ComparisonKey(record.physicsXmlPath);
 				auto existing = std::ranges::find_if(mergedRecords, [&](const ArmorPhysicsRecord& a_existing) {
 					return a_existing.bipedObject == record.bipedObject &&
-						ConfigPaths::LowerString(a_existing.physicsXmlPath) == normalizedXml &&
+						ResourceFile::ComparisonKey(a_existing.physicsXmlPath) == normalizedXml &&
 						runtimeObjectsCompatible(record, a_existing);
 				});
 				if (existing == mergedRecords.end()) {

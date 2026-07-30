@@ -71,10 +71,11 @@ namespace Smp
 		maxActorDistance_ = std::max(a_settings.smp.maxActorDistance, 0.0F);
 		fallbackPhysicsXml_.clear();
 		if (!a_settings.smp.fallbackPhysicsXml.empty()) {
-			if (auto resolved = ConfigPaths::ResolveExistingConfigPath(a_settings.smp.fallbackPhysicsXml, true)) {
-				fallbackPhysicsXml_ = resolved->string();
+			const auto fallbackPath = std::filesystem::path(a_settings.smp.fallbackPhysicsXml);
+			if (ConfigPaths::IsXmlPath(fallbackPath)) {
+				fallbackPhysicsXml_ = a_settings.smp.fallbackPhysicsXml;
 			} else {
-				spdlog::warn("physics XML fallback disabled because configured path is missing or not XML: {}", a_settings.smp.fallbackPhysicsXml);
+				spdlog::warn("physics XML fallback disabled because configured path is not XML: {}", a_settings.smp.fallbackPhysicsXml);
 			}
 		}
 		windEnabled_ = a_settings.wind.enabled;

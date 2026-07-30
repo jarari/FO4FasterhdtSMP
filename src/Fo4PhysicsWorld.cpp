@@ -15,6 +15,7 @@
 #include "PhysicsXmlSelection.h"
 #include "PapyrusFunctions.h"
 #include "PhysicsProfiler.h"
+#include "ResourceFile.h"
 #include "SmpConfig.h"
 #include "hdtSkinnedMesh/hdtDispatcher.h"
 #include "hdtSkinnedMesh/hdtConeTwistConstraint.h"
@@ -843,12 +844,12 @@ namespace
 			return;
 		}
 
-		const auto normalizedPath = Smp::ConfigPaths::LowerString(a_path.string());
+		const auto normalizedPath = Smp::ResourceFile::ComparisonKey(a_path.string());
 		const auto duplicate = std::ranges::any_of(a_candidates, [&](const HeadPhysicsXmlBuildCandidate& a_candidate) {
 			return a_candidate.object == a_object &&
 				a_candidate.domain == a_domain &&
 				std::ranges::any_of(a_candidate.paths, [&](const std::filesystem::path& a_existingPath) {
-					return Smp::ConfigPaths::LowerString(a_existingPath.string()) == normalizedPath;
+					return Smp::ResourceFile::ComparisonKey(a_existingPath.string()) == normalizedPath;
 				});
 		});
 		if (duplicate) {
@@ -969,9 +970,9 @@ namespace
 			return;
 		}
 
-		const auto key = Smp::ConfigPaths::LowerString(a_path.string());
+		const auto key = Smp::ResourceFile::ComparisonKey(a_path.string());
 		if (std::ranges::none_of(a_paths, [&](const auto& a_existing) {
-				return Smp::ConfigPaths::LowerString(a_existing.string()) == key;
+				return Smp::ResourceFile::ComparisonKey(a_existing.string()) == key;
 			})) {
 			a_paths.push_back(a_path);
 		}

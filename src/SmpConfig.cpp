@@ -1,6 +1,7 @@
 #include "SmpConfig.h"
 
 #include "ConfigPaths.h"
+#include "ResourceFile.h"
 
 #include <tinyxml2.h>
 
@@ -136,22 +137,23 @@ namespace Smp
 	{
 		settings_ = RuntimeSettings{};
 
-		const auto configPath = Smp::ConfigPaths::ResolveExistingConfigPath("configs.xml", true);
-		if (!configPath) {
+		const auto candidates = Smp::ConfigPaths::MakeConfigPathCandidates("configs.xml", true);
+		const auto resource = Smp::ResourceFile::ReadFirst(candidates);
+		if (!resource) {
 			spdlog::info("config not found at Data/F4SE/Plugins/FO4FasterHdtSMP/configs.xml or Data/SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml; using defaults");
 			return false;
 		}
 
 		tinyxml2::XMLDocument document;
-		const auto error = document.LoadFile(configPath->string().c_str());
+		const auto error = document.Parse(resource->bytes.data(), resource->bytes.size());
 		if (error != tinyxml2::XML_SUCCESS) {
-			spdlog::error("failed to parse {}: {}", configPath->string(), document.ErrorStr());
+			spdlog::error("failed to parse {}: {}", resource->resourcePath, document.ErrorStr());
 			return false;
 		}
 
 		const auto configs = document.FirstChildElement("configs");
 		if (!configs) {
-			spdlog::warn("{} does not contain a <configs> root; using defaults", configPath->string());
+			spdlog::warn("{} does not contain a <configs> root; using defaults", resource->resourcePath);
 			return false;
 		}
 

@@ -1,6 +1,5 @@
 #include "PhysicsXmlSelection.h"
 
-#include "ConfigPaths.h"
 #include "Fo4NiObjectUtils.h"
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
@@ -12,41 +11,21 @@ namespace Smp::PhysicsXmlSelection
 	namespace
 	{
 		constexpr std::string_view kPhysicsXmlExtraName = "HDT Skinned Mesh Physics Object";
-
-		void LogUnresolvedDirectXml(RE::NiAVObject* a_object, const std::string& a_data, const DirectXmlLogContext a_context)
-		{
-			switch (a_context) {
-			case DirectXmlLogContext::kOriginalModelObject:
-				spdlog::warn(
-					"found '{}' NiStringExtraData on original model object={} but XML path could not be resolved: {}",
-					kPhysicsXmlExtraName,
-					static_cast<void*>(a_object),
-					a_data);
-				break;
-			case DirectXmlLogContext::kObject:
-			default:
-				spdlog::warn(
-					"found '{}' NiStringExtraData on object={} but XML path could not be resolved: {}",
-					kPhysicsXmlExtraName,
-					static_cast<void*>(a_object),
-					a_data);
-				break;
-			}
-		}
 	}
 
-	std::optional<std::filesystem::path> FindDirectPhysicsXmlExtraData(RE::NiAVObject* a_object, const DirectXmlLogContext a_context)
+	std::optional<std::filesystem::path> FindDirectPhysicsXmlExtraData(
+		RE::NiAVObject* a_object,
+		const DirectXmlLogContext)
 	{
 		auto data = NiObject::FindStringExtraData(a_object, kPhysicsXmlExtraName);
 		if (!data) {
 			return std::nullopt;
 		}
 
-		if (auto path = ConfigPaths::ResolveExistingConfigPath(*data, true)) {
-			return path;
-		}
-		LogUnresolvedDirectXml(a_object, *data, a_context);
-		return std::nullopt;
+		// Keep the NIF-authored, Data-relative resource path intact. Existence is
+		// checked by the resource-backed XML loader so missing paths remain
+		// addressable by DynamicHDT and archived XML can be found in BA2 files.
+		return std::filesystem::path(std::move(*data));
 	}
 
 	std::optional<ArmorSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object)
