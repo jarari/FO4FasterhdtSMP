@@ -261,12 +261,25 @@ namespace Smp
 			}
 		}
 
+		bool SkinBindingsContainBone(
+			const std::span<const RetainedSkinBinding> a_bindings,
+			const std::string_view a_name)
+		{
+			const auto normalizedName = NormalizeBoneCacheName(a_name);
+			return std::ranges::any_of(a_bindings, [&](const RetainedSkinBinding& a_binding) {
+				return std::ranges::any_of(a_binding.boneNames, [&](const RE::BSFixedString& a_boneName) {
+					return !a_boneName.empty() &&
+						NormalizeBoneCacheName(a_boneName) == normalizedName;
+				});
+			});
+		}
+
 	}
 
-	std::vector<RetainedSkinBinding> CaptureRetainedSkinBindings(RE::NiAVObject* a_retainedFace)
+	std::vector<RetainedSkinBinding> CaptureRetainedSkinBindings(RE::NiAVObject* a_object)
 	{
 		std::vector<RetainedSkinBinding> bindings;
-		if (!a_retainedFace) {
+		if (!a_object) {
 			return bindings;
 		}
 
@@ -298,16 +311,22 @@ namespace Smp
 			boneSlots += static_cast<std::uint32_t>(binding.boneNames.size());
 			bindings.push_back(std::move(binding));
 		};
-		ForEachSkin(a_retainedFace, captureSkin);
+		ForEachSkin(a_object, captureSkin);
 
 		spdlog::debug(
-			"captured retained-face skin bindings faceNode={} instances={} boneSlots={} unnamedSlots={} oversizedSkins={}",
-			static_cast<void*>(a_retainedFace),
+			"captured source skin bindings object={} name='{}' instances={} boneSlots={} unnamedSlots={} oversizedSkins={}",
+			static_cast<void*>(a_object),
+			std::string_view(a_object->GetName()),
 			bindings.size(),
 			boneSlots,
 			unnamedSlots,
 			oversizedSkins);
 		return bindings;
+	}
+
+	std::vector<RetainedSkinBinding> CaptureMainSkinBindings(RE::NiAVObject* a_mainRoot)
+	{
+		return CaptureRetainedSkinBindings(a_mainRoot);
 	}
 
 	RetainedSkinRebindResult RebindRetainedSkinBindings(
@@ -726,7 +745,8 @@ namespace Smp
 		const bool a_firstPerson,
 		std::vector<ArmorBoneReference>& a_references,
 		const std::span<const RE::NiPointer<RE::NiAVObject>> a_additionalAttachedObjects,
-		const bool a_moveBoundBonesToSkeleton)
+		const bool a_moveBoundBonesToSkeleton,
+		const std::span<const RetainedSkinBinding> a_sourceSkinBindings)
 	{
 		if (!a_attachedObject || a_references.empty()) {
 			return false;
@@ -746,8 +766,10 @@ namespace Smp
 			return false;
 		}
 
-		std::vector<RetainedSkinBinding> capturedBindings;
-		if (!a_moveBoundBonesToSkeleton) {
+		std::vector<RetainedSkinBinding> capturedBindings(
+			a_sourceSkinBindings.begin(),
+			a_sourceSkinBindings.end());
+		if (!a_moveBoundBonesToSkeleton && capturedBindings.empty()) {
 			std::unordered_set<RE::BSSkin::Instance*> capturedSkins;
 			auto captureSkin = [&](RE::BSSkin::Instance* a_skin) {
 				if (!a_skin ||
@@ -813,7 +835,12 @@ namespace Smp
 				persistentBone;
 
 			if (!bone) {
-				if (reference.isSkinned && a_moveBoundBonesToSkeleton) {
+				const auto mainSkinRequiresBone =
+					reference.isArmorOnly &&
+					SkinBindingsContainBone(capturedBindings, reference.name);
+				if (reference.isSkinned &&
+					a_moveBoundBonesToSkeleton &&
+					!mainSkinRequiresBone) {
 					spdlog::debug(
 						"skipping unresolved skinned armor node '{}' actor={} object={} because only the engine-owned BSSkin bone may be used",
 						reference.name,
@@ -832,13 +859,14 @@ namespace Smp
 				reference.createdByUs = true;
 				++createdArmorNodes;
 				spdlog::debug(
-					"created persistent armor node '{}' under '{}' actor={} node={} parent={} sourceSkinned={}",
+					"created persistent armor node '{}' under '{}' actor={} node={} parent={} sourceSkinned={} requiredByCapturedMainSkin={}",
 					reference.name,
 					expectedParent->GetName(),
 					static_cast<void*>(a_actor),
 					static_cast<void*>(bone),
 					static_cast<void*>(expectedParent),
-					reference.isSkinned);
+					reference.isSkinned,
+					mainSkinRequiresBone);
 			} else {
 				reference.resolvedNode.reset(bone);
 				if (reference.isArmorOnly) {
@@ -921,7 +949,7 @@ namespace Smp
 		auto* currentActorRoot = actorRoot ? actorRoot : static_cast<RE::NiAVObject*>(destinationRoot);
 
 		spdlog::debug(
-			"finalized persistent armor hierarchy actor={} object={} skeletonRoot={} actorRoot={} references={} attachedArmorOnlyBones={} createdArmorNodes={} reusedArmorNodes={} reparentedArmorNodes={} updatedArmorRoots={} reboundSkinSlots={} unresolvedSkinSlots={} movedBoundBones={}",
+			"finalized persistent armor hierarchy actor={} object={} skeletonRoot={} actorRoot={} references={} attachedArmorOnlyBones={} createdArmorNodes={} reusedArmorNodes={} reparentedArmorBones={} updatedArmorRoots={} sourceSkinBindings={} reboundSkinSlots={} unresolvedSkinSlots={} movedBoundBones={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_attachedObject),
 			static_cast<void*>(destinationRoot),
@@ -932,6 +960,7 @@ namespace Smp
 			reusedArmorNodes,
 			reparentedArmorBones,
 			updateRoots.size(),
+			a_sourceSkinBindings.size(),
 			reboundSkinSlots,
 			unresolvedSkinSlots,
 			a_moveBoundBonesToSkeleton);

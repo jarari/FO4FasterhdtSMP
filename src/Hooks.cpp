@@ -111,13 +111,24 @@ namespace Hooks
 	{
 		std::optional<std::string> selectedXml;
 		std::vector<Smp::ArmorBoneReference> armorBoneReferences;
+		std::vector<Smp::RetainedSkinBinding> mainSkinBindings;
 	};
+
+	bool UsesFaceBonesModel(const RE::BIPOBJECT* a_bipObject)
+	{
+		// BipedAnim::AttachSkinnedObject gates LoadFaceBonesModel and
+		// BakeChargenMorphs on TESModel::flags bit 0.
+		return a_bipObject &&
+			a_bipObject->part &&
+			(static_cast<std::uint8_t>(a_bipObject->part->flags) & 1U) != 0;
+	}
 
 	PreAttachPhysicsContext PreparePreAttachPhysicsContext(
 		RE::NiAVObject* a_sourceObject,
 		RE::NiAVObject* a_skeletonRoot,
 		const std::string_view a_nifPath,
-		const char* a_sourceLabel)
+		const char* a_sourceLabel,
+		const bool a_usesFaceBonesModel)
 	{
 		PreAttachPhysicsContext context;
 		context.selectedXml = FindPhysicsXmlExtraData(a_sourceObject);
@@ -126,13 +137,18 @@ namespace Hooks
 		}
 
 		context.armorBoneReferences = Smp::CaptureArmorBoneReferences(a_sourceObject, a_skeletonRoot, a_nifPath);
+		if (a_usesFaceBonesModel) {
+			context.mainSkinBindings = Smp::CaptureMainSkinBindings(a_sourceObject);
+		}
 		spdlog::debug(
-			"pre-scanned armor physics XML {} from {}={} name='{}' nif='{}'",
+			"pre-scanned armor physics XML {} from {}={} name='{}' nif='{}' usesFaceBonesModel={} mainSkinInstances={}",
 			*context.selectedXml,
 			a_sourceLabel,
 			static_cast<void*>(a_sourceObject),
 			a_sourceObject ? std::string_view(a_sourceObject->GetName()) : std::string_view{},
-			a_nifPath);
+			a_nifPath,
+			a_usesFaceBonesModel,
+			context.mainSkinBindings.size());
 
 		return context;
 	}
@@ -413,7 +429,8 @@ namespace Hooks
 			originalModelObject,
 			a_biped ? static_cast<RE::NiAVObject*>(a_biped->GetRoot()) : nullptr,
 			nifPath,
-			"original model root");
+			"original model root",
+			UsesFaceBonesModel(bipObject));
 
 		RE::NiAVObject* attachedObject = nullptr;
 		ApplySkinnedObjectsSkeletonRoot = nullptr;
@@ -422,7 +439,15 @@ namespace Hooks
 			attachedObject = OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
 		}
 		auto* actor = ResolveActor(a_biped);
-		Smp::FinalizeArmorSkinBindings(actor, attachedObject, ApplySkinnedObjectsSkeletonRoot, a_firstPerson, preAttach.armorBoneReferences);
+		Smp::FinalizeArmorSkinBindings(
+			actor,
+			attachedObject,
+			ApplySkinnedObjectsSkeletonRoot,
+			a_firstPerson,
+			preAttach.armorBoneReferences,
+			{},
+			true,
+			preAttach.mainSkinBindings);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorApplySkinnedObjects,
 			.actor = actor,
@@ -456,7 +481,12 @@ namespace Hooks
 		auto* modelObject = a_modelRoot ? static_cast<RE::NiAVObject*>(a_modelRoot) : nullptr;
 		PreAttachPhysicsContext preAttach;
 		if (!nestedApply) {
-			preAttach = PreparePreAttachPhysicsContext(modelObject, a_skeletonRoot, nifPath, "model root");
+			preAttach = PreparePreAttachPhysicsContext(
+				modelObject,
+				a_skeletonRoot,
+				nifPath,
+				"model root",
+				UsesFaceBonesModel(bipObject));
 		}
 
 		auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_modelRoot, a_skeletonRoot, a_bipedObject, a_firstPerson);
@@ -465,7 +495,15 @@ namespace Hooks
 			return attachedObject;
 		}
 		auto* actor = ResolveActor(a_biped);
-		Smp::FinalizeArmorSkinBindings(actor, attachedObject, a_skeletonRoot, a_firstPerson, preAttach.armorBoneReferences);
+		Smp::FinalizeArmorSkinBindings(
+			actor,
+			attachedObject,
+			a_skeletonRoot,
+			a_firstPerson,
+			preAttach.armorBoneReferences,
+			{},
+			true,
+			preAttach.mainSkinBindings);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorAttachSkinnedObject,
 			.actor = actor,
