@@ -539,12 +539,17 @@ namespace Smp
 
 	bool Fo4PhysicsWorld::ShouldDeferCharacterCustomizationPhysicsLocked(const LifecycleEvent& a_event)
 	{
-		if (characterCustomizationMenuDepth_ == 0 || !a_event.actor || a_event.firstPerson) {
+		if (!a_event.actor || a_event.firstPerson) {
+			return false;
+		}
+
+		auto* guard = FindFaceGenRebuildGuardLocked(a_event.actor);
+		if (characterCustomizationMenuDepth_ == 0 && !guard) {
 			return false;
 		}
 
 		auto* target = ResolveCharacterCustomizationTargetLocked();
-		if (!target) {
+		if (!target && characterCustomizationMenuDepth_ > 0) {
 			NoteCharacterCustomizationTargetLocked(a_event.actor);
 			target = a_event.actor;
 			SuspendCharacterCustomizationTargetLocked();
@@ -554,7 +559,7 @@ namespace Smp
 				ToString(a_event.type));
 		}
 
-		if (target != a_event.actor) {
+		if (target != a_event.actor && !guard) {
 			return false;
 		}
 
@@ -564,6 +569,108 @@ namespace Smp
 			ToString(a_event.type),
 			static_cast<void*>(a_event.actor));
 		return true;
+	}
+
+	Fo4PhysicsWorld::FaceGenRebuildGuard* Fo4PhysicsWorld::FindFaceGenRebuildGuardLocked(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return nullptr;
+		}
+
+		const auto found = std::ranges::find_if(faceGenRebuildGuards_, [a_actor](const FaceGenRebuildGuard& a_guard) {
+			const auto actor = a_guard.actorHandle.get();
+			return actor && actor.get() == a_actor;
+		});
+		return found != faceGenRebuildGuards_.end() ? std::addressof(*found) : nullptr;
+	}
+
+	void Fo4PhysicsWorld::ObserveGuardedHeadEventLocked(const LifecycleEvent& a_event)
+	{
+		auto* guard = FindFaceGenRebuildGuardLocked(a_event.actor);
+		if (!guard) {
+			return;
+		}
+
+		auto* faceNode = a_event.actor ? a_event.actor->GetFaceNodeSkinned() : nullptr;
+		guard->latestFaceNode = reinterpret_cast<RE::NiAVObject*>(faceNode);
+		guard->lastManagerObservation = faceGenManagerObservation_;
+		guard->stableIdleObservations = 0;
+		spdlog::trace(
+			"absorbed FaceGen head replacement during actor-scoped rebuild guard actor={} faceNode={} type={}",
+			static_cast<void*>(a_event.actor),
+			static_cast<void*>(faceNode),
+			ToString(a_event.type));
+	}
+
+	bool Fo4PhysicsWorld::IsActorFaceGenLoadPendingLocked(RE::Actor* a_actor) const
+	{
+		return a_actor && a_actor->currentProcess && a_actor->currentProcess->high &&
+		       a_actor->currentProcess->high->faceGenLoadPending;
+	}
+
+	void Fo4PhysicsWorld::AdvanceFaceGenRebuildGuardsLocked()
+	{
+		for (auto it = faceGenRebuildGuards_.begin(); it != faceGenRebuildGuards_.end();) {
+			auto resolvedActor = it->actorHandle.get();
+			if (!resolvedActor) {
+				it = faceGenRebuildGuards_.erase(it);
+				continue;
+			}
+
+			auto* actor = resolvedActor.get();
+			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
+				it->stableIdleObservations = 0;
+				it->lastManagerObservation = faceGenManagerObservation_;
+				++it;
+				continue;
+			}
+
+			auto* currentFaceNode = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned());
+			if (!currentFaceNode || currentFaceNode != it->latestFaceNode.get()) {
+				it->latestFaceNode = currentFaceNode;
+				it->stableIdleObservations = 0;
+				it->lastManagerObservation = faceGenManagerObservation_;
+				++it;
+				continue;
+			}
+
+			if (!faceGenManagerIdle_ || IsActorFaceGenLoadPendingLocked(actor)) {
+				it->stableIdleObservations = 0;
+				it->lastManagerObservation = faceGenManagerObservation_;
+				++it;
+				continue;
+			}
+
+			if (it->lastManagerObservation == faceGenManagerObservation_) {
+				++it;
+				continue;
+			}
+
+			it->lastManagerObservation = faceGenManagerObservation_;
+			++it->stableIdleObservations;
+			if (it->stableIdleObservations < kFaceGenStableIdleObservations) {
+				++it;
+				continue;
+			}
+
+			MarkPendingActorRebuildLocked(actor, false, {}, true, true, true);
+			MarkPendingHeadRebuildLocked(LifecycleEvent{
+				.type = LifecycleEventType::kActorHeadInitialized,
+				.actor = actor,
+				.object = currentFaceNode,
+				.firstPerson = false,
+			});
+			ResetStepClockLocked();
+			spdlog::debug(
+				"released actor-scoped FaceGen rebuild guard actor={} faceNode={} idleObservations={} forceArmorRescan=true headReloadQueued=true",
+				static_cast<void*>(actor),
+				static_cast<void*>(currentFaceNode),
+				it->stableIdleObservations);
+			if (IsCharacterCustomizationTargetLocked(actor)) {
+				ClearCharacterCustomizationTargetLocked();
+			}
+			it = faceGenRebuildGuards_.erase(it);
+		}
 	}
 
 	void Fo4PhysicsWorld::SuspendCharacterCustomizationTargetLocked()
@@ -644,19 +751,40 @@ namespace Smp
 			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
 
-		MarkPendingActorRebuildLocked(target, false, {}, true, true, true);
-		MarkPendingHeadRebuildLocked(LifecycleEvent{
-			.type = LifecycleEventType::kActorHeadInitialized,
-			.actor = target,
-			.firstPerson = false,
-		});
+		const auto resolvesTarget = [target](const RE::ActorHandle& a_handle) {
+			const auto actor = a_handle.get();
+			return actor && actor.get() == target;
+		};
+		const auto discardedActorRebuilds = std::erase_if(
+			pendingActorRebuilds_,
+			[&](const PendingActorRebuild& a_pending) {
+				return !a_pending.firstPerson && resolvesTarget(a_pending.actorHandle);
+			});
+		const auto discardedHeadRebuilds = std::erase_if(
+			pendingHeadRebuilds_,
+			[&](const PendingHeadRebuild& a_pending) {
+				return resolvesTarget(a_pending.actorHandle);
+			});
+
+		auto* guard = FindFaceGenRebuildGuardLocked(target);
+		if (!guard) {
+			faceGenRebuildGuards_.push_back({
+				.actorHandle = characterCustomizationTarget_,
+			});
+			guard = std::addressof(faceGenRebuildGuards_.back());
+		}
+		guard->latestFaceNode = reinterpret_cast<RE::NiAVObject*>(target->GetFaceNodeSkinned());
+		guard->lastManagerObservation = faceGenManagerObservation_;
+		guard->stableIdleObservations = 0;
 		ResetStepClockLocked();
 		spdlog::debug(
-			"queued live-state system physics reload after character customization actor={} forceArmorRescan=true headReloadQueued=true clearedStates={} skippedFirstPerson={}",
+			"entered actor-scoped FaceGen idle rebuild guard after character customization actor={} faceNode={} clearedStates={} skippedFirstPerson={} discardedActorRebuilds={} discardedHeadRebuilds={}",
 			static_cast<void*>(target),
+			static_cast<void*>(guard->latestFaceNode.get()),
 			clearedStates,
-			skippedFirstPerson);
-		ClearCharacterCustomizationTargetLocked();
+			skippedFirstPerson,
+			discardedActorRebuilds,
+			discardedHeadRebuilds);
 	}
 
 	void Fo4PhysicsWorld::ClearCharacterCustomizationTargetLocked()
@@ -1728,6 +1856,15 @@ namespace Smp
 				.record = std::move(record),
 			});
 		}
+	}
+
+	void Fo4PhysicsWorld::NoteFaceGenManagerUpdated(const bool a_idle)
+	{
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		faceGenManagerIdle_ = a_idle;
+		++faceGenManagerObservation_;
+		AdvanceFaceGenRebuildGuardsLocked();
 	}
 
 	void Fo4PhysicsWorld::ResumeFromLoadingMenuLocked()

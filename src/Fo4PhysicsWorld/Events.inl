@@ -230,9 +230,9 @@ namespace Smp
 			std::scoped_lock lock(lock_);
 			if (ShouldDeferCharacterCustomizationPhysicsLocked(a_event)) {
 				const auto finalized = FinalizeHeadHierarchyForEventLocked(a_event);
-				MarkPendingHeadRebuildLocked(a_event);
+				ObserveGuardedHeadEventLocked(a_event);
 				spdlog::debug(
-					"finalized live head hierarchy and deferred physics build {} for customization target actor={} object={} finalized={}",
+					"finalized live head hierarchy and absorbed physics build {} for guarded customization target actor={} object={} finalized={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					static_cast<void*>(a_event.object),
@@ -302,7 +302,7 @@ namespace Smp
 			}
 			ResetStepClockLocked();
 			spdlog::debug(
-				"character customization menu '{}' closed; target-scoped system physics reload queued",
+				"character customization menu '{}' closed; target-scoped FaceGen idle rebuild guard started",
 				std::string_view(a_event.menuName));
 		}
 

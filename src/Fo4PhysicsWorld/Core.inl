@@ -164,9 +164,12 @@ namespace Smp
 			preservedHeadCaches = retainedHeadSkeletonCaches_.size();
 			pendingActorRebuilds_.clear();
 			pendingHeadRebuilds_.clear();
+			faceGenRebuildGuards_.clear();
 			pendingSkeletonTransitions_.clear();
 			characterCustomizationMenuDepth_ = 0;
 			characterCustomizationTarget_.reset();
+			faceGenManagerObservation_ = 0;
+			faceGenManagerIdle_ = false;
 
 			if (auto* player = RE::PlayerCharacter::GetSingleton()) {
 				NoteSaveLoadActorLocked(LifecycleEvent{

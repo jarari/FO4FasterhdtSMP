@@ -918,7 +918,7 @@ namespace Smp
 				if (resolvedReference != a_event.armorBoneReferences.end()) {
 					fallbackNode = resolvedReference->resolvedNode.get();
 					fallbackTransform = std::addressof(fallbackNode->world);
-				} else if (auto* actorBone = FindFlattenedBoneByName(liveActorSkeleton, a_decodedBone.name)) {
+				} else if (auto* actorBone = Smp::NiObject::FindFlattenedBoneByName(liveActorSkeleton, a_decodedBone.name)) {
 					fallbackNode = actorBone->node.get();
 					fallbackTransform = std::addressof(actorBone->world);
 				}

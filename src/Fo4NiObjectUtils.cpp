@@ -5,16 +5,99 @@
 #include "PhysicsName.h"
 #include "RE/B/BSFixedString.h"
 #include "RE/B/BSFlattenedBoneTree.h"
+#include "RE/B/BSTHashMap.h"
 #include "RE/N/NiAVObject.h"
+#include "RE/N/NiExtraData.h"
 #include "RE/N/NiNode.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/N/NiUpdateData.h"
 
 namespace Smp::NiObject
 {
+	namespace
+	{
+		using BoneMap = RE::BSTHashMap<RE::BSFixedString, RE::NiAVObject*>;
+
+		BoneMap* FindDefaultBoneMap(RE::NiAVObject* a_root)
+		{
+			static const RE::BSFixedString boneMapExtraName{ "BOM" };
+			for (auto* current = a_root; current; current = current->parent) {
+				if (auto* extra = current->GetExtraData(boneMapExtraName)) {
+					return reinterpret_cast<BoneMap*>(
+						reinterpret_cast<std::byte*>(extra) + sizeof(RE::NiExtraData));
+				}
+			}
+			return nullptr;
+		}
+	}
+
 	RE::BSFlattenedBoneTree* FindFlattenedBoneTree(RE::NiAVObject* a_root)
 	{
 		return Address::BSFlattenedBoneTreeFind(a_root, 1);
+	}
+
+	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
+		RE::BSFlattenedBoneTree* a_tree,
+		const std::string_view a_name)
+	{
+		if (!a_tree || !a_tree->bone || a_name.empty()) {
+			return nullptr;
+		}
+
+		const auto found = a_tree->boneMap.find(RE::BSFixedString(std::string(a_name)));
+		if (found == a_tree->boneMap.end()) {
+			return nullptr;
+		}
+
+		const auto index = found->second;
+		return index >= 0 && index < a_tree->boneCountExpanded ?
+			std::addressof(a_tree->bone[index]) :
+			nullptr;
+	}
+
+	bool IsActorSkeletonBoneName(RE::NiAVObject* a_root, const std::string_view a_name)
+	{
+		if (!a_root || a_name.empty()) {
+			return false;
+		}
+		if (FindFlattenedBoneByName(FindFlattenedBoneTree(a_root), a_name)) {
+			return true;
+		}
+
+		// BSBoneMap is the immutable name-to-node map created from skeleton.nif.
+		// It includes default deferred/skin nodes that are not guaranteed to have
+		// an entry in BSFlattenedBoneTree::boneMap. Armor nodes attached later are
+		// never added to BOM, which makes it the correct ownership boundary.
+		const RE::BSFixedString boneName{ std::string(a_name) };
+		if (auto* bones = FindDefaultBoneMap(a_root)) {
+			return bones->find(boneName) != bones->end();
+		}
+		return false;
+	}
+
+	RE::NiNode* ResolveActorSkeletonBoneNode(RE::NiAVObject* a_root, const std::string_view a_name)
+	{
+		if (!a_root || a_name.empty()) {
+			return nullptr;
+		}
+
+		const RE::BSFixedString boneName{ std::string(a_name) };
+		if (auto* flattened = FindFlattenedBoneTree(a_root);
+			FindFlattenedBoneByName(flattened, a_name)) {
+			bool deferredAttach = false;
+			if (auto* node = Address::BSFlattenedBoneTreeGetOrCreateBoneNode(
+					flattened,
+					boneName,
+					deferredAttach)) {
+				return node;
+			}
+		}
+
+		if (auto* bones = FindDefaultBoneMap(a_root)) {
+			const auto found = bones->find(boneName);
+			return found != bones->end() && found->second ? found->second->IsNode() : nullptr;
+		}
+		return nullptr;
 	}
 
 	std::optional<std::string> FindStringExtraData(RE::NiAVObject* a_object, const std::string_view a_name)

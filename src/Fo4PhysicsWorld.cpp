@@ -30,12 +30,14 @@
 #include "RE/B/BSFlattenedBoneTree.h"
 #include "RE/B/BSModelDB.h"
 #include "RE/B/BSTimer.h"
+#include "RE/A/AIProcess.h"
 #include "RE/C/CFilter.h"
 #include "RE/C/COL_LAYER.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkQsTransformf.h"
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
+#include "RE/H/HighProcessData.h"
 #include "RE/M/Main.h"
 #include "RE/M/MenuOpenCloseEvent.h"
 #include "RE/N/NiStringExtraData.h"
@@ -83,6 +85,7 @@ namespace
 	constexpr float kGravityAcceleration = -9.80665F * kGameUnitsPerMeter;
 	constexpr std::uint32_t kMaxAttachAncestorScanDepth = 2;
 	constexpr std::uint32_t kHeadInitializedRebuildDelayFrames = 2;
+	constexpr std::uint32_t kFaceGenStableIdleObservations = 2;
 	constexpr std::uint32_t kArmorChangeRebuildDelayTasks = 0;
 	constexpr std::uint32_t kCpuCopyPendingRetryDelayTasks = 10;
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
@@ -246,7 +249,6 @@ namespace
 	void ResetBoneReferenceRuntimeState(Smp::ArmorBoneReference& a_reference)
 	{
 		a_reference.resolvedNode.reset();
-		a_reference.isArmorOnly = false;
 		a_reference.parentBoneIsArmorOnly = false;
 		a_reference.createdByUs = false;
 	}
@@ -288,10 +290,6 @@ namespace
 	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor);
 	bool IsReadableMemory(const void* a_address, std::size_t a_minSize);
 	bool IsProbablyValidNiObject(const RE::NiObject* a_object);
-	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
-		RE::BSFlattenedBoneTree* a_tree,
-		std::string_view a_name);
-
 	float DistanceSquared(const RE::NiPoint3& a_lhs, const RE::NiPoint3& a_rhs)
 	{
 		const auto dx = a_lhs.x - a_rhs.x;
@@ -470,34 +468,69 @@ namespace
 	void VisitHeadPartClosure(
 		RE::BGSHeadPart* a_headPart,
 		std::unordered_set<RE::BGSHeadPart*>& a_visited,
-		Visitor&& a_visitor)
+		Visitor&& a_visitor,
+		const std::unordered_set<RE::BGSHeadPart*>* a_allowedParts = nullptr)
 	{
-		if (!a_headPart || !a_visited.insert(a_headPart).second) {
+		if (!a_headPart ||
+			(a_allowedParts && !a_allowedParts->contains(a_headPart)) ||
+			!a_visited.insert(a_headPart).second) {
 			return;
 		}
 
 		a_visitor(a_headPart);
 		for (auto* extraPart : a_headPart->extraParts) {
-			VisitHeadPartClosure(extraPart, a_visited, a_visitor);
+			VisitHeadPartClosure(extraPart, a_visited, a_visitor, a_allowedParts);
 		}
 	}
 
-	std::vector<RE::BGSHeadPart*> CollectRuntimeHeadPartClosureRoots(const RE::TESNPC* a_npc)
+	bool MustHeadPartBeUnique(const RE::BGSHeadPart::HeadPartType a_type)
 	{
-		const auto runtimeHeadParts = GetRuntimeHeadParts(a_npc);
+		const auto value = std::to_underlying(a_type);
+		return (value >= 1 && value <= 4) || value == 6 || (value >= 8 && value <= 9);
+	}
+
+	std::vector<RE::BGSHeadPart*> CollectMergedRuntimeHeadParts(const RE::TESNPC* a_npc)
+	{
+		std::vector<RE::BGSHeadPart*> acceptedParts;
+		std::unordered_set<RE::BGSHeadPart*> visitedParts;
+		std::unordered_set<std::underlying_type_t<RE::BGSHeadPart::HeadPartType>> claimedUniqueTypes;
+		const auto mergePart = [&](this const auto& a_self, RE::BGSHeadPart* a_headPart) -> void {
+			if (!a_headPart || !visitedParts.insert(a_headPart).second) {
+				return;
+			}
+
+			const auto type = a_headPart->type.get();
+			const auto typeValue = std::to_underlying(type);
+			if (MustHeadPartBeUnique(type) && !claimedUniqueTypes.insert(typeValue).second) {
+				// Fallout does not merge the rejected part's extraParts either.
+				return;
+			}
+
+			acceptedParts.push_back(a_headPart);
+			for (auto* extraPart : a_headPart->extraParts) {
+				a_self(extraPart);
+			}
+		};
+
+		for (auto* headPart : GetRuntimeHeadParts(a_npc)) {
+			mergePart(headPart);
+		}
+		return acceptedParts;
+	}
+
+	std::vector<RE::BGSHeadPart*> CollectRuntimeHeadPartClosureRoots(
+		const std::vector<RE::BGSHeadPart*>& a_runtimeHeadParts)
+	{
+		const std::unordered_set<RE::BGSHeadPart*> acceptedParts(
+			a_runtimeHeadParts.begin(),
+			a_runtimeHeadParts.end());
 		std::unordered_set<RE::BGSHeadPart*> referencedExtraParts;
-		std::unordered_set<RE::BGSHeadPart*> scannedParts;
-		for (auto* headPart : runtimeHeadParts) {
-			VisitHeadPartClosure(
-				headPart,
-				scannedParts,
-				[&](RE::BGSHeadPart* a_part) {
-					for (auto* extraPart : a_part->extraParts) {
-						if (extraPart) {
-							referencedExtraParts.insert(extraPart);
-						}
-					}
-				});
+		for (auto* headPart : a_runtimeHeadParts) {
+			for (auto* extraPart : headPart->extraParts) {
+				if (acceptedParts.contains(extraPart)) {
+					referencedExtraParts.insert(extraPart);
+				}
+			}
 		}
 
 		std::vector<RE::BGSHeadPart*> roots;
@@ -507,23 +540,26 @@ namespace
 				return;
 			}
 			roots.push_back(a_headPart);
-			VisitHeadPartClosure(a_headPart, claimedParts, [](RE::BGSHeadPart*) {});
+			VisitHeadPartClosure(a_headPart, claimedParts, [](RE::BGSHeadPart*) {}, std::addressof(acceptedParts));
 		};
 
-		for (auto* headPart : runtimeHeadParts) {
+		for (auto* headPart : a_runtimeHeadParts) {
 			if (!referencedExtraParts.contains(headPart)) {
 				claimRoot(headPart);
 			}
 		}
 		// Cyclic graphs, or supported parts referenced only by a misc root, have
 		// no eligible unreferenced root. Claim the first unowned supported part.
-		for (auto* headPart : runtimeHeadParts) {
+		for (auto* headPart : a_runtimeHeadParts) {
 			claimRoot(headPart);
 		}
 		return roots;
 	}
 
-	void AddHeadpartClosureKeys(RE::BGSHeadPart* a_headPart, std::vector<std::string>& a_keys)
+	void AddHeadpartClosureKeys(
+		RE::BGSHeadPart* a_headPart,
+		const std::unordered_set<RE::BGSHeadPart*>& a_allowedParts,
+		std::vector<std::string>& a_keys)
 	{
 		std::unordered_set<RE::BGSHeadPart*> visited;
 		VisitHeadPartClosure(
@@ -532,7 +568,8 @@ namespace
 			[&](RE::BGSHeadPart* a_part) {
 				AddHeadpartKey(a_keys, GetHeadPartModelPath(a_part));
 				AddHeadpartKey(a_keys, std::string(std::string_view(a_part->formEditorID)));
-			});
+			},
+			std::addressof(a_allowedParts));
 	}
 
 	std::vector<std::string> BuildHairHeadpartKeys(RE::Actor* a_actor)
@@ -543,9 +580,13 @@ namespace
 			return keys;
 		}
 
-		for (auto* headPart : CollectRuntimeHeadPartClosureRoots(npc)) {
+		const auto runtimeHeadParts = CollectMergedRuntimeHeadParts(npc);
+		const std::unordered_set<RE::BGSHeadPart*> allowedParts(
+			runtimeHeadParts.begin(),
+			runtimeHeadParts.end());
+		for (auto* headPart : CollectRuntimeHeadPartClosureRoots(runtimeHeadParts)) {
 			if (GetHeadPartBuildDomain(headPart) == Smp::BuildDomain::kHair) {
-				AddHeadpartClosureKeys(headPart, keys);
+				AddHeadpartClosureKeys(headPart, allowedParts, keys);
 			}
 		}
 		return keys;
@@ -1057,10 +1098,12 @@ namespace
 		RE::Actor* a_actor,
 		RE::NiAVObject* a_faceObject,
 		RE::BGSHeadPart* a_headPart,
+		const std::unordered_set<RE::BGSHeadPart*>& a_allowedParts,
 		std::unordered_set<RE::BGSHeadPart*>& a_visited,
 		HeadPartClosureSources& a_closure)
 	{
-		if (!a_actor || !a_faceObject || !a_closure.destinationRoot || !a_headPart || !a_visited.insert(a_headPart).second) {
+		if (!a_actor || !a_faceObject || !a_closure.destinationRoot || !a_headPart ||
+			!a_allowedParts.contains(a_headPart) || !a_visited.insert(a_headPart).second) {
 			return;
 		}
 
@@ -1118,15 +1161,6 @@ namespace
 				auto* sourceGeometry = selection && selection->geometry ?
 					selection->geometry :
 					FindFirstGeometry(meshSourceRoot.get());
-				if (std::ranges::none_of(a_closure.meshSourceRoots, [&](const auto& a_root) {
-						return a_root.get() == meshSourceRoot.get();
-					})) {
-					a_closure.meshSourceRoots.emplace_back(meshSourceRoot.get());
-					a_closure.modelSources.push_back({
-						.root = meshSourceRoot.get(),
-						.nifPath = modelPath,
-					});
-				}
 				const auto sourceGeometryName = sourceGeometry ?
 					std::string(std::string_view(sourceGeometry->GetName())) :
 					std::string{};
@@ -1135,13 +1169,23 @@ namespace
 					a_closure.object = liveGeometry;
 				}
 				if (liveGeometry &&
+					std::ranges::none_of(a_closure.meshSourceRoots, [&](const auto& a_root) {
+						return a_root.get() == meshSourceRoot.get();
+					})) {
+					a_closure.meshSourceRoots.emplace_back(meshSourceRoot.get());
+					a_closure.modelSources.push_back({
+						.root = meshSourceRoot.get(),
+						.nifPath = modelPath,
+					});
+				}
+				if (liveGeometry &&
 					std::ranges::none_of(a_closure.liveBindingObjects, [&](const auto& a_object) {
 						return a_object.get() == liveGeometry;
 					})) {
 					a_closure.liveBindingObjects.emplace_back(liveGeometry);
 				}
 
-				if (selection) {
+				if (liveGeometry && selection) {
 					AppendHeadPartClosurePhysicsXml(a_closure.physicsXmlPaths, selection->path);
 				}
 				if (!liveGeometry) {
@@ -1181,6 +1225,7 @@ namespace
 				a_actor,
 				a_faceObject,
 				extraPart,
+				a_allowedParts,
 				a_visited,
 				a_closure);
 		}
@@ -1198,7 +1243,11 @@ namespace
 			return;
 		}
 
-		const auto closureRoots = CollectRuntimeHeadPartClosureRoots(npc);
+		const auto runtimeHeadParts = CollectMergedRuntimeHeadParts(npc);
+		const std::unordered_set<RE::BGSHeadPart*> allowedParts(
+			runtimeHeadParts.begin(),
+			runtimeHeadParts.end());
+		const auto closureRoots = CollectRuntimeHeadPartClosureRoots(runtimeHeadParts);
 		std::unordered_set<RE::BGSHeadPart*> visited;
 		const auto appendClosure = [&](RE::BGSHeadPart* a_headPart) {
 			if (!a_headPart ||
@@ -1215,6 +1264,7 @@ namespace
 				a_actor,
 				a_faceObject,
 				a_headPart,
+				allowedParts,
 				visited,
 				closure);
 
@@ -2373,25 +2423,6 @@ namespace
 		return MakeArmorModelCacheKey(a_bipedObject, a_bipObject->part->GetModel());
 	}
 
-	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByName(
-		RE::BSFlattenedBoneTree* a_tree,
-		const std::string_view a_name)
-	{
-		if (!a_tree || !a_tree->bone || a_name.empty()) {
-			return nullptr;
-		}
-
-		const auto found = a_tree->boneMap.find(RE::BSFixedString(std::string(a_name)));
-		if (found == a_tree->boneMap.end()) {
-			return nullptr;
-		}
-		const auto index = found->second;
-		if (index < 0 || index >= a_tree->boneCountExpanded) {
-			return nullptr;
-		}
-		return std::addressof(a_tree->bone[index]);
-	}
-
 	void ResolveEnginePreparedBones(
 		std::vector<MatchedSkinBone>& a_matchedBones,
 		const std::vector<std::string>& a_boneNames,
@@ -2402,10 +2433,19 @@ namespace
 		if (!flattened) {
 			flattened = Smp::NiObject::FindFlattenedBoneTree(a_actorRoot);
 		}
+		const auto resolveActorBone = [&](const std::string_view a_name) {
+			auto* node = Smp::NiObject::ResolveActorSkeletonBoneNode(a_skeletonRoot, a_name);
+			return node ? node : Smp::NiObject::ResolveActorSkeletonBoneNode(a_actorRoot, a_name);
+		};
 
 		for (auto& matchedBone : a_matchedBones) {
 			matchedBone.transform = matchedBone.node ? std::addressof(matchedBone.node->world) : matchedBone.transform;
-			if (auto* flattenedBone = FindFlattenedBoneByName(flattened, matchedBone.name)) {
+			if (auto* actorBone = resolveActorBone(matchedBone.name)) {
+				matchedBone.node = actorBone;
+				matchedBone.transform = std::addressof(actorBone->world);
+				matchedBone.isSharedActorBone = true;
+				matchedBone.meshOnlySkinBoneCandidate = false;
+			} else if (auto* flattenedBone = Smp::NiObject::FindFlattenedBoneByName(flattened, matchedBone.name)) {
 				matchedBone.node = flattenedBone->node.get();
 				matchedBone.transform = matchedBone.node ? std::addressof(matchedBone.node->world) : std::addressof(flattenedBone->world);
 				matchedBone.isSharedActorBone = true;
@@ -2419,12 +2459,15 @@ namespace
 			if (boneName.empty() || FindMatchedSkinBoneByName(a_matchedBones, boneName)) {
 				continue;
 			}
-			auto* flattenedBone = FindFlattenedBoneByName(flattened, boneName);
-			if (!flattenedBone) {
+			auto* node = resolveActorBone(boneName);
+			auto* flattenedBone = node ? nullptr : Smp::NiObject::FindFlattenedBoneByName(flattened, boneName);
+			if (!node && !flattenedBone) {
 				continue;
 			}
 
-			auto* node = flattenedBone->node.get();
+			if (!node) {
+				node = flattenedBone->node.get();
+			}
 			a_matchedBones.push_back({
 				.node = node,
 				.transform = node ? std::addressof(node->world) : std::addressof(flattenedBone->world),
@@ -2432,7 +2475,7 @@ namespace
 				.isSharedActorBone = true,
 			});
 			spdlog::debug(
-				"resolved XML anchor '{}' directly from the engine BSFlattenedBoneTree node={} transform={}",
+				"resolved XML anchor '{}' from the actor's default skeleton node={} transform={}",
 				boneName,
 				static_cast<void*>(node),
 				static_cast<void*>(a_matchedBones.back().transform));

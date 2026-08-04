@@ -7,7 +7,9 @@
 #include "LifecycleEvents.h"
 #include "PhysicsXmlSelection.h"
 #include "RE/B/BSAnimationGraphManager.h"
+#include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSGeometry.h"
+#include "RE/B/BSModelDB.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
@@ -16,9 +18,14 @@
 #include "RE/P/PlayerCharacter.h"
 #include "RE/N/NiStringExtraData.h"
 #include "RE/T/TESObjectREFR.h"
+#include "RE/T/TESNPC.h"
 
+#include <cctype>
+#include <cstddef>
+#include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -38,10 +45,13 @@ namespace Hooks
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
+	using FaceGenPrepareHeadPart_t = void (*)(RE::BSFaceGenNiNode*, RE::BGSHeadPart*, RE::TESNPC*, bool, bool);
+	using BakeChargenMorphs_t = void (*)(RE::TESNPC*, RE::NiNode*, RE::NiNode*, void*);
 	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
 	using LooksMenuUtilsShowLooksMenu_t = void (*)(RE::TESObjectREFR*, std::uint32_t, RE::TESObjectREFR*, RE::TESObjectREFR*, RE::TESObjectREFR*);
 
 	MainSwap_t                     OriginalMainSwap{ nullptr };
+	std::uintptr_t                 OriginalFaceGenManagerUpdate{ 0 };
 	BipedAnimApplySkinnedObjects_t OriginalBipedAnimApplySkinnedObjects{ nullptr };
 	BipedAnimAttachSkinnedObject_t OriginalBipedAnimAttachSkinnedObject{ nullptr };
 	BipedAnimAttachToParent_t      OriginalBipedAnimAttachToParent{ nullptr };
@@ -55,13 +65,67 @@ namespace Hooks
 	Reset3D_t                      OriginalReset3D{ nullptr };
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
+	FaceGenPrepareHeadPart_t       OriginalFaceGenPrepareHeadPart{ nullptr };
+	BakeChargenMorphs_t            OriginalArmorBakeChargenMorphs{ nullptr };
+	BakeChargenMorphs_t            OriginalHeadBakeChargenMorphs{ nullptr };
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
 	LooksMenuUtilsShowLooksMenu_t  OriginalLooksMenuUtilsShowLooksMenu{ nullptr };
 
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
+	inline constexpr std::size_t kFaceGenQueuePointerOffset = 0x3100;
+	inline constexpr std::size_t kFaceGenArenaCountOffset = 0x31B0;
+	inline constexpr std::size_t kFaceGenStagedDataOffset = 0x31F0;
+	inline constexpr std::size_t kFaceGenStagedNpcOffset = 0x31F8;
+	inline constexpr std::size_t kFaceGenActiveStateOffset = 0x34A0;
+	inline constexpr std::size_t kFaceGenPreloadIndexOffset = 0x3498;
+	inline constexpr std::size_t kFaceGenQueueReadIndexOffset = 0x2400;
+	inline constexpr std::size_t kFaceGenQueueWriteIndexOffset = 0x2500;
+
+	template <class T>
+	T ReadFaceGenField(const void* a_base, const std::size_t a_offset)
+	{
+		T value{};
+		std::memcpy(std::addressof(value), static_cast<const std::byte*>(a_base) + a_offset, sizeof(value));
+		return value;
+	}
+
+	bool IsFaceGenManagerIdle(const void* a_manager)
+	{
+		if (!a_manager) {
+			return false;
+		}
+
+		// These fields and the lockless queue indices have the same layout in the
+		// verified OG and AE implementations of UpdatePendingCustomizationTextures.
+		const auto queue = ReadFaceGenField<std::uintptr_t>(a_manager, kFaceGenQueuePointerOffset);
+		if (!queue) {
+			return false;
+		}
+
+		const auto queueBase = reinterpret_cast<const void*>(queue);
+		const auto readIndex = ReadFaceGenField<std::uint32_t>(queueBase, kFaceGenQueueReadIndexOffset) & 0xFF;
+		const auto writeIndex = ReadFaceGenField<std::uint32_t>(queueBase, kFaceGenQueueWriteIndexOffset) & 0xFF;
+		const auto queueEmpty = readIndex == writeIndex;
+		const auto noCompleteStagedData =
+			ReadFaceGenField<std::uintptr_t>(a_manager, kFaceGenStagedDataOffset) == 0 ||
+			ReadFaceGenField<std::uintptr_t>(a_manager, kFaceGenStagedNpcOffset) == 0;
+
+		return ReadFaceGenField<std::uint32_t>(a_manager, kFaceGenActiveStateOffset) == 0 &&
+		       ReadFaceGenField<std::uint32_t>(a_manager, kFaceGenArenaCountOffset) == 0 &&
+		       ReadFaceGenField<std::uint32_t>(a_manager, kFaceGenPreloadIndexOffset) == std::numeric_limits<std::uint32_t>::max() &&
+		       noCompleteStagedData && queueEmpty;
+	}
 
 	thread_local std::uint32_t ApplySkinnedObjectsDepth{ 0 };
 	thread_local RE::NiNode* ApplySkinnedObjectsSkeletonRoot{ nullptr };
+	struct IncrementalHeadPartContext
+	{
+		RE::BSFaceGenNiNode* faceNode{ nullptr };
+		RE::NiPointer<RE::NiNode> mainRoot;
+		std::string nifPath;
+		bool usesMainModel{ false };
+	};
+	thread_local IncrementalHeadPartContext PendingIncrementalHeadPart;
 	std::mutex FaceGenActorLock;
 	std::unordered_map<RE::BSFaceGenNiNode*, RE::ActorHandle> FaceGenActorMap;
 	RE::Actor* ResolveActor(RE::BipedAnim* a_biped);
@@ -132,22 +196,25 @@ namespace Hooks
 	{
 		PreAttachPhysicsContext context;
 		context.selectedXml = FindPhysicsXmlExtraData(a_sourceObject);
-		if (!context.selectedXml) {
-			return context;
+		if (context.selectedXml || a_usesFaceBonesModel) {
+			context.armorBoneReferences = Smp::CaptureArmorBoneReferences(
+				a_sourceObject,
+				a_skeletonRoot,
+				a_nifPath,
+				context.selectedXml.has_value());
 		}
-
-		context.armorBoneReferences = Smp::CaptureArmorBoneReferences(a_sourceObject, a_skeletonRoot, a_nifPath);
 		if (a_usesFaceBonesModel) {
 			context.mainSkinBindings = Smp::CaptureMainSkinBindings(a_sourceObject);
 		}
 		spdlog::debug(
-			"pre-scanned armor physics XML {} from {}={} name='{}' nif='{}' usesFaceBonesModel={} mainSkinInstances={}",
-			*context.selectedXml,
+			"pre-scanned armor source xml='{}' from {}={} name='{}' nif='{}' usesFaceBonesModel={} references={} mainSkinInstances={}",
+			context.selectedXml.value_or(std::string{}),
 			a_sourceLabel,
 			static_cast<void*>(a_sourceObject),
 			a_sourceObject ? std::string_view(a_sourceObject->GetName()) : std::string_view{},
 			a_nifPath,
 			a_usesFaceBonesModel,
+			context.armorBoneReferences.size(),
 			context.mainSkinBindings.size());
 
 		return context;
@@ -308,6 +375,9 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
+		LogRelocationTarget("BipedAnim::AttachSkinnedObject BakeChargenMorphs callsite", Address::BipedAnimAttachSkinnedObjectBakeChargenMorphsCall.address());
+		LogRelocationTarget("BSFaceGenPendingHeadData::Attach BakeChargenMorphs callsite", Address::BSFaceGenPendingHeadAttachBakeChargenMorphsCall.address());
+		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor PrepareHeadPart callsite", Address::BSFaceGenAddHeadPartOnActorPrepareHeadPartCall.address());
 		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
 		LogRelocationTarget("LooksMenuUtils::ShowLooksMenu", Address::LooksMenuUtilsShowLooksMenu.address());
 	}
@@ -694,6 +764,102 @@ namespace Hooks
 		}
 	}
 
+	void PrepareMissingFaceBones(RE::NiNode* a_mainRoot, RE::NiNode* a_faceBonesRoot)
+	{
+		Smp::MaterializeMissingFaceBonesForBake(a_mainRoot, a_faceBonesRoot);
+	}
+
+	bool IsFaceBonesNifPath(const std::string_view a_path)
+	{
+		constexpr std::string_view suffix{ "_facebones.nif" };
+		if (a_path.size() < suffix.size()) {
+			return false;
+		}
+		return std::ranges::equal(
+			a_path.end() - static_cast<std::ptrdiff_t>(suffix.size()),
+			a_path.end(),
+			suffix.begin(),
+			suffix.end(),
+			[](const char a_lhs, const char a_rhs) {
+				return std::tolower(static_cast<unsigned char>(a_lhs)) == a_rhs;
+			});
+	}
+
+	void HookedArmorBakeChargenMorphs(
+		RE::TESNPC* a_npc,
+		RE::NiNode* a_mainRoot,
+		RE::NiNode* a_faceBonesRoot,
+		void* a_extraData)
+	{
+		PrepareMissingFaceBones(a_mainRoot, a_faceBonesRoot);
+		OriginalArmorBakeChargenMorphs(a_npc, a_mainRoot, a_faceBonesRoot, a_extraData);
+	}
+
+	void HookedHeadBakeChargenMorphs(
+		RE::TESNPC* a_npc,
+		RE::NiNode* a_mainRoot,
+		RE::NiNode* a_faceBonesRoot,
+		void* a_extraData)
+	{
+		PrepareMissingFaceBones(a_mainRoot, a_faceBonesRoot);
+		OriginalHeadBakeChargenMorphs(a_npc, a_mainRoot, a_faceBonesRoot, a_extraData);
+	}
+
+	void HookedFaceGenPrepareHeadPart(
+		RE::BSFaceGenNiNode* a_faceNode,
+		RE::BGSHeadPart* a_headPart,
+		RE::TESNPC* a_npc,
+		const bool a_useChargenModel,
+		const bool a_arg5)
+	{
+		PendingIncrementalHeadPart = {};
+		const auto* modelPath = a_headPart ?
+			static_cast<RE::BGSModelMaterialSwap*>(a_headPart)->GetModel() :
+			nullptr;
+		const auto* chargenModelPath = a_headPart ? a_headPart->ChargenModel.GetModel() : nullptr;
+		const auto hasFaceBonesModel = IsFaceBonesNifPath(chargenModelPath ? chargenModelPath : "");
+		bool forceMainModel = false;
+		if (modelPath && *modelPath) {
+			RE::BSModelDB::DBTraits::ArgsType args{};
+			args.loadLevel = 3;
+			args.performProcess = true;
+			args.loadTextures = true;
+			RE::NiPointer<RE::NiNode> mainRoot;
+			const auto error = RE::BSModelDB::Demand(modelPath, std::addressof(mainRoot), args);
+			if (error == RE::BSResource::ErrorCode::kNone && mainRoot) {
+				forceMainModel = a_useChargenModel && hasFaceBonesModel;
+				PendingIncrementalHeadPart = {
+					.faceNode = a_faceNode,
+					.mainRoot = std::move(mainRoot),
+					.nifPath = modelPath,
+					.usesMainModel = forceMainModel || !a_useChargenModel,
+				};
+				if (forceMainModel) {
+					spdlog::debug(
+						"using main NIF as authoritative incremental headpart geometry headPart={:08X} main='{}' faceBones='{}'",
+						a_headPart->GetFormID(),
+						modelPath,
+						chargenModelPath);
+				}
+			} else {
+				spdlog::warn(
+					"failed to preload authoritative main headpart model headPart={} nif='{}' error={}",
+					a_headPart ? a_headPart->GetFormID() : 0,
+					modelPath,
+					std::to_underlying(error));
+			}
+		}
+
+		// PrepareHeadPart always uses the chargen morph TRI in either branch. Passing
+		// false only selects the main model instead of ChargenModel for the geometry.
+		OriginalFaceGenPrepareHeadPart(
+			a_faceNode,
+			a_headPart,
+			a_npc,
+			forceMainModel ? false : a_useChargenModel,
+			a_arg5);
+	}
+
 	void HookedFaceGenSkinAllGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, bool a_arg3)
 	{
 		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
@@ -725,9 +891,50 @@ namespace Hooks
 
 	void HookedFaceGenSkinSingleGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, RE::BSGeometry* a_geometry, bool a_arg4)
 	{
+		auto incrementalContext = std::move(PendingIncrementalHeadPart);
+		PendingIncrementalHeadPart = {};
+		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		std::vector<Smp::ArmorBoneReference> mainReferences;
+		std::vector<Smp::RetainedSkinBinding> liveMainBindings;
+		const auto useMainContext =
+			incrementalContext.faceNode == a_faceNode &&
+			incrementalContext.mainRoot &&
+			!incrementalContext.nifPath.empty() &&
+			incrementalContext.usesMainModel;
+		if (useMainContext) {
+			mainReferences = Smp::CaptureArmorBoneReferences(
+				incrementalContext.mainRoot.get(),
+				a_skeleton,
+				incrementalContext.nifPath,
+				false);
+			// PrepareHeadPart produced this geometry from the main NIF. Capture its
+			// authoritative palette before vanilla FixSkinInstances can rewrite it.
+			liveMainBindings = Smp::CaptureMainSkinBindings(a_geometry);
+			Smp::FinalizeArmorSkinBindings(
+				actor,
+				a_geometry,
+				a_skeleton,
+				false,
+				mainReferences,
+				{},
+				false,
+				liveMainBindings);
+		}
+
 		OriginalFaceGenSkinSingleGeometry(a_faceNode, a_skeleton, a_geometry, a_arg4);
 
-		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		if (useMainContext) {
+			Smp::FinalizeArmorSkinBindings(
+				actor,
+				a_geometry,
+				a_skeleton,
+				false,
+				mainReferences,
+				{},
+				false,
+				liveMainBindings);
+		}
+
 		if (!actor) {
 			spdlog::trace(
 				"skipped skinned head single-geometry event because actor is unresolved faceNode={} skeleton={} geometry={}",
@@ -784,6 +991,17 @@ namespace Hooks
 		OriginalMainSwap(a_main);
 	}
 
+	void HookedFaceGenManagerUpdate(void* a_manager, const bool a_forceUpdate)
+	{
+		if (REX::FModule::IsRuntimeOG()) {
+			reinterpret_cast<void (*)(void*)>(OriginalFaceGenManagerUpdate)(a_manager);
+		} else {
+			reinterpret_cast<void (*)(void*, bool)>(OriginalFaceGenManagerUpdate)(a_manager, a_forceUpdate);
+		}
+
+		Smp::Fo4PhysicsWorld::GetSingleton()->NoteFaceGenManagerUpdated(IsFaceGenManagerIdle(a_manager));
+	}
+
 	void HookedReset3D(RE::Actor* a_actor, bool a_reloadAll, std::uint32_t a_additionalFlags, bool a_queueReset, std::uint32_t a_excludeFlags)
 	{
 		OriginalReset3D(a_actor, a_reloadAll, a_additionalFlags, a_queueReset, a_excludeFlags);
@@ -799,12 +1017,20 @@ namespace Hooks
 	{
 		LogHookTargets();
 		const auto mainSyncCallsite = Address::MainOnIdleSwapCall.address();
+		const auto faceGenManagerUpdateCallsite = Address::MainSwapUpdatePendingCustomizationTexturesCall.address();
 		LogRelocationTarget("Main::OnIdle frame sync callsite", mainSyncCallsite);
+		LogRelocationTarget("Main::Swap FaceGen manager update callsite", faceGenManagerUpdateCallsite);
 
 		if (!OriginalMainSwap) {
 			OriginalMainSwap = reinterpret_cast<MainSwap_t>(
 				REL::GetTrampoline().write_call<5>(mainSyncCallsite, reinterpret_cast<std::uintptr_t>(&HookedMainSwap)));
 			spdlog::info("Main::OnIdle frame sync call hook installed at {:x}", mainSyncCallsite);
+		}
+		if (!OriginalFaceGenManagerUpdate) {
+			OriginalFaceGenManagerUpdate = REL::GetTrampoline().write_call<5>(
+				faceGenManagerUpdateCallsite,
+				reinterpret_cast<std::uintptr_t>(&HookedFaceGenManagerUpdate));
+			spdlog::info("Main::Swap FaceGen manager update call hook installed at {:x}", faceGenManagerUpdateCallsite);
 		}
 		if (!OriginalBipedAnimApplySkinnedObjects) {
 			OriginalBipedAnimApplySkinnedObjects = CreateBranchGateway5<BipedAnimApplySkinnedObjects_t>("BipedAnim::ApplySkinnedObjects", Address::BipedAnimApplySkinnedObjects, Address::BipedAnimApplySkinnedObjectsPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimApplySkinnedObjects));
@@ -866,6 +1092,24 @@ namespace Hooks
 				Address::LooksMenuUtilsShowLooksMenuPrologueSize.value(),
 				reinterpret_cast<void*>(&HookedLooksMenuUtilsShowLooksMenu));
 		}
+		if (!OriginalArmorBakeChargenMorphs) {
+			const auto callsite = Address::BipedAnimAttachSkinnedObjectBakeChargenMorphsCall.address();
+			OriginalArmorBakeChargenMorphs = reinterpret_cast<BakeChargenMorphs_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedArmorBakeChargenMorphs)));
+			spdlog::info("armor BakeChargenMorphs call hook installed at {:x}", callsite);
+		}
+		if (!OriginalHeadBakeChargenMorphs) {
+			const auto callsite = Address::BSFaceGenPendingHeadAttachBakeChargenMorphsCall.address();
+			OriginalHeadBakeChargenMorphs = reinterpret_cast<BakeChargenMorphs_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedHeadBakeChargenMorphs)));
+			spdlog::info("pending-head BakeChargenMorphs call hook installed at {:x}", callsite);
+		}
+		if (!OriginalFaceGenPrepareHeadPart) {
+			const auto callsite = Address::BSFaceGenAddHeadPartOnActorPrepareHeadPartCall.address();
+			OriginalFaceGenPrepareHeadPart = reinterpret_cast<FaceGenPrepareHeadPart_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenPrepareHeadPart)));
+			spdlog::info("BSFaceGenUtils::AddHeadPartOnActor prepare-headpart call hook installed at {:x}", callsite);
+		}
 		if (!OriginalFaceGenSkinSingleGeometry) {
 			const auto skinSingleCallsite = Address::BSFaceGenAddHeadPartOnActorSkinSingleCall.address();
 			OriginalFaceGenSkinSingleGeometry = reinterpret_cast<FaceGenSkinSingleGeometry_t>(
@@ -875,6 +1119,7 @@ namespace Hooks
 
 		const bool installed =
 			OriginalMainSwap &&
+			OriginalFaceGenManagerUpdate &&
 			OriginalBipedAnimApplySkinnedObjects &&
 			OriginalBipedAnimAttachSkinnedObject &&
 			OriginalBipedAnimAttachToParent &&
@@ -889,6 +1134,9 @@ namespace Hooks
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
 			OriginalSetFaceGenBoneName &&
+			OriginalArmorBakeChargenMorphs &&
+			OriginalHeadBakeChargenMorphs &&
+			OriginalFaceGenPrepareHeadPart &&
 			OriginalFaceGenSkinSingleGeometry;
 
 		spdlog::info("FO4 Faster HDT-SMP lifecycle hooks {}", installed ? "installed" : "failed");

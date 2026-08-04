@@ -1282,7 +1282,8 @@ namespace Smp
 				++it;
 				continue;
 			}
-			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
+			if ((characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) ||
+				FindFaceGenRebuildGuardLocked(actor)) {
 				++it;
 				continue;
 			}
@@ -1432,7 +1433,8 @@ namespace Smp
 				it = pendingHeadRebuilds_.erase(it);
 				continue;
 			}
-			if (characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) {
+			if ((characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) ||
+				FindFaceGenRebuildGuardLocked(actor)) {
 				++it;
 				continue;
 			}
