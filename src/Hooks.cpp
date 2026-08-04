@@ -39,6 +39,7 @@ namespace Hooks
 	using BipedAnimAttachSkinnedObject_t = RE::NiAVObject* (*)(RE::BipedAnim*, RE::NiNode*, RE::NiNode*, RE::BIPED_OBJECT, bool);
 	using BipedAnimAttachToParent_t = void (*)(RE::NiAVObject*, RE::NiAVObject*, RE::NiAVObject*, RE::BSTSmartPointer<RE::BipedAnim>&, RE::BIPED_OBJECT);
 	using BipedAnimRemovePart_t = void (*)(RE::BipedAnim*, RE::BIPOBJECT*, bool);
+	using BipedAnimLoadBipedParts_t = void (*)(RE::BipedAnim*);
 	using TESObjectREFRFixDisplayedHeadParts_t = void (*)(RE::TESObjectREFR*, RE::BSFaceGenNiNode*, bool, bool);
 	using ActorLoad3D_t = RE::NiAVObject* (*)(RE::TESObjectREFR*, bool);
 	using Set3D_t = void (*)(RE::TESObjectREFR*, RE::NiAVObject*, bool);
@@ -57,6 +58,7 @@ namespace Hooks
 	BipedAnimAttachSkinnedObject_t OriginalBipedAnimAttachSkinnedObject{ nullptr };
 	BipedAnimAttachToParent_t      OriginalBipedAnimAttachToParent{ nullptr };
 	BipedAnimRemovePart_t          OriginalBipedAnimRemovePart{ nullptr };
+	BipedAnimLoadBipedParts_t      OriginalBipedAnimLoadBipedParts{ nullptr };
 	TESObjectREFRFixDisplayedHeadParts_t OriginalTESObjectREFRFixDisplayedHeadParts{ nullptr };
 	ActorLoad3D_t                  OriginalActorLoad3D{ nullptr };
 	ActorLoad3D_t                  OriginalPlayerCharacterLoad3D{ nullptr };
@@ -376,6 +378,7 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
 		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
+		LogRelocationTarget("TESNPC::ReplaceRefModel BipedAnim::LoadBipedParts callsite", Address::TESNPCReplaceRefModelLoadBipedPartsCall.address());
 		LogRelocationTarget("TESObjectREFR::FixDisplayedHeadParts", Address::TESObjectREFRFixDisplayedHeadParts.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
@@ -645,6 +648,29 @@ namespace Hooks
 			.bipedObject = bipedObject,
 			.firstPerson = IsFirstPersonBiped(a_biped),
 			.queueDetach = a_queueDetach,
+		});
+	}
+
+	void HookedBipedAnimLoadBipedParts(RE::BipedAnim* a_biped)
+	{
+		OriginalBipedAnimLoadBipedParts(a_biped);
+
+		if (IsFirstPersonBiped(a_biped)) {
+			return;
+		}
+
+		auto* actor = ResolveActor(a_biped);
+		auto* currentFace = actor ? actor->GetFaceNodeSkinned() : nullptr;
+		if (!actor || !currentFace) {
+			return;
+		}
+
+		SeedFaceGenActor(actor);
+		EmitEvent({
+			.type = Smp::LifecycleEventType::kHeadPartVisibilityUpdated,
+			.actor = actor,
+			.biped = a_biped,
+			.object = reinterpret_cast<RE::NiAVObject*>(currentFace),
 		});
 	}
 
@@ -1100,6 +1126,12 @@ namespace Hooks
 				Address::TESObjectREFRFixDisplayedHeadPartsPrologueSize.value(),
 				reinterpret_cast<void*>(&HookedTESObjectREFRFixDisplayedHeadParts));
 		}
+		if (!OriginalBipedAnimLoadBipedParts) {
+			const auto callsite = Address::TESNPCReplaceRefModelLoadBipedPartsCall.address();
+			OriginalBipedAnimLoadBipedParts = reinterpret_cast<BipedAnimLoadBipedParts_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedBipedAnimLoadBipedParts)));
+			spdlog::info("TESNPC::ReplaceRefModel BipedAnim::LoadBipedParts call hook installed at {:x}", callsite);
+		}
 
 		REL::Relocation<std::uintptr_t> actorVTable{ RE::VTABLE::Actor[0] };
 		REL::Relocation<std::uintptr_t> playerVTable{ RE::VTABLE::PlayerCharacter[0] };
@@ -1180,6 +1212,7 @@ namespace Hooks
 			OriginalBipedAnimAttachSkinnedObject &&
 			OriginalBipedAnimAttachToParent &&
 			OriginalBipedAnimRemovePart &&
+			OriginalBipedAnimLoadBipedParts &&
 			OriginalTESObjectREFRFixDisplayedHeadParts &&
 			OriginalActorLoad3D &&
 			OriginalPlayerCharacterLoad3D &&

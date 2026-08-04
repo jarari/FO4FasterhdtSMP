@@ -62,6 +62,7 @@ namespace Smp::Address
 
 	extern const IDOffset MainOnIdleSwapCall;
 	extern const IDOffset MainSwapUpdatePendingCustomizationTexturesCall;
+	extern const IDOffset TESNPCReplaceRefModelLoadBipedPartsCall;
 	extern const IDOffset BipedAnimAttachSkinnedObjectBakeChargenMorphsCall;
 	extern const IDOffset BSFaceGenPendingHeadAttachBakeChargenMorphsCall;
 	extern const IDOffset BSFaceGenAddHeadPartOnActorPrepareHeadPartCall;

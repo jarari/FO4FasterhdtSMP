@@ -273,6 +273,7 @@ namespace Smp
 			const auto wasClosed = characterCustomizationMenuDepth_ == 0;
 			++characterCustomizationMenuDepth_;
 			if (wasClosed) {
+				characterCustomizationArmorRecords_.clear();
 				SuspendCharacterCustomizationTargetLocked();
 			}
 			spdlog::debug(

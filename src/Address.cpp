@@ -27,6 +27,12 @@ namespace Smp::Address
 		REL::ID{ 1075087, 2228913 },
 		VariantOffset{ 0x60, 0x62 }
 	};
+	// Ordinary worn-item model replacement reaches this call even when
+	// TESNPC::InitParts takes its fast path and skips FixDisplayedHeadParts.
+	const IDOffset TESNPCReplaceRefModelLoadBipedPartsCall{
+		REL::ID{ 203719, 2207456 },
+		VariantOffset{ 0x249, 0x211 }
+	};
 	const IDOffset BipedAnimAttachSkinnedObjectBakeChargenMorphsCall{
 		REL::ID{ 1575810, 2194388 },
 		VariantOffset{ 0x156, 0x156 }

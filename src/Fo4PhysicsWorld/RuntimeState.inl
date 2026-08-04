@@ -621,11 +621,45 @@ namespace Smp
 			return false;
 		}
 
+		auto& armorRecords = guard ? guard->armorRecords : characterCustomizationArmorRecords_;
+		const auto bipedObject = ResolveEventBipedObject(a_event);
+		if ((a_event.type == LifecycleEventType::kArmorApplySkinnedObjects ||
+			 a_event.type == LifecycleEventType::kArmorAttachSkinnedObject) &&
+			bipedObject != RE::BIPED_OBJECT::kTotal) {
+			// ApplySkinnedObjects can replace the source root with a different live
+			// attachment and does not carry arbitrary SMP XML extra data across. Treat
+			// this as the authoritative owner change for the biped slot, then retain
+			// the pre-attach recipe supplied by the hook when one exists.
+			auto attachedRecords = CollectSuspendedArmorRecordsLocked(a_event);
+			const auto sameRetainedOwner = a_event.object && std::ranges::any_of(armorRecords, [&](const ArmorPhysicsRecord& a_record) {
+				return a_record.bipedObject == bipedObject &&
+				       (a_record.attachedObject.get() == a_event.object || a_record.sourceObject.get() == a_event.object);
+			});
+			if (!attachedRecords.empty() || (a_event.object && !sameRetainedOwner)) {
+				std::erase_if(armorRecords, [bipedObject](const ArmorPhysicsRecord& a_record) {
+					return a_record.bipedObject == bipedObject;
+				});
+			}
+			for (auto& record : attachedRecords) {
+				MergeArmorPhysicsRecord(armorRecords, std::move(record));
+			}
+		} else if (a_event.type == LifecycleEventType::kArmorDetachEnd &&
+			bipedObject != RE::BIPED_OBJECT::kTotal) {
+			auto* liveBiped = a_event.actor->GetBiped(a_event.firstPerson).get();
+			auto* liveBipObject = liveBiped ? liveBiped->GetBipObject(bipedObject) : nullptr;
+			if (!liveBipObject || !liveBipObject->partClone) {
+				std::erase_if(armorRecords, [bipedObject](const ArmorPhysicsRecord& a_record) {
+					return a_record.bipedObject == bipedObject;
+				});
+			}
+		}
+
 		ResetStepClockLocked();
 		spdlog::debug(
-			"deferred target character customization physics build {} actor={}",
+			"deferred target character customization physics build {} actor={} retainedArmorRecords={}",
 			ToString(a_event.type),
-			static_cast<void*>(a_event.actor));
+			static_cast<void*>(a_event.actor),
+			armorRecords.size());
 		return true;
 	}
 
@@ -711,7 +745,8 @@ namespace Smp
 				continue;
 			}
 
-			MarkPendingActorRebuildLocked(actor, false, {}, true, true, true);
+			const auto retainedArmorRecordCount = it->armorRecords.size();
+			MarkPendingActorRebuildLocked(actor, false, std::move(it->armorRecords), true, true, true);
 			MarkPendingHeadRebuildLocked(LifecycleEvent{
 				.type = LifecycleEventType::kActorHeadInitialized,
 				.actor = actor,
@@ -720,10 +755,11 @@ namespace Smp
 			});
 			ResetStepClockLocked();
 			spdlog::debug(
-				"released actor-scoped FaceGen rebuild guard actor={} faceNode={} idleObservations={} forceArmorRescan=true headReloadQueued=true",
+				"released actor-scoped FaceGen rebuild guard actor={} faceNode={} idleObservations={} armorRecords={} forceArmorRescan=true headReloadQueued=true",
 				static_cast<void*>(actor),
 				static_cast<void*>(currentFaceNode),
-				it->stableIdleObservations);
+				it->stableIdleObservations,
+				retainedArmorRecordCount);
 			if (IsCharacterCustomizationTargetLocked(actor)) {
 				ClearCharacterCustomizationTargetLocked();
 			}
@@ -745,7 +781,7 @@ namespace Smp
 				return actor && actor.get() == target && !a_candidate.firstPerson;
 			});
 		std::uint32_t suspendedStates = 0;
-		std::uint32_t discardedArmorRecords = 0;
+		std::uint32_t retainedArmorRecords = 0;
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;
 			if (actorState.actor != target || actorState.firstPerson) {
@@ -755,18 +791,21 @@ namespace Smp
 				SuspendSystemLocked(actorState);
 				++suspendedStates;
 			}
-			discardedArmorRecords += static_cast<std::uint32_t>(actorState.armorRecords.size());
+			for (auto& record : actorState.armorRecords) {
+				MergeArmorPhysicsRecord(characterCustomizationArmorRecords_, record);
+			}
+			retainedArmorRecords += static_cast<std::uint32_t>(actorState.armorRecords.size());
 			actorState.armorRecords.clear();
 		}
 
-		if (suspendedStates > 0 || discardedArmorRecords > 0 || discardedSuspendedCandidates > 0) {
+		if (suspendedStates > 0 || retainedArmorRecords > 0 || discardedSuspendedCandidates > 0) {
 			ResetStepClockLocked();
 		}
 		spdlog::debug(
-			"suspended target system physics for character customization actor={} suspendedStates={} discardedArmorRecords={} discardedSuspendedCandidates={} trackedStates={}",
+			"suspended target system physics for character customization actor={} suspendedStates={} retainedArmorRecords={} discardedSuspendedCandidates={} trackedStates={}",
 			static_cast<void*>(target),
 			suspendedStates,
-			discardedArmorRecords,
+			retainedArmorRecords,
 			discardedSuspendedCandidates,
 			systems_.size());
 	}
@@ -785,6 +824,12 @@ namespace Smp
 			return;
 		}
 
+		std::vector<ArmorPhysicsRecord> armorRecords;
+		for (auto& record : characterCustomizationArmorRecords_) {
+			MergeArmorPhysicsRecord(armorRecords, std::move(record));
+		}
+		characterCustomizationArmorRecords_.clear();
+
 		std::uint32_t clearedStates = 0;
 		std::uint32_t skippedFirstPerson = 0;
 		for (auto& actorStatePointer : systems_) {
@@ -797,6 +842,9 @@ namespace Smp
 				continue;
 			}
 
+			for (auto& record : actorState.armorRecords) {
+				MergeArmorPhysicsRecord(armorRecords, record);
+			}
 			ClearSystemLocked(actorState);
 			++clearedStates;
 		}
@@ -832,13 +880,17 @@ namespace Smp
 			guard = std::addressof(faceGenRebuildGuards_.back());
 		}
 		guard->latestFaceNode = reinterpret_cast<RE::NiAVObject*>(target->GetFaceNodeSkinned());
+		for (auto& record : armorRecords) {
+			MergeArmorPhysicsRecord(guard->armorRecords, std::move(record));
+		}
 		guard->lastManagerObservation = faceGenManagerObservation_;
 		guard->stableIdleObservations = 0;
 		ResetStepClockLocked();
 		spdlog::debug(
-			"entered actor-scoped FaceGen idle rebuild guard after character customization actor={} faceNode={} clearedStates={} skippedFirstPerson={} discardedActorRebuilds={} discardedHeadRebuilds={}",
+			"entered actor-scoped FaceGen idle rebuild guard after character customization actor={} faceNode={} armorRecords={} clearedStates={} skippedFirstPerson={} discardedActorRebuilds={} discardedHeadRebuilds={}",
 			static_cast<void*>(target),
 			static_cast<void*>(guard->latestFaceNode.get()),
+			guard->armorRecords.size(),
 			clearedStates,
 			skippedFirstPerson,
 			discardedActorRebuilds,
@@ -848,6 +900,7 @@ namespace Smp
 	void Fo4PhysicsWorld::ClearCharacterCustomizationTargetLocked()
 	{
 		characterCustomizationTarget_.reset();
+		characterCustomizationArmorRecords_.clear();
 	}
 
 	void Fo4PhysicsWorld::SuspendSystemLocked(Fo4SkinnedMeshSystem& a_state)

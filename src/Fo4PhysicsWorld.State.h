@@ -78,6 +78,7 @@
 		std::vector<SaveLoadActorCandidate> saveLoadActors_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		RE::ActorHandle characterCustomizationTarget_;
+		std::vector<ArmorPhysicsRecord> characterCustomizationArmorRecords_;
 		std::uint64_t faceGenManagerObservation_{ 0 };
 		bool faceGenManagerIdle_{ false };
 		std::uint32_t loadingMenuDepth_{ 0 };

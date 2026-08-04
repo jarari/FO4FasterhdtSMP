@@ -30,6 +30,7 @@
 		{
 			RE::ActorHandle actorHandle;
 			RE::NiPointer<RE::NiAVObject> latestFaceNode;
+			std::vector<ArmorPhysicsRecord> armorRecords;
 			std::uint64_t lastManagerObservation{ 0 };
 			std::uint32_t stableIdleObservations{ 0 };
 		};

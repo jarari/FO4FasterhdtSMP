@@ -361,16 +361,14 @@ namespace
 
 	void CollectGeometryVisibility(
 		RE::NiAVObject* a_object,
-		GeometryVisibility& a_result,
-		const bool a_hiddenByAncestor = false)
+		GeometryVisibility& a_result)
 	{
 		if (!a_object || a_result.foundVisibleGeometry) {
 			return;
 		}
-		const auto hidden = a_hiddenByAncestor || a_object->GetAppCulled();
 		if (auto* geometry = a_object->IsGeometry()) {
 			a_result.foundGeometry = true;
-			a_result.foundVisibleGeometry = !hidden && GeometryHasEnabledDrawRange(geometry);
+			a_result.foundVisibleGeometry = !geometry->GetAppCulled() && GeometryHasEnabledDrawRange(geometry);
 			return;
 		}
 		auto* node = a_object->IsNode();
@@ -378,7 +376,7 @@ namespace
 			return;
 		}
 		for (auto& child : node->children) {
-			CollectGeometryVisibility(child.get(), a_result, hidden);
+			CollectGeometryVisibility(child.get(), a_result);
 			if (a_result.foundVisibleGeometry) {
 				return;
 			}
@@ -390,12 +388,10 @@ namespace
 		if (!a_object) {
 			return false;
 		}
-		for (auto* ancestor = a_object; ancestor; ancestor = ancestor->parent) {
-			if (ancestor->GetAppCulled()) {
-				return true;
-			}
-		}
 
+		// Parent nodes are view-dependent: the player head is app-culled in first
+		// person even though its armor-controlled hair segments remain enabled.
+		// Only geometry-local state is evidence that the hair source itself is hidden.
 		GeometryVisibility visibility;
 		CollectGeometryVisibility(a_object, visibility);
 		return visibility.foundGeometry && !visibility.foundVisibleGeometry;
