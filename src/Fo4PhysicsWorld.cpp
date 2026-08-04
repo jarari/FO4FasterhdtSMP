@@ -845,7 +845,7 @@ namespace
 			return true;
 		}
 
-		if (const auto* main = RE::Main::GetSingleton(); main && main->inMenuMode) {
+		if (const auto* main = RE::Main::GetSingleton(); main && (main->inMenuMode || main->freezeTime)) {
 			return true;
 		}
 
