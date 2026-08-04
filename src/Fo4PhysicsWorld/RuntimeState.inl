@@ -1406,56 +1406,6 @@ namespace Smp
 		return matchedRecords;
 	}
 
-	bool Fo4PhysicsWorld::BuildGroupsIncludeHairSlotArmorLocked(
-		const Fo4SkinnedMeshSystem& a_state,
-		const std::span<const std::uint64_t> a_buildGroups) const
-	{
-		if (a_buildGroups.empty()) {
-			return false;
-		}
-
-		const auto containsGroup = [&a_buildGroups](const std::uint64_t a_buildGroup) {
-			return a_buildGroup != 0 && std::ranges::find(a_buildGroups, a_buildGroup) != a_buildGroups.end();
-		};
-
-		if (std::ranges::any_of(a_state.armorRecords, [&](const ArmorPhysicsRecord& a_record) {
-				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
-			})) {
-			return true;
-		}
-		if (std::ranges::any_of(a_state.attachmentRecords, [&](const AttachmentPhysicsRecord& a_record) {
-				return IsHairBipedObject(a_record.bipedObject) && std::ranges::any_of(a_record.buildGroups, containsGroup);
-			})) {
-			return true;
-		}
-		if (std::ranges::any_of(a_state.buildGroups, [&](const BuildGroupRecord& a_runtime) {
-				return containsGroup(a_runtime.buildGroup) && a_runtime.domain == BuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
-			})) {
-			return true;
-		}
-		if (std::ranges::any_of(a_state.meshes, [&](const MeshRecord& a_mesh) {
-				return containsGroup(a_mesh.buildGroup) && a_mesh.domain == BuildDomain::kArmor && IsHairBipedObject(a_mesh.bipedObject);
-			})) {
-			return true;
-		}
-		return std::ranges::any_of(a_state.bodies, [&](const BoneRecord& a_body) {
-			if (!a_body.buildGroupDomains.empty() || !a_body.buildGroupBipedObjects.empty()) {
-				for (const auto& [buildGroup, domain] : a_body.buildGroupDomains) {
-					if (containsGroup(buildGroup) && domain == BuildDomain::kArmor) {
-						const auto biped = std::ranges::find_if(a_body.buildGroupBipedObjects, [buildGroup](const auto& a_entry) {
-							return a_entry.first == buildGroup;
-						});
-						if (biped != a_body.buildGroupBipedObjects.end() && IsHairBipedObject(biped->second)) {
-							return true;
-						}
-					}
-				}
-				return false;
-			}
-			return containsGroup(a_body.buildGroup) && IsHairBipedObject(a_body.bipedObject);
-		});
-	}
-
 	bool Fo4PhysicsWorld::ClearBuildGroupsForObjectLocked(Fo4SkinnedMeshSystem& a_state, RE::NiAVObject* a_object)
 	{
 		auto buildGroups = CollectBuildGroupsForObjectLocked(a_state, a_object);
@@ -1824,7 +1774,6 @@ namespace Smp
 		systems_.clear();
 		suspendedActors_.clear();
 		retainedHeadSkeletonCaches_.clear();
-		actorHairVisibilityStates_.clear();
 	}
 
 	void Fo4PhysicsWorld::NoteSaveLoadActorLocked(const LifecycleEvent& a_event)

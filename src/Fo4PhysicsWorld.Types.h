@@ -76,10 +76,3 @@
 			std::vector<ArmorBoneReference> headBoneReferences;
 			std::vector<std::string> requiredHeadBoneNames;
 		};
-
-		struct ActorHairVisibilityState
-		{
-			RE::ActorHandle actorHandle;
-			std::uintptr_t faceIdentity{ 0 };
-			std::vector<HairSourceVisibilityState> sources;
-		};

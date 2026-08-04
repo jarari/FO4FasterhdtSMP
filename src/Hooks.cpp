@@ -39,6 +39,7 @@ namespace Hooks
 	using BipedAnimAttachSkinnedObject_t = RE::NiAVObject* (*)(RE::BipedAnim*, RE::NiNode*, RE::NiNode*, RE::BIPED_OBJECT, bool);
 	using BipedAnimAttachToParent_t = void (*)(RE::NiAVObject*, RE::NiAVObject*, RE::NiAVObject*, RE::BSTSmartPointer<RE::BipedAnim>&, RE::BIPED_OBJECT);
 	using BipedAnimRemovePart_t = void (*)(RE::BipedAnim*, RE::BIPOBJECT*, bool);
+	using TESObjectREFRFixDisplayedHeadParts_t = void (*)(RE::TESObjectREFR*, RE::BSFaceGenNiNode*, bool, bool);
 	using ActorLoad3D_t = RE::NiAVObject* (*)(RE::TESObjectREFR*, bool);
 	using Set3D_t = void (*)(RE::TESObjectREFR*, RE::NiAVObject*, bool);
 	using OnHeadInitialized_t = void (*)(RE::TESObjectREFR*);
@@ -56,6 +57,7 @@ namespace Hooks
 	BipedAnimAttachSkinnedObject_t OriginalBipedAnimAttachSkinnedObject{ nullptr };
 	BipedAnimAttachToParent_t      OriginalBipedAnimAttachToParent{ nullptr };
 	BipedAnimRemovePart_t          OriginalBipedAnimRemovePart{ nullptr };
+	TESObjectREFRFixDisplayedHeadParts_t OriginalTESObjectREFRFixDisplayedHeadParts{ nullptr };
 	ActorLoad3D_t                  OriginalActorLoad3D{ nullptr };
 	ActorLoad3D_t                  OriginalPlayerCharacterLoad3D{ nullptr };
 	Set3D_t                        OriginalActorSet3D{ nullptr };
@@ -374,6 +376,7 @@ namespace Hooks
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject", Address::BipedAnimAttachSkinnedObject.address());
 		LogRelocationTarget("BipedAnim::AttachToParent", Address::BipedAnimAttachToParent.address());
 		LogRelocationTarget("BipedAnim::RemovePart", Address::BipedAnimRemovePart.address());
+		LogRelocationTarget("TESObjectREFR::FixDisplayedHeadParts", Address::TESObjectREFRFixDisplayedHeadParts.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject BakeChargenMorphs callsite", Address::BipedAnimAttachSkinnedObjectBakeChargenMorphsCall.address());
@@ -642,6 +645,27 @@ namespace Hooks
 			.bipedObject = bipedObject,
 			.firstPerson = IsFirstPersonBiped(a_biped),
 			.queueDetach = a_queueDetach,
+		});
+	}
+
+	void HookedTESObjectREFRFixDisplayedHeadParts(
+		RE::TESObjectREFR* a_ref,
+		RE::BSFaceGenNiNode* a_faceNode,
+		bool a_hideHead,
+		bool a_enableAllSegments)
+	{
+		OriginalTESObjectREFRFixDisplayedHeadParts(a_ref, a_faceNode, a_hideHead, a_enableAllSegments);
+
+		auto* actor = AsActor(a_ref);
+		auto* currentFace = actor ? actor->GetFaceNodeSkinned() : nullptr;
+		if (!actor || !currentFace || (a_faceNode && a_faceNode != currentFace)) {
+			return;
+		}
+		SeedFaceGenActor(a_ref);
+		EmitEvent({
+			.type = Smp::LifecycleEventType::kHeadPartVisibilityUpdated,
+			.actor = actor,
+			.object = reinterpret_cast<RE::NiAVObject*>(currentFace),
 		});
 	}
 
@@ -1069,6 +1093,13 @@ namespace Hooks
 		if (!OriginalBipedAnimRemovePart) {
 			OriginalBipedAnimRemovePart = CreateBranchGateway5<BipedAnimRemovePart_t>("BipedAnim::RemovePart", Address::BipedAnimRemovePart, Address::BipedAnimRemovePartPrologueSize.value(), reinterpret_cast<void*>(&HookedBipedAnimRemovePart));
 		}
+		if (!OriginalTESObjectREFRFixDisplayedHeadParts) {
+			OriginalTESObjectREFRFixDisplayedHeadParts = CreateBranchGateway5<TESObjectREFRFixDisplayedHeadParts_t>(
+				"TESObjectREFR::FixDisplayedHeadParts",
+				Address::TESObjectREFRFixDisplayedHeadParts,
+				Address::TESObjectREFRFixDisplayedHeadPartsPrologueSize.value(),
+				reinterpret_cast<void*>(&HookedTESObjectREFRFixDisplayedHeadParts));
+		}
 
 		REL::Relocation<std::uintptr_t> actorVTable{ RE::VTABLE::Actor[0] };
 		REL::Relocation<std::uintptr_t> playerVTable{ RE::VTABLE::PlayerCharacter[0] };
@@ -1149,6 +1180,7 @@ namespace Hooks
 			OriginalBipedAnimAttachSkinnedObject &&
 			OriginalBipedAnimAttachToParent &&
 			OriginalBipedAnimRemovePart &&
+			OriginalTESObjectREFRFixDisplayedHeadParts &&
 			OriginalActorLoad3D &&
 			OriginalPlayerCharacterLoad3D &&
 			OriginalActorSet3D &&

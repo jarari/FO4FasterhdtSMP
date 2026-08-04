@@ -20,6 +20,7 @@ namespace Smp
 		kActorLoad3D,
 		kActorSet3D,
 		kActorHeadInitialized,
+		kHeadPartVisibilityUpdated,
 		kHeadSkinAllGeometry,
 		kHeadSkinSingleGeometry,
 		kActorReset3D

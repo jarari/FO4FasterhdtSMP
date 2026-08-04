@@ -422,65 +422,6 @@ namespace
 		return IsPhysicsSourceEntirelyHidden(fallback);
 	}
 
-	std::vector<Smp::HairSourceVisibilityState> CaptureHairSourceVisibilityStates(
-		const std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
-	{
-		std::vector<Smp::HairSourceVisibilityState> result;
-		for (const auto& candidate : a_candidates) {
-			if (candidate.domain != Smp::BuildDomain::kHair) {
-				continue;
-			}
-
-			for (const auto& path : candidate.paths) {
-				Smp::HairSourceVisibilityState state{
-					.physicsXmlPath = path.string(),
-					.entirelyHidden = IsHeadPhysicsPathEntirelyHidden(candidate, path),
-				};
-				const auto pathKey = Smp::ResourceFile::ComparisonKey(path.string());
-				const auto sources = std::ranges::find_if(candidate.pathVisibilitySources, [&](const auto& a_source) {
-					return Smp::ResourceFile::ComparisonKey(a_source.path.string()) == pathKey;
-				});
-				if (sources != candidate.pathVisibilitySources.end()) {
-					state.sourceObjects = sources->objects;
-				}
-				if (state.sourceObjects.empty()) {
-					if (auto* fallback = candidate.sourceObject ? candidate.sourceObject.get() : candidate.object) {
-						state.sourceObjects.emplace_back(fallback);
-					}
-				}
-				if (!state.sourceObjects.empty()) {
-					result.push_back(std::move(state));
-				}
-			}
-		}
-		return result;
-	}
-
-	std::uint32_t RefreshHairSourceVisibilityStates(
-		std::vector<Smp::HairSourceVisibilityState>& a_states)
-	{
-		std::uint32_t changes = 0;
-		for (auto& state : a_states) {
-			const auto entirelyHidden = !state.sourceObjects.empty() &&
-				std::ranges::all_of(state.sourceObjects, [](const auto& a_object) {
-					return IsPhysicsSourceEntirelyHidden(a_object.get());
-				});
-			if (entirelyHidden == state.entirelyHidden) {
-				continue;
-			}
-
-			spdlog::debug(
-				"observed hair physics source visibility transition xml='{}' hiddenBefore={} hiddenNow={} sources={}",
-				state.physicsXmlPath,
-				state.entirelyHidden,
-				entirelyHidden,
-				state.sourceObjects.size());
-			state.entirelyHidden = entirelyHidden;
-			++changes;
-		}
-		return changes;
-	}
-
 	std::uint32_t CountUnresolvedRequiredPhysicsBones(
 		RE::BSFlattenedBoneTree* a_root,
 		const std::span<const std::string> a_requiredBoneNames)
@@ -1050,6 +991,7 @@ namespace
 	bool IsHeadCandidate(const Smp::LifecycleEventType a_type)
 	{
 		return a_type == Smp::LifecycleEventType::kActorHeadInitialized ||
+			a_type == Smp::LifecycleEventType::kHeadPartVisibilityUpdated ||
 			a_type == Smp::LifecycleEventType::kHeadSkinAllGeometry ||
 			a_type == Smp::LifecycleEventType::kHeadSkinSingleGeometry;
 	}

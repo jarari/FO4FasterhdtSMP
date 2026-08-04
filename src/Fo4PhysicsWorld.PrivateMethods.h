@@ -61,7 +61,6 @@
 		std::uint32_t PrunePhysicsRecordsForBipedObjectLocked(Fo4SkinnedMeshSystem& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup = 0);
 		std::uint32_t ClearStaleHairSlotArmorGroupsLocked(Fo4SkinnedMeshSystem& a_state, RE::BIPED_OBJECT a_bipedObject, std::uint64_t a_preservedBuildGroup, std::string_view a_reason, RE::NiAVObject* a_object = nullptr, std::string_view a_physicsXmlPath = {}, bool a_resetToStoredLocalPose = true);
 		std::uint32_t CollectHeadPartGroupsLocked(const Fo4SkinnedMeshSystem& a_state, BuildDomain a_domain, std::vector<std::uint64_t>& a_buildGroups) const;
-		bool BuildGroupsIncludeHairSlotArmorLocked(const Fo4SkinnedMeshSystem& a_state, std::span<const std::uint64_t> a_buildGroups) const;
 		bool ClearBuildGroupsForObjectLocked(Fo4SkinnedMeshSystem& a_state, RE::NiAVObject* a_object);
 		bool ClearBuildGroupsForBipedObjectLocked(Fo4SkinnedMeshSystem& a_state, RE::BIPED_OBJECT a_bipedObject);
 		bool ClearBuildGroupsForBoneNamesLocked(Fo4SkinnedMeshSystem& a_state, std::span<const std::string> a_boneNames, BuildDomain a_domain);

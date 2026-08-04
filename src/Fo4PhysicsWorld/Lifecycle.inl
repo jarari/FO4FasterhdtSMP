@@ -58,7 +58,6 @@ namespace Smp
 		faceGenRebuildGuards_.clear();
 		pendingSkeletonTransitions_.clear();
 		retainedHeadSkeletonCaches_.clear();
-		actorHairVisibilityStates_.clear();
 		saveLoadActors_.clear();
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
@@ -201,20 +200,6 @@ namespace Smp
 		}
 
 		BuildForEventLocked(a_event);
-		const auto attachedBipedObject = ResolveEventBipedObject(a_event);
-		if (actorArmorAttach && IsHairBipedObject(attachedBipedObject)) {
-			MarkPendingHeadRebuildLocked(LifecycleEvent{
-				.type = LifecycleEventType::kActorHeadInitialized,
-				.actor = a_event.actor,
-				.object = a_event.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(a_event.actor->GetFaceNodeSkinned()) : nullptr,
-				.firstPerson = a_event.firstPerson,
-			});
-			ResetStepClockLocked();
-			spdlog::debug(
-				"queued headpart visibility rebuild after hair-slot armor attach actor={} bipedObject={}",
-				static_cast<void*>(a_event.actor),
-				std::to_underlying(attachedBipedObject));
-		}
 		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
 			const auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState || !actorState->IsActive()) {
@@ -560,22 +545,6 @@ namespace Smp
 			touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject,
 			hairKeys,
 			candidates);
-
-		// Fallout can restore hair segment visibility without removing the armor
-		// clone from the hair biped slot. Preserve the observed live source state so
-		// any later armor detach can detect the actual hidden/visible transition.
-		auto hairVisibilitySources = CaptureHairSourceVisibilityStates(candidates);
-		std::erase_if(actorHairVisibilityStates_, [&](const ActorHairVisibilityState& a_state) {
-			const auto actor = a_state.actorHandle.get();
-			return !actor || actor.get() == a_event.actor;
-		});
-		if (!hairVisibilitySources.empty() && actorState.actorHandle) {
-			actorHairVisibilityStates_.push_back({
-				.actorHandle = actorState.actorHandle,
-				.faceIdentity = reinterpret_cast<std::uintptr_t>(faceObject),
-				.sources = std::move(hairVisibilitySources),
-			});
-		}
 
 		std::size_t candidateRecipeCount = 0;
 		std::vector<ArmorBoneReference> cachedBoneReferences;
