@@ -75,6 +75,7 @@
 		std::vector<FaceGenRebuildGuard> faceGenRebuildGuards_;
 		std::vector<PendingSkeletonTransition> pendingSkeletonTransitions_;
 		std::vector<RetainedHeadSkeletonCache> retainedHeadSkeletonCaches_;
+		std::vector<ActorHairVisibilityState> actorHairVisibilityStates_;
 		std::vector<SaveLoadActorCandidate> saveLoadActors_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		RE::ActorHandle characterCustomizationTarget_;

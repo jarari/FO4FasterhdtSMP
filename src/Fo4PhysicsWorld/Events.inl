@@ -91,6 +91,24 @@ namespace Smp
 			auto* liveObject = liveBipObject ? liveBipObject->partClone.get() : nullptr;
 			auto* pending = FindPendingActorRebuildLocked(a_event.actor, a_event.firstPerson);
 			auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
+			std::uint32_t hairVisibilityChanges = 0;
+			if (a_event.type == LifecycleEventType::kArmorDetachEnd && !a_event.firstPerson) {
+				std::erase_if(actorHairVisibilityStates_, [](const ActorHairVisibilityState& a_state) {
+					return !a_state.actorHandle.get();
+				});
+				auto visibilityState = std::ranges::find_if(actorHairVisibilityStates_, [&](const ActorHairVisibilityState& a_state) {
+					const auto actor = a_state.actorHandle.get();
+					return actor && actor.get() == a_event.actor;
+				});
+				if (visibilityState != actorHairVisibilityStates_.end()) {
+					auto* faceNode = a_event.actor->GetFaceNodeSkinned();
+					if (!faceNode || visibilityState->faceIdentity != reinterpret_cast<std::uintptr_t>(faceNode)) {
+						actorHairVisibilityStates_.erase(visibilityState);
+					} else {
+						hairVisibilityChanges = RefreshHairSourceVisibilityStates(visibilityState->sources);
+					}
+				}
+			}
 			if (!a_event.object && a_event.type == LifecycleEventType::kArmorDetachBegin) {
 				spdlog::trace(
 					"deferred null-object armor detach begin actor={} biped={} bipedObject={} queueDetach={} until post-remove live-slot validation",
@@ -103,7 +121,8 @@ namespace Smp
 			if (!a_event.object &&
 				a_event.type == LifecycleEventType::kArmorDetachEnd &&
 				bipedObject != RE::BIPED_OBJECT::kTotal &&
-				liveObject) {
+				liveObject &&
+				hairVisibilityChanges == 0) {
 				spdlog::debug(
 					"ignored stale null-object armor detach end actor={} biped={} bipedObject={} liveObject={} because the live slot is populated",
 					static_cast<void*>(a_event.actor),
@@ -111,6 +130,20 @@ namespace Smp
 					std::to_underlying(bipedObject),
 					static_cast<void*>(liveObject));
 				return RE::BSEventNotifyControl::kContinue;
+			}
+			const auto queuedVisibilityRebuild = hairVisibilityChanges != 0;
+			if (queuedVisibilityRebuild) {
+				MarkPendingHeadRebuildLocked(LifecycleEvent{
+					.type = LifecycleEventType::kActorHeadInitialized,
+					.actor = a_event.actor,
+					.object = a_event.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(a_event.actor->GetFaceNodeSkinned()) : nullptr,
+					.firstPerson = a_event.firstPerson,
+				});
+				spdlog::debug(
+					"queued headpart visibility rebuild after armor detach changed live hair sources actor={} reportedBipedObject={} changedSources={}",
+					static_cast<void*>(a_event.actor),
+					std::to_underlying(bipedObject),
+					hairVisibilityChanges);
 			}
 
 			if (pending) {
@@ -159,7 +192,9 @@ namespace Smp
 				!liveObject) {
 				cleared = ClearBuildGroupsForBipedObjectLocked(*actorState, bipedObject);
 			}
-			if (cleared && clearedHairSlotArmor) {
+			const auto hairSlotVisibilityChanged =
+				a_event.type == LifecycleEventType::kArmorDetachEnd && IsHairBipedObject(bipedObject);
+			if (!queuedVisibilityRebuild && ((cleared && clearedHairSlotArmor) || hairSlotVisibilityChanged)) {
 				MarkPendingHeadRebuildLocked(LifecycleEvent{
 					.type = LifecycleEventType::kActorHeadInitialized,
 					.actor = a_event.actor,
@@ -167,9 +202,10 @@ namespace Smp
 					.firstPerson = a_event.firstPerson,
 				});
 				spdlog::debug(
-					"queued headpart system rebuild after hair-slot armor detach actor={} bipedObject={}",
+					"queued headpart visibility rebuild after hair-slot armor detach actor={} bipedObject={} clearedPhysics={}",
 					static_cast<void*>(a_event.actor),
-					std::to_underlying(bipedObject));
+					std::to_underlying(bipedObject),
+					cleared);
 			}
 			std::erase_if(systems_, [](const auto& a_state) {
 				return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();

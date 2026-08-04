@@ -18,16 +18,41 @@ namespace Smp::NiObject
 	{
 		using BoneMap = RE::BSTHashMap<RE::BSFixedString, RE::NiAVObject*>;
 
+		BoneMap* FindDefaultBoneMapInTree(RE::NiAVObject* a_object)
+		{
+			if (!a_object) {
+				return nullptr;
+			}
+			static const RE::BSFixedString boneMapExtraName{ "BOM" };
+			if (auto* extra = a_object->GetExtraData(boneMapExtraName)) {
+				return reinterpret_cast<BoneMap*>(
+					reinterpret_cast<std::byte*>(extra) + sizeof(RE::NiExtraData));
+			}
+
+			auto* node = a_object->IsNode();
+			if (!node) {
+				return nullptr;
+			}
+			for (auto& child : node->children) {
+				if (auto* bones = FindDefaultBoneMapInTree(child.get())) {
+					return bones;
+				}
+			}
+			return nullptr;
+		}
+
 		BoneMap* FindDefaultBoneMap(RE::NiAVObject* a_root)
 		{
 			static const RE::BSFixedString boneMapExtraName{ "BOM" };
+			auto* treeRoot = a_root;
 			for (auto* current = a_root; current; current = current->parent) {
+				treeRoot = current;
 				if (auto* extra = current->GetExtraData(boneMapExtraName)) {
 					return reinterpret_cast<BoneMap*>(
 						reinterpret_cast<std::byte*>(extra) + sizeof(RE::NiExtraData));
 				}
 			}
-			return nullptr;
+			return FindDefaultBoneMapInTree(treeRoot);
 		}
 	}
 

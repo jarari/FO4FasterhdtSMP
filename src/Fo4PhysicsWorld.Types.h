@@ -62,8 +62,11 @@
 			std::vector<RetainedSkinBinding> retainedSkinBindings;
 			std::uint32_t frameAge{ 0 };
 			std::uint32_t loadedFrameAge{ 0 };
-			bool armorRebuildQueued{ false };
+			bool physicsReady{ false };
+			bool rebuildsQueued{ false };
 			bool faceSkinned{ false };
+			bool physicsTimeoutLogged{ false };
+			bool faceTimeoutLogged{ false };
 		};
 
 		struct RetainedHeadSkeletonCache
@@ -72,4 +75,11 @@
 			std::uintptr_t retainedFaceIdentity{ 0 };
 			std::vector<ArmorBoneReference> headBoneReferences;
 			std::vector<std::string> requiredHeadBoneNames;
+		};
+
+		struct ActorHairVisibilityState
+		{
+			RE::ActorHandle actorHandle;
+			std::uintptr_t faceIdentity{ 0 };
+			std::vector<HairSourceVisibilityState> sources;
 		};

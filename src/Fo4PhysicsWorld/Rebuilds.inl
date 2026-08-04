@@ -1129,23 +1129,6 @@ namespace Smp
 					staleArmorBuildGroups.push_back(buildGroup);
 				}
 			}
-			if (hairSlotArmorBuild) {
-				std::vector<std::uint64_t> staleHeadBuildGroups;
-				const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, staleHeadBuildGroups);
-				if (replacedHeadParts > 0) {
-					spdlog::debug(
-						"pending hair-slot armor rebuild is replacing tracked hair headpart groups actor={} bipedObject={} object={} xml='{}' hairRecords={} groups={}",
-						static_cast<void*>(a_actor),
-						std::to_underlying(record.bipedObject),
-						static_cast<void*>(rebuildObject),
-						record.physicsXmlPath,
-						replacedHeadParts,
-						staleHeadBuildGroups.size());
-				}
-				if (!staleHeadBuildGroups.empty()) {
-					ClearBuildGroupsLocked(actorState, staleHeadBuildGroups);
-				}
-			}
 			if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
 				cacheCurrentPoseForGroups(staleArmorBuildGroups);
 				ClearBuildGroupsLocked(actorState, staleArmorBuildGroups, !record.preserveCurrentPose);
@@ -1435,6 +1418,16 @@ namespace Smp
 			}
 			if ((characterCustomizationMenuDepth_ > 0 && IsCharacterCustomizationTargetLocked(actor)) ||
 				FindFaceGenRebuildGuardLocked(actor)) {
+				++it;
+				continue;
+			}
+			const auto skeletonTransitionBlocksHead = std::ranges::any_of(
+				pendingSkeletonTransitions_,
+				[actor](const PendingSkeletonTransition& a_transition) {
+					const auto transitionActor = a_transition.actorHandle.get();
+					return transitionActor && transitionActor.get() == actor && !a_transition.physicsReady;
+				});
+			if (skeletonTransitionBlocksHead) {
 				++it;
 				continue;
 			}

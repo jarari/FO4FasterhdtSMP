@@ -65,6 +65,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -233,8 +234,15 @@ namespace
 
 	struct HeadPhysicsXmlBuildCandidate
 	{
+		struct PathVisibilitySources
+		{
+			std::filesystem::path path;
+			std::vector<RE::NiPointer<RE::NiAVObject>> objects;
+		};
+
 		RE::NiAVObject* object{ nullptr };
 		std::vector<std::filesystem::path> paths;
+		std::vector<PathVisibilitySources> pathVisibilitySources;
 		Smp::DefaultBBP::NameMap meshNameMap;
 		std::vector<RE::NiPointer<RE::NiAVObject>> meshSourceRoots;
 		std::vector<RE::NiPointer<RE::NiAVObject>> liveBindingObjects;
@@ -245,6 +253,245 @@ namespace
 		Smp::BuildDomain domain{ Smp::BuildDomain::kHead };
 		bool isHeadPartClosure{ false };
 	};
+
+	template <class T>
+	T ReadSegmentField(const void* a_base, const std::size_t a_offset)
+	{
+		T value{};
+		std::memcpy(std::addressof(value), static_cast<const std::byte*>(a_base) + a_offset, sizeof(value));
+		return value;
+	}
+
+	bool SegmentEntryHasEnabledDrawRange(
+		const std::byte* a_entries,
+		const std::uint32_t a_entryIndex,
+		const std::uint32_t a_depth,
+		std::uint32_t& a_visited)
+	{
+		constexpr std::size_t kEntryStride = 0x14;
+		constexpr std::uint32_t kTraversalLimit = 4096;
+		constexpr std::uint32_t kDepthLimit = 16;
+		if (!a_entries || a_entryIndex >= kTraversalLimit || ++a_visited > kTraversalLimit || a_depth > kDepthLimit) {
+			// Unknown/corrupt segment layouts are kept active. Only a proven fully
+			// hidden source is allowed to suppress physics.
+			return true;
+		}
+
+		const auto* entry = a_entries + static_cast<std::size_t>(a_entryIndex) * kEntryStride;
+		const auto primitiveCount = ReadSegmentField<std::uint32_t>(entry, 0x4);
+		const auto childCount = ReadSegmentField<std::uint32_t>(entry, 0xC);
+		const auto disableCount = ReadSegmentField<std::uint8_t>(entry, 0x10);
+		if (disableCount == 0 && primitiveCount != 0) {
+			return true;
+		}
+		if (childCount >= kTraversalLimit || a_entryIndex >= kTraversalLimit - childCount) {
+			return true;
+		}
+		for (std::uint32_t child = 0; child < childCount; ++child) {
+			if (SegmentEntryHasEnabledDrawRange(a_entries, a_entryIndex + child + 1, a_depth + 1, a_visited)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool GeometryHasEnabledDrawRange(RE::BSGeometry* a_geometry)
+	{
+		if (!a_geometry) {
+			return false;
+		}
+		auto* segmentData = a_geometry->GetSegmentData();
+		if (!segmentData) {
+			return true;
+		}
+
+		// HeadPart::HideShowHair mutates BSGeometrySegmentData's disable counts.
+		// These are the OG/AE-stable fields consumed by UpdateDrawData: the shared
+		// segment map, flat 0x14-byte draw entries, top-level count/remap, and the
+		// one-segment flag. Unknown layouts deliberately resolve as visible.
+		constexpr std::uint32_t kSegmentLimit = 4096;
+		const auto segmentCount = ReadSegmentField<std::uint8_t>(segmentData, 0x3D) == 0 ?
+			ReadSegmentField<std::uint32_t>(segmentData, 0x2C) :
+			1U;
+		if (segmentCount > kSegmentLimit) {
+			return true;
+		}
+		const auto entriesAddress = ReadSegmentField<std::uintptr_t>(segmentData, 0x18);
+		if (!entriesAddress) {
+			return true;
+		}
+
+		const auto mappingAddress = ReadSegmentField<std::uintptr_t>(segmentData, 0x10);
+		const auto mappingIndicesAddress = mappingAddress ?
+			ReadSegmentField<std::uintptr_t>(reinterpret_cast<const void*>(mappingAddress), 0x18) :
+			0;
+		const auto remappedSegment = ReadSegmentField<std::uint32_t>(segmentData, 0x38);
+		const auto* entries = reinterpret_cast<const std::byte*>(entriesAddress);
+		for (std::uint32_t segment = 0; segment < segmentCount; ++segment) {
+			const auto logicalSegment = segment == remappedSegment ? 0U : segment;
+			std::uint32_t entryIndex = logicalSegment;
+			if (mappingAddress) {
+				if (!mappingIndicesAddress) {
+					return true;
+				}
+				entryIndex = ReadSegmentField<std::uint32_t>(
+					reinterpret_cast<const void*>(mappingIndicesAddress),
+					static_cast<std::size_t>(logicalSegment) * sizeof(std::uint32_t));
+			}
+			if (entryIndex == std::numeric_limits<std::uint32_t>::max()) {
+				continue;
+			}
+			if (entryIndex >= kSegmentLimit) {
+				return true;
+			}
+
+			std::uint32_t visited = 0;
+			if (SegmentEntryHasEnabledDrawRange(entries, entryIndex, 0, visited)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	struct GeometryVisibility
+	{
+		bool foundGeometry{ false };
+		bool foundVisibleGeometry{ false };
+	};
+
+	void CollectGeometryVisibility(
+		RE::NiAVObject* a_object,
+		GeometryVisibility& a_result,
+		const bool a_hiddenByAncestor = false)
+	{
+		if (!a_object || a_result.foundVisibleGeometry) {
+			return;
+		}
+		const auto hidden = a_hiddenByAncestor || a_object->GetAppCulled();
+		if (auto* geometry = a_object->IsGeometry()) {
+			a_result.foundGeometry = true;
+			a_result.foundVisibleGeometry = !hidden && GeometryHasEnabledDrawRange(geometry);
+			return;
+		}
+		auto* node = a_object->IsNode();
+		if (!node) {
+			return;
+		}
+		for (auto& child : node->children) {
+			CollectGeometryVisibility(child.get(), a_result, hidden);
+			if (a_result.foundVisibleGeometry) {
+				return;
+			}
+		}
+	}
+
+	bool IsPhysicsSourceEntirelyHidden(RE::NiAVObject* a_object)
+	{
+		if (!a_object) {
+			return false;
+		}
+		for (auto* ancestor = a_object; ancestor; ancestor = ancestor->parent) {
+			if (ancestor->GetAppCulled()) {
+				return true;
+			}
+		}
+
+		GeometryVisibility visibility;
+		CollectGeometryVisibility(a_object, visibility);
+		return visibility.foundGeometry && !visibility.foundVisibleGeometry;
+	}
+
+	bool IsHeadPhysicsPathEntirelyHidden(
+		const HeadPhysicsXmlBuildCandidate& a_candidate,
+		const std::filesystem::path& a_path)
+	{
+		const auto pathKey = Smp::ResourceFile::ComparisonKey(a_path.string());
+		const auto sources = std::ranges::find_if(a_candidate.pathVisibilitySources, [&](const auto& a_source) {
+			return Smp::ResourceFile::ComparisonKey(a_source.path.string()) == pathKey;
+		});
+		if (sources != a_candidate.pathVisibilitySources.end() && !sources->objects.empty()) {
+			return std::ranges::all_of(sources->objects, [](const auto& a_object) {
+				return IsPhysicsSourceEntirelyHidden(a_object.get());
+			});
+		}
+
+		// Direct candidates pre-dating source metadata, or candidates whose live
+		// association could not be resolved, stay active unless their fallback
+		// source is itself proven wholly hidden.
+		auto* fallback = a_candidate.sourceObject ? a_candidate.sourceObject.get() : a_candidate.object;
+		return IsPhysicsSourceEntirelyHidden(fallback);
+	}
+
+	std::vector<Smp::HairSourceVisibilityState> CaptureHairSourceVisibilityStates(
+		const std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates)
+	{
+		std::vector<Smp::HairSourceVisibilityState> result;
+		for (const auto& candidate : a_candidates) {
+			if (candidate.domain != Smp::BuildDomain::kHair) {
+				continue;
+			}
+
+			for (const auto& path : candidate.paths) {
+				Smp::HairSourceVisibilityState state{
+					.physicsXmlPath = path.string(),
+					.entirelyHidden = IsHeadPhysicsPathEntirelyHidden(candidate, path),
+				};
+				const auto pathKey = Smp::ResourceFile::ComparisonKey(path.string());
+				const auto sources = std::ranges::find_if(candidate.pathVisibilitySources, [&](const auto& a_source) {
+					return Smp::ResourceFile::ComparisonKey(a_source.path.string()) == pathKey;
+				});
+				if (sources != candidate.pathVisibilitySources.end()) {
+					state.sourceObjects = sources->objects;
+				}
+				if (state.sourceObjects.empty()) {
+					if (auto* fallback = candidate.sourceObject ? candidate.sourceObject.get() : candidate.object) {
+						state.sourceObjects.emplace_back(fallback);
+					}
+				}
+				if (!state.sourceObjects.empty()) {
+					result.push_back(std::move(state));
+				}
+			}
+		}
+		return result;
+	}
+
+	std::uint32_t RefreshHairSourceVisibilityStates(
+		std::vector<Smp::HairSourceVisibilityState>& a_states)
+	{
+		std::uint32_t changes = 0;
+		for (auto& state : a_states) {
+			const auto entirelyHidden = !state.sourceObjects.empty() &&
+				std::ranges::all_of(state.sourceObjects, [](const auto& a_object) {
+					return IsPhysicsSourceEntirelyHidden(a_object.get());
+				});
+			if (entirelyHidden == state.entirelyHidden) {
+				continue;
+			}
+
+			spdlog::debug(
+				"observed hair physics source visibility transition xml='{}' hiddenBefore={} hiddenNow={} sources={}",
+				state.physicsXmlPath,
+				state.entirelyHidden,
+				entirelyHidden,
+				state.sourceObjects.size());
+			state.entirelyHidden = entirelyHidden;
+			++changes;
+		}
+		return changes;
+	}
+
+	std::uint32_t CountUnresolvedRequiredPhysicsBones(
+		RE::BSFlattenedBoneTree* a_root,
+		const std::span<const std::string> a_requiredBoneNames)
+	{
+		if (!a_root) {
+			return static_cast<std::uint32_t>(a_requiredBoneNames.size());
+		}
+		return static_cast<std::uint32_t>(std::ranges::count_if(a_requiredBoneNames, [a_root](const std::string& a_name) {
+			return a_name.empty() || !a_root->GetObjectByName(RE::BSFixedString{ a_name });
+		}));
+	}
 
 	void ResetBoneReferenceRuntimeState(Smp::ArmorBoneReference& a_reference)
 	{
@@ -870,6 +1117,30 @@ namespace
 		return Smp::PhysicsXmlSelection::FindDirectPhysicsXmlExtraData(a_object);
 	}
 
+	void AppendHeadPathVisibilitySource(
+		std::vector<HeadPhysicsXmlBuildCandidate::PathVisibilitySources>& a_sources,
+		const std::filesystem::path& a_path,
+		RE::NiAVObject* a_object)
+	{
+		if (a_path.empty() || !a_object) {
+			return;
+		}
+
+		const auto pathKey = Smp::ResourceFile::ComparisonKey(a_path.string());
+		auto source = std::ranges::find_if(a_sources, [&](const auto& a_existing) {
+			return Smp::ResourceFile::ComparisonKey(a_existing.path.string()) == pathKey;
+		});
+		if (source == a_sources.end()) {
+			a_sources.push_back({ .path = a_path });
+			source = std::prev(a_sources.end());
+		}
+		if (std::ranges::none_of(source->objects, [a_object](const auto& a_existing) {
+			return a_existing.get() == a_object;
+		})) {
+			source->objects.emplace_back(a_object);
+		}
+	}
+
 	void AppendHeadCandidate(
 		std::vector<HeadPhysicsXmlBuildCandidate>& a_candidates,
 		RE::NiAVObject* a_object,
@@ -897,9 +1168,12 @@ namespace
 			return;
 		}
 
+		std::vector<HeadPhysicsXmlBuildCandidate::PathVisibilitySources> visibilitySources;
+		AppendHeadPathVisibilitySource(visibilitySources, a_path, a_sourceObject ? a_sourceObject : a_object);
 		a_candidates.push_back({
 			.object = a_object,
 			.paths = { std::move(a_path) },
+			.pathVisibilitySources = std::move(visibilitySources),
 			.meshNameMap = std::move(a_meshNameMap),
 			.sourceObject = a_sourceObject,
 			.sourceRoot = a_sourceRoot,
@@ -1000,12 +1274,15 @@ namespace
 		std::vector<ModelSource> modelSources;
 		std::vector<RE::NiPointer<RE::NiAVObject>> liveBindingObjects;
 		std::vector<std::filesystem::path> physicsXmlPaths;
+		std::vector<HeadPhysicsXmlBuildCandidate::PathVisibilitySources> pathVisibilitySources;
 		std::vector<Smp::ArmorBoneReference> boneReferences;
 	};
 
 	void AppendHeadPartClosurePhysicsXml(
 		std::vector<std::filesystem::path>& a_paths,
-		const std::filesystem::path& a_path)
+		std::vector<HeadPhysicsXmlBuildCandidate::PathVisibilitySources>& a_visibilitySources,
+		const std::filesystem::path& a_path,
+		RE::NiAVObject* a_liveObject)
 	{
 		if (a_path.empty()) {
 			return;
@@ -1013,10 +1290,11 @@ namespace
 
 		const auto key = Smp::ResourceFile::ComparisonKey(a_path.string());
 		if (std::ranges::none_of(a_paths, [&](const auto& a_existing) {
-				return Smp::ResourceFile::ComparisonKey(a_existing.string()) == key;
-			})) {
+			return Smp::ResourceFile::ComparisonKey(a_existing.string()) == key;
+		})) {
 			a_paths.push_back(a_path);
 		}
+		AppendHeadPathVisibilitySource(a_visibilitySources, a_path, a_liveObject);
 	}
 
 	void MergePhysicsSummary(
@@ -1165,10 +1443,13 @@ namespace
 					std::string(std::string_view(sourceGeometry->GetName())) :
 					std::string{};
 				auto* liveGeometry = ResolveLiveHeadPartGeometry(a_faceObject, a_headPart, sourceGeometryName);
-				if (liveGeometry && !a_closure.object) {
+				// extraParts are dependencies of their owning closure. They may provide
+				// meshes and bone layout for a sibling's XML without owning XML themselves.
+				const auto contributesToClosure = selection.has_value() || a_headPart->IsExtraPart();
+				if (liveGeometry && contributesToClosure && !a_closure.object) {
 					a_closure.object = liveGeometry;
 				}
-				if (liveGeometry &&
+				if (liveGeometry && contributesToClosure &&
 					std::ranges::none_of(a_closure.meshSourceRoots, [&](const auto& a_root) {
 						return a_root.get() == meshSourceRoot.get();
 					})) {
@@ -1178,7 +1459,7 @@ namespace
 						.nifPath = modelPath,
 					});
 				}
-				if (liveGeometry &&
+				if (liveGeometry && contributesToClosure &&
 					std::ranges::none_of(a_closure.liveBindingObjects, [&](const auto& a_object) {
 						return a_object.get() == liveGeometry;
 					})) {
@@ -1186,7 +1467,11 @@ namespace
 				}
 
 				if (liveGeometry && selection) {
-					AppendHeadPartClosurePhysicsXml(a_closure.physicsXmlPaths, selection->path);
+					AppendHeadPartClosurePhysicsXml(
+						a_closure.physicsXmlPaths,
+						a_closure.pathVisibilitySources,
+						selection->path,
+						liveGeometry);
 				}
 				if (!liveGeometry) {
 					spdlog::debug(
@@ -1202,7 +1487,7 @@ namespace
 				} else {
 					const auto liveGeometryName = std::string(std::string_view(liveGeometry->GetName()));
 					const auto selectedXml = selection ? selection->path.string() : std::string{};
-					if (!sourceGeometryName.empty() && !liveGeometryName.empty()) {
+					if (contributesToClosure && !sourceGeometryName.empty() && !liveGeometryName.empty()) {
 						a_closure.meshNameMap[sourceGeometryName].emplace(liveGeometryName);
 					}
 					spdlog::debug(
@@ -1283,6 +1568,7 @@ namespace
 			HeadPhysicsXmlBuildCandidate candidate;
 			candidate.object = closure.object;
 			candidate.paths = std::move(closure.physicsXmlPaths);
+			candidate.pathVisibilitySources = std::move(closure.pathVisibilitySources);
 			candidate.meshNameMap = std::move(closure.meshNameMap);
 			candidate.meshSourceRoots = std::move(closure.meshSourceRoots);
 			candidate.liveBindingObjects = std::move(closure.liveBindingObjects);
@@ -1438,31 +1724,6 @@ namespace
 		}
 
 		return RE::BIPED_OBJECT::kTotal;
-	}
-
-	bool HasEquippedHairSlotObject(RE::Actor* a_actor)
-	{
-		if (!a_actor) {
-			return false;
-		}
-
-		Smp::LifecycleEvent event{
-			.type = Smp::LifecycleEventType::kArmorAttachSkinnedObject,
-			.actor = a_actor,
-			.firstPerson = false,
-		};
-		auto* biped = ResolveEventBiped(event);
-		if (!biped) {
-			return false;
-		}
-
-		for (const auto slot : { RE::BIPED_OBJECT::kHairTop, RE::BIPED_OBJECT::kHairLong }) {
-			auto* bipObject = biped->GetBipObject(slot);
-			if (bipObject && bipObject->partClone) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	bool HasArmorBuildCandidateObject(

@@ -282,8 +282,6 @@ namespace Smp
 
 		std::vector<RE::BSFixedString> activeTags;
 		std::vector<DisableGroup> disableGroups;
-		const auto disableHairForWig = disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_state.actor);
-
 		for (auto& meshRecord : a_state.meshes) {
 			auto* body = meshRecord.body.get();
 			if (!body) {
@@ -291,10 +289,6 @@ namespace Smp
 			}
 
 			body->disabled_ = false;
-			if (disableHairForWig && meshRecord.domain == BuildDomain::kHair) {
-				body->disabled_ = true;
-				continue;
-			}
 			if (body->disableTag_.empty()) {
 				for (const auto& tag : body->tags_) {
 					if (std::ranges::find(activeTags, tag) == activeTags.end()) {

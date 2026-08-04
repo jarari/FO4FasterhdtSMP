@@ -330,7 +330,8 @@ namespace Smp
 
 	RetainedSkinRebindResult RebindRetainedSkinBindings(
 		RE::BSFlattenedBoneTree* a_root,
-		const std::span<const RetainedSkinBinding> a_bindings)
+		const std::span<const RetainedSkinBinding> a_bindings,
+		RE::NiAVObject* a_oldRoot)
 	{
 		RetainedSkinRebindResult result;
 		if (!a_root) {
@@ -376,6 +377,11 @@ namespace Smp
 				}
 
 				++result.unresolvedSlots;
+				auto* currentBone = boneIndex < skin->bones.size() ? skin->bones[boneIndex] : nullptr;
+				if (a_oldRoot && currentBone &&
+					(currentBone == a_oldRoot || NiObject::IsDescendantOf(currentBone, a_oldRoot))) {
+					++result.unresolvedOldRootSlots;
+				}
 				result.unnamedSlots += !boneName || boneName->empty() ? 1U : 0U;
 			}
 		}
@@ -895,6 +901,14 @@ namespace Smp
 			reference.resolvedNode.reset();
 			reference.createdByUs = false;
 		}
+		auto* ownershipRoot = actorRoot ? actorRoot : static_cast<RE::NiAVObject*>(destinationRoot);
+		std::uint32_t correctedActorOwnedBones = 0;
+		for (auto& reference : a_references) {
+			const auto actorOwned = NiObject::IsActorSkeletonBoneName(ownershipRoot, reference.name);
+			correctedActorOwnedBones += reference.isArmorOnly && actorOwned ? 1U : 0U;
+			reference.isArmorOnly = !actorOwned;
+			reference.parentBoneIsArmorOnly = false;
+		}
 
 		std::uint32_t createdArmorNodes = 0;
 		std::uint32_t reusedArmorNodes = 0;
@@ -1060,13 +1074,14 @@ namespace Smp
 		auto* currentActorRoot = actorRoot ? actorRoot : static_cast<RE::NiAVObject*>(destinationRoot);
 
 		spdlog::debug(
-			"finalized persistent armor hierarchy actor={} object={} skeletonRoot={} actorRoot={} references={} attachedArmorOnlyBones={} createdArmorNodes={} reusedArmorNodes={} reparentedArmorBones={} updatedArmorRoots={} sourceSkinBindings={} reboundSkinSlots={} unresolvedSkinSlots={} movedBoundBones={}",
+			"finalized persistent armor hierarchy actor={} object={} skeletonRoot={} actorRoot={} references={} attachedArmorOnlyBones={} correctedActorOwnedBones={} createdArmorNodes={} reusedArmorNodes={} reparentedArmorBones={} updatedArmorRoots={} sourceSkinBindings={} reboundSkinSlots={} unresolvedSkinSlots={} movedBoundBones={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_attachedObject),
 			static_cast<void*>(destinationRoot),
 			static_cast<void*>(currentActorRoot),
 			a_references.size(),
 			attachedArmorBones,
+			correctedActorOwnedBones,
 			createdArmorNodes,
 			reusedArmorNodes,
 			reparentedArmorBones,

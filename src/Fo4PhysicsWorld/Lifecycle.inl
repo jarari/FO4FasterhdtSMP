@@ -58,6 +58,7 @@ namespace Smp
 		faceGenRebuildGuards_.clear();
 		pendingSkeletonTransitions_.clear();
 		retainedHeadSkeletonCaches_.clear();
+		actorHairVisibilityStates_.clear();
 		saveLoadActors_.clear();
 		loadingMenuDepth_ = 0;
 		loadingPhysicsSuspended_ = false;
@@ -123,7 +124,7 @@ namespace Smp
 			a_event.actor &&
 			std::ranges::any_of(pendingSkeletonTransitions_, [&a_event](const PendingSkeletonTransition& a_pending) {
 				const auto actor = a_pending.actorHandle.get();
-				return actor && actor.get() == a_event.actor;
+				return actor && actor.get() == a_event.actor && !a_pending.physicsReady;
 			});
 		if (actorSkeletonTransitionPending) {
 			if (actorArmorAttach) {
@@ -200,6 +201,20 @@ namespace Smp
 		}
 
 		BuildForEventLocked(a_event);
+		const auto attachedBipedObject = ResolveEventBipedObject(a_event);
+		if (actorArmorAttach && IsHairBipedObject(attachedBipedObject)) {
+			MarkPendingHeadRebuildLocked(LifecycleEvent{
+				.type = LifecycleEventType::kActorHeadInitialized,
+				.actor = a_event.actor,
+				.object = a_event.actor->GetFaceNodeSkinned() ? reinterpret_cast<RE::NiAVObject*>(a_event.actor->GetFaceNodeSkinned()) : nullptr,
+				.firstPerson = a_event.firstPerson,
+			});
+			ResetStepClockLocked();
+			spdlog::debug(
+				"queued headpart visibility rebuild after hair-slot armor attach actor={} bipedObject={}",
+				static_cast<void*>(a_event.actor),
+				std::to_underlying(attachedBipedObject));
+		}
 		if ((a_event.type == LifecycleEventType::kActorLoad3D || a_event.type == LifecycleEventType::kActorSet3D) && a_event.actor) {
 			const auto* actorState = FindSystemLocked(a_event.actor, a_event.firstPerson);
 			if (!actorState || !actorState->IsActive()) {
@@ -316,23 +331,6 @@ namespace Smp
 				for (const auto buildGroup : CollectBuildGroupsForObjectLocked(actorState, a_object)) {
 					if (buildGroup != 0 && std::ranges::find(staleArmorBuildGroups, buildGroup) == staleArmorBuildGroups.end()) {
 						staleArmorBuildGroups.push_back(buildGroup);
-					}
-				}
-				if (hairSlotArmorBuild) {
-					std::vector<std::uint64_t> staleHeadBuildGroups;
-					const auto replacedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, staleHeadBuildGroups);
-					if (replacedHeadParts > 0) {
-						spdlog::debug(
-							"hair-slot armor attach is replacing tracked hair headpart groups actor={} bipedObject={} object={} xml='{}' hairRecords={} groups={}",
-							static_cast<void*>(a_event.actor),
-							std::to_underlying(scopedEvent.bipedObject),
-							static_cast<void*>(a_object),
-							selectedXml,
-							replacedHeadParts,
-							staleHeadBuildGroups.size());
-					}
-					if (!staleHeadBuildGroups.empty()) {
-						ClearBuildGroupsLocked(actorState, staleHeadBuildGroups);
 					}
 				}
 				if (!hairSlotArmorBuild && !staleArmorBuildGroups.empty()) {
@@ -544,10 +542,6 @@ namespace Smp
 		}
 		actorState.faceNode = faceObject;
 
-		const auto suppressHairHeadParts =
-			HasActiveHairSlotArmorLocked(actorState) ||
-			(disableSMPHairWhenWigEquipped_ && HasEquippedHairSlotObject(a_event.actor));
-
 		const auto touchedHeadGeometry = a_event.type == LifecycleEventType::kHeadSkinSingleGeometry;
 		const auto touchedObjectValid = !touchedHeadGeometry || !a_event.object || IsObjectInTree(faceObject, a_event.object);
 		if (touchedHeadGeometry && !touchedObjectValid) {
@@ -566,6 +560,22 @@ namespace Smp
 			touchedHeadGeometry && touchedObjectValid && a_event.object ? a_event.object : faceObject,
 			hairKeys,
 			candidates);
+
+		// Fallout can restore hair segment visibility without removing the armor
+		// clone from the hair biped slot. Preserve the observed live source state so
+		// any later armor detach can detect the actual hidden/visible transition.
+		auto hairVisibilitySources = CaptureHairSourceVisibilityStates(candidates);
+		std::erase_if(actorHairVisibilityStates_, [&](const ActorHairVisibilityState& a_state) {
+			const auto actor = a_state.actorHandle.get();
+			return !actor || actor.get() == a_event.actor;
+		});
+		if (!hairVisibilitySources.empty() && actorState.actorHandle) {
+			actorHairVisibilityStates_.push_back({
+				.actorHandle = actorState.actorHandle,
+				.faceIdentity = reinterpret_cast<std::uintptr_t>(faceObject),
+				.sources = std::move(hairVisibilitySources),
+			});
+		}
 
 		std::size_t candidateRecipeCount = 0;
 		std::vector<ArmorBoneReference> cachedBoneReferences;
@@ -603,29 +613,59 @@ namespace Smp
 			cached->headBoneReferences = std::move(cachedBoneReferences);
 			cached->requiredHeadBoneNames.clear();
 			spdlog::debug(
-				"cached retained-head skeleton recipes actor={} faceNode={} candidateRecipes={} cachedRecipes={} before hair suppression",
+				"cached retained-head skeleton recipes actor={} faceNode={} candidateRecipes={} cachedRecipes={} before source-visibility filtering",
 				static_cast<void*>(a_event.actor),
 				static_cast<void*>(faceNode),
 				candidateRecipeCount,
 				cached->headBoneReferences.size());
 		}
 
-		if (suppressHairHeadParts) {
-			std::vector<std::uint64_t> removedGroups;
-			const auto removedHeadParts = CollectHeadPartGroupsLocked(actorState, BuildDomain::kHair, removedGroups);
-			if (!removedGroups.empty()) {
-				ClearBuildGroupsLocked(actorState, removedGroups);
+		if (disableSMPHairWhenWigEquipped_) {
+			std::size_t hiddenPaths = 0;
+			std::vector<std::uint64_t> hiddenSourceGroups;
+			for (auto& candidate : candidates) {
+				if (candidate.domain != BuildDomain::kHair) {
+					continue;
+				}
+				hiddenPaths += std::erase_if(candidate.paths, [&](const std::filesystem::path& a_path) {
+					const auto hidden = IsHeadPhysicsPathEntirelyHidden(candidate, a_path);
+					if (hidden) {
+						const auto pathKey = ResourceFile::ComparisonKey(a_path.string());
+						for (const auto& record : actorState.headPartRecords) {
+							if (record.object.get() == candidate.object &&
+								record.sourceObject.get() == candidate.sourceObject.get() &&
+								record.domain == candidate.domain &&
+								record.isHeadPartClosure == candidate.isHeadPartClosure &&
+								record.buildGroup != 0 &&
+								ResourceFile::ComparisonKey(record.physicsXmlPath) == pathKey &&
+								std::ranges::find(hiddenSourceGroups, record.buildGroup) == hiddenSourceGroups.end()) {
+								hiddenSourceGroups.push_back(record.buildGroup);
+							}
+						}
+						spdlog::debug(
+							"suppressed wholly hidden hair physics source actor={} object={} xml='{}'",
+							static_cast<void*>(a_event.actor),
+							static_cast<void*>(candidate.object),
+							a_path.string());
+					}
+					return hidden;
+				});
 			}
 			const auto removedCandidates = std::erase_if(candidates, [](const HeadPhysicsXmlBuildCandidate& a_candidate) {
-				return a_candidate.domain == BuildDomain::kHair;
+				return a_candidate.domain == BuildDomain::kHair && a_candidate.paths.empty();
 			});
-			spdlog::debug(
-				"suppressed hair headpart physics while preserving non-hair headparts actor={} faceNode={} removedRecords={} removedGroups={} removedCandidates={}",
-				static_cast<void*>(a_event.actor),
-				static_cast<void*>(faceNode),
-				removedHeadParts,
-				removedGroups.size(),
-				removedCandidates);
+			if (!hiddenSourceGroups.empty()) {
+				ClearBuildGroupsLocked(actorState, hiddenSourceGroups);
+			}
+			if (hiddenPaths != 0) {
+				spdlog::debug(
+					"filtered wholly hidden hair physics sources actor={} faceNode={} hiddenPaths={} clearedGroups={} emptyCandidates={}",
+					static_cast<void*>(a_event.actor),
+					static_cast<void*>(faceNode),
+					hiddenPaths,
+					hiddenSourceGroups.size(),
+					removedCandidates);
+			}
 		}
 
 		std::vector<std::uint64_t> staleClosureGroups;

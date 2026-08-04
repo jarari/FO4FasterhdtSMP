@@ -171,6 +171,13 @@ namespace Smp
 		bool isHeadPartClosure{ false };
 	};
 
+	struct HairSourceVisibilityState
+	{
+		std::string physicsXmlPath;
+		std::vector<RE::NiPointer<RE::NiAVObject>> sourceObjects;
+		bool entirelyHidden{ false };
+	};
+
 	struct BuildResult
 	{
 		std::uint64_t buildGroup{ 0 };

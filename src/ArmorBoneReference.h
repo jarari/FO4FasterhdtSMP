@@ -46,6 +46,7 @@ namespace Smp
 		std::uint32_t boneSlots{ 0 };
 		std::uint32_t reboundSlots{ 0 };
 		std::uint32_t unresolvedSlots{ 0 };
+		std::uint32_t unresolvedOldRootSlots{ 0 };
 		std::uint32_t unnamedSlots{ 0 };
 		std::uint32_t transformSizeMismatches{ 0 };
 		std::uint32_t boneSizeMismatches{ 0 };
@@ -63,7 +64,8 @@ namespace Smp
 	std::vector<RetainedSkinBinding> CaptureRetainedSkinBindings(RE::NiAVObject* a_retainedFace);
 	RetainedSkinRebindResult RebindRetainedSkinBindings(
 		RE::BSFlattenedBoneTree* a_root,
-		std::span<const RetainedSkinBinding> a_bindings);
+		std::span<const RetainedSkinBinding> a_bindings,
+		RE::NiAVObject* a_oldRoot = nullptr);
 	std::uint32_t MaterializeRetainedHeadPartBones(
 		RE::Actor* a_actor,
 		RE::BSFaceGenNiNode* a_retainedFace,

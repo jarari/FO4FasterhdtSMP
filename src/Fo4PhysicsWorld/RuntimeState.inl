@@ -261,12 +261,17 @@ namespace Smp
 				pending.requiredHeadBoneNames);
 			const auto preRebindResult = RebindRetainedSkinBindings(
 				root,
-				pending.retainedSkinBindings);
+				pending.retainedSkinBindings,
+				pending.oldRoot.get());
+			const auto unresolvedRequiredPhysicsBones = CountUnresolvedRequiredPhysicsBones(
+				root,
+				pending.requiredHeadBoneNames);
+			pending.physicsReady = unresolvedRequiredPhysicsBones == 0;
 			if (preRebindResult.unresolvedSlots > 0 ||
 				preRebindResult.boneSizeMismatches > 0 ||
 				preRebindResult.transformSizeMismatches > 0) {
 				spdlog::warn(
-					"prepared retained face with unresolved pre-vanilla bindings actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
+					"prepared retained face with unresolved pre-vanilla bindings actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} unresolvedRequiredPhysicsBones={} physicsReady={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unresolvedOldRootSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
 					static_cast<void*>(actor.get()),
 					static_cast<void*>(a_faceNode),
 					static_cast<void*>(root),
@@ -274,16 +279,19 @@ namespace Smp
 					createdBones,
 					pending.headBoneReferences.size(),
 					pending.requiredHeadBoneNames.size(),
+					unresolvedRequiredPhysicsBones,
+					pending.physicsReady,
 					preRebindResult.instances,
 					preRebindResult.boneSlots,
 					preRebindResult.reboundSlots,
 					preRebindResult.unresolvedSlots,
+					preRebindResult.unresolvedOldRootSlots,
 					preRebindResult.unnamedSlots,
 					preRebindResult.boneSizeMismatches,
 					preRebindResult.transformSizeMismatches);
 			} else {
 				spdlog::debug(
-					"prepared retained face for replacement skeleton actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} instances={} boneSlots={} reboundSlots={}",
+					"prepared retained face for replacement skeleton actor={} faceNode={} root={} skeleton={} createdBones={} recipes={} requiredBones={} unresolvedRequiredPhysicsBones={} physicsReady={} instances={} boneSlots={} reboundSlots={}",
 					static_cast<void*>(actor.get()),
 					static_cast<void*>(a_faceNode),
 					static_cast<void*>(root),
@@ -291,6 +299,8 @@ namespace Smp
 					createdBones,
 					pending.headBoneReferences.size(),
 					pending.requiredHeadBoneNames.size(),
+					unresolvedRequiredPhysicsBones,
+					pending.physicsReady,
 					preRebindResult.instances,
 					preRebindResult.boneSlots,
 					preRebindResult.reboundSlots);
@@ -336,24 +346,29 @@ namespace Smp
 
 			const auto rebindResult = RebindRetainedSkinBindings(
 				root,
-				pending.retainedSkinBindings);
+				pending.retainedSkinBindings,
+				pending.oldRoot.get());
 			pending.faceSkinned =
-				rebindResult.unresolvedSlots == 0 &&
+				rebindResult.unresolvedOldRootSlots == 0 &&
 				rebindResult.boneSizeMismatches == 0 &&
 				rebindResult.transformSizeMismatches == 0;
+			pending.physicsReady =
+				CountUnresolvedRequiredPhysicsBones(root, pending.requiredHeadBoneNames) == 0;
 			if (rebindResult.unresolvedSlots > 0 ||
 				rebindResult.boneSizeMismatches > 0 ||
 				rebindResult.transformSizeMismatches > 0) {
 				spdlog::warn(
-					"completed retained-face skinning with unresolved bindings actor={} faceNode={} root={} skeleton={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
+					"completed retained-face skinning with unresolved bindings actor={} faceNode={} root={} skeleton={} physicsReady={} instances={} boneSlots={} reboundSlots={} unresolvedSlots={} unresolvedOldRootSlots={} unnamedSlots={} boneSizeMismatches={} transformSizeMismatches={}",
 					static_cast<void*>(a_actor),
 					static_cast<void*>(a_faceNode),
 					static_cast<void*>(root),
 					static_cast<void*>(a_skeleton),
+					pending.physicsReady,
 					rebindResult.instances,
 					rebindResult.boneSlots,
 					rebindResult.reboundSlots,
 					rebindResult.unresolvedSlots,
+					rebindResult.unresolvedOldRootSlots,
 					rebindResult.unnamedSlots,
 					rebindResult.boneSizeMismatches,
 					rebindResult.transformSizeMismatches);
@@ -441,18 +456,74 @@ namespace Smp
 				it->faceSkinned = true;
 			}
 
-			const auto faceReady = !it->retainedFace || it->faceSkinned;
-			const auto faceTimedOut =
-				!faceReady &&
-				it->loadedFrameAge >= kRetainedFaceSkinningTimeoutFrames;
-			if (!faceReady) {
-				if (faceTimedOut && !it->armorRebuildQueued) {
-					MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
-					it->armorRebuildQueued = true;
-					ResetStepClockLocked();
+			const auto unresolvedRequiredPhysicsBones = CountUnresolvedRequiredPhysicsBones(
+				it->skeletonRoot.get(),
+				it->requiredHeadBoneNames);
+			it->physicsReady = unresolvedRequiredPhysicsBones == 0;
+			if (!it->physicsReady) {
+				if (it->loadedFrameAge >= kRetainedFaceSkinningTimeoutFrames && !it->physicsTimeoutLogged) {
+					it->physicsTimeoutLogged = true;
 					spdlog::warn(
-						"released armor rebuild after retained-face skinning timeout actor={} newRoot={} retainedFace={} loadedFrameAge={}; preserving the old skeleton until every retained skin slot is rebound",
+						"actor skeleton transition still lacks required physics bones actor={} newRoot={} loadedFrameAge={} unresolvedRequiredPhysicsBones={}; retaining old skeleton and waiting without clearing physics",
 						static_cast<void*>(actor.get()),
+						static_cast<void*>(it->newRoot.get()),
+						it->loadedFrameAge,
+						unresolvedRequiredPhysicsBones);
+				}
+				++it;
+				continue;
+			}
+
+			if (it->retainedFace && !it->faceSkinned && it->skeletonRoot) {
+				const auto retryResult = RebindRetainedSkinBindings(
+					it->skeletonRoot.get(),
+					it->retainedSkinBindings,
+					it->oldRoot.get());
+				it->faceSkinned =
+					retryResult.unresolvedOldRootSlots == 0 &&
+					retryResult.boneSizeMismatches == 0 &&
+					retryResult.transformSizeMismatches == 0;
+				if (it->faceSkinned) {
+					spdlog::debug(
+						"retained face no longer depends on old skeleton actor={} oldRoot={} newRoot={} unresolvedSlots={} unresolvedOldRootSlots={}",
+						static_cast<void*>(actor.get()),
+						static_cast<void*>(it->oldRoot.get()),
+						static_cast<void*>(it->newRoot.get()),
+						retryResult.unresolvedSlots,
+						retryResult.unresolvedOldRootSlots);
+				}
+			}
+
+			// Physics readiness is independent from complete retained-face migration.
+			// Rebuild against the current skeleton as soon as every physics-required
+			// bone exists, while retaining oldRoot for any remaining live skin slots.
+			if (!it->rebuildsQueued) {
+				MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
+				MarkPendingHeadRebuildLocked(LifecycleEvent{
+					.type = LifecycleEventType::kActorHeadInitialized,
+					.actor = actor.get(),
+					.object = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()),
+					.firstPerson = false,
+				});
+				it->rebuildsQueued = true;
+				ResetStepClockLocked();
+				spdlog::debug(
+					"released actor physics rebuild after replacement skeleton became physics-ready actor={} oldRoot={} newRoot={} requiredPhysicsBones={} faceSkinned={} headReloadQueued=true",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(it->oldRoot.get()),
+					static_cast<void*>(it->newRoot.get()),
+					it->requiredHeadBoneNames.size(),
+					it->faceSkinned);
+			}
+
+			const auto faceReady = !it->retainedFace || it->faceSkinned;
+			if (!faceReady) {
+				if (it->loadedFrameAge >= kRetainedFaceSkinningTimeoutFrames && !it->faceTimeoutLogged) {
+					it->faceTimeoutLogged = true;
+					spdlog::warn(
+						"retained face still references old skeleton after migration timeout actor={} oldRoot={} newRoot={} retainedFace={} loadedFrameAge={}; physics remains active and old skeleton stays retained",
+						static_cast<void*>(actor.get()),
+						static_cast<void*>(it->oldRoot.get()),
 						static_cast<void*>(it->newRoot.get()),
 						static_cast<void*>(it->retainedFace.get()),
 						it->loadedFrameAge);
@@ -461,25 +532,12 @@ namespace Smp
 				continue;
 			}
 
-			// Attachment events emitted while Load3D rebuilt the biped were drained
-			// before this point and merged into the pending rebuild. The live rescan
-			// is the final safety net for engine attach paths that emit no event.
-			if (!it->armorRebuildQueued) {
-				MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
-			}
-			MarkPendingHeadRebuildLocked(LifecycleEvent{
-				.type = LifecycleEventType::kActorHeadInitialized,
-				.actor = actor.get(),
-				.object = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()),
-				.firstPerson = false,
-			});
-			ResetStepClockLocked();
 			spdlog::debug(
-				"completed actor skeleton transition actor={} oldRoot={} newRoot={} forceArmorRescan={} headReloadQueued=true",
+				"completed actor skeleton transition actor={} oldRoot={} newRoot={} physicsReady=true faceReleased=true rebuildsQueued={}",
 				static_cast<void*>(actor.get()),
 				static_cast<void*>(it->oldRoot.get()),
 				static_cast<void*>(it->newRoot.get()),
-				!it->armorRebuildQueued);
+				it->rebuildsQueued);
 			it = pendingSkeletonTransitions_.erase(it);
 		}
 	}
@@ -1348,21 +1406,6 @@ namespace Smp
 		return matchedRecords;
 	}
 
-	bool Fo4PhysicsWorld::HasActiveHairSlotArmorLocked(const Fo4SkinnedMeshSystem& a_state) const
-	{
-		if (std::ranges::any_of(a_state.armorRecords, [&](const ArmorPhysicsRecord& a_record) {
-				return IsHairBipedObject(a_record.bipedObject) &&
-					std::ranges::any_of(a_record.buildGroups, [&](const std::uint64_t a_buildGroup) {
-						return BuildGroupHasBodyLocked(a_state, a_buildGroup) || BuildGroupHasMeshLocked(a_state, a_buildGroup);
-					});
-			})) {
-			return true;
-		}
-		return std::ranges::any_of(a_state.buildGroups, [](const BuildGroupRecord& a_runtime) {
-			return a_runtime.domain == BuildDomain::kArmor && IsHairBipedObject(a_runtime.bipedObject);
-		});
-	}
-
 	bool Fo4PhysicsWorld::BuildGroupsIncludeHairSlotArmorLocked(
 		const Fo4SkinnedMeshSystem& a_state,
 		const std::span<const std::uint64_t> a_buildGroups) const
@@ -1781,6 +1824,7 @@ namespace Smp
 		systems_.clear();
 		suspendedActors_.clear();
 		retainedHeadSkeletonCaches_.clear();
+		actorHairVisibilityStates_.clear();
 	}
 
 	void Fo4PhysicsWorld::NoteSaveLoadActorLocked(const LifecycleEvent& a_event)

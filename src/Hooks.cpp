@@ -124,6 +124,7 @@ namespace Hooks
 		RE::NiPointer<RE::NiNode> mainRoot;
 		std::string nifPath;
 		bool usesMainModel{ false };
+		bool isExtraPart{ false };
 	};
 	thread_local IncrementalHeadPartContext PendingIncrementalHeadPart;
 	std::mutex FaceGenActorLock;
@@ -196,14 +197,14 @@ namespace Hooks
 	{
 		PreAttachPhysicsContext context;
 		context.selectedXml = FindPhysicsXmlExtraData(a_sourceObject);
-		if (context.selectedXml || a_usesFaceBonesModel) {
+		if (context.selectedXml) {
 			context.armorBoneReferences = Smp::CaptureArmorBoneReferences(
 				a_sourceObject,
 				a_skeletonRoot,
 				a_nifPath,
-				context.selectedXml.has_value());
+				true);
 		}
-		if (a_usesFaceBonesModel) {
+		if (context.selectedXml && a_usesFaceBonesModel) {
 			context.mainSkinBindings = Smp::CaptureMainSkinBindings(a_sourceObject);
 		}
 		spdlog::debug(
@@ -495,9 +496,15 @@ namespace Hooks
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
+		auto* actor = ResolveActor(a_biped);
+		auto* ownershipRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
+		if (!ownershipRoot && actor) {
+			ownershipRoot = actor->Get3D();
+		}
 		auto preAttach = PreparePreAttachPhysicsContext(
 			originalModelObject,
-			a_biped ? static_cast<RE::NiAVObject*>(a_biped->GetRoot()) : nullptr,
+			ownershipRoot ? ownershipRoot :
+				(a_biped ? static_cast<RE::NiAVObject*>(a_biped->GetRoot()) : nullptr),
 			nifPath,
 			"original model root",
 			UsesFaceBonesModel(bipObject));
@@ -508,7 +515,6 @@ namespace Hooks
 			ScopedApplySkinnedObjectsDepth scopedDepth;
 			attachedObject = OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
 		}
-		auto* actor = ResolveActor(a_biped);
 		Smp::FinalizeArmorSkinBindings(
 			actor,
 			attachedObject,
@@ -549,11 +555,16 @@ namespace Hooks
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* modelObject = a_modelRoot ? static_cast<RE::NiAVObject*>(a_modelRoot) : nullptr;
+		auto* actor = ResolveActor(a_biped);
+		auto* ownershipRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
+		if (!ownershipRoot && actor) {
+			ownershipRoot = actor->Get3D();
+		}
 		PreAttachPhysicsContext preAttach;
 		if (!nestedApply) {
 			preAttach = PreparePreAttachPhysicsContext(
 				modelObject,
-				a_skeletonRoot,
+				ownershipRoot ? ownershipRoot : static_cast<RE::NiAVObject*>(a_skeletonRoot),
 				nifPath,
 				"model root",
 				UsesFaceBonesModel(bipObject));
@@ -564,7 +575,6 @@ namespace Hooks
 			ApplySkinnedObjectsSkeletonRoot = a_skeletonRoot;
 			return attachedObject;
 		}
-		auto* actor = ResolveActor(a_biped);
 		Smp::FinalizeArmorSkinBindings(
 			actor,
 			attachedObject,
@@ -764,8 +774,14 @@ namespace Hooks
 		}
 	}
 
-	void PrepareMissingFaceBones(RE::NiNode* a_mainRoot, RE::NiNode* a_faceBonesRoot)
+	void PrepareMissingFaceBones(
+		RE::NiNode* a_mainRoot,
+		RE::NiNode* a_faceBonesRoot,
+		const bool a_allowWithoutXml)
 	{
+		if (!a_allowWithoutXml && !FindPhysicsXmlExtraData(a_mainRoot)) {
+			return;
+		}
 		Smp::MaterializeMissingFaceBonesForBake(a_mainRoot, a_faceBonesRoot);
 	}
 
@@ -791,7 +807,7 @@ namespace Hooks
 		RE::NiNode* a_faceBonesRoot,
 		void* a_extraData)
 	{
-		PrepareMissingFaceBones(a_mainRoot, a_faceBonesRoot);
+		PrepareMissingFaceBones(a_mainRoot, a_faceBonesRoot, false);
 		OriginalArmorBakeChargenMorphs(a_npc, a_mainRoot, a_faceBonesRoot, a_extraData);
 	}
 
@@ -801,7 +817,10 @@ namespace Hooks
 		RE::NiNode* a_faceBonesRoot,
 		void* a_extraData)
 	{
-		PrepareMissingFaceBones(a_mainRoot, a_faceBonesRoot);
+		PrepareMissingFaceBones(
+			a_mainRoot,
+			a_faceBonesRoot,
+			PendingIncrementalHeadPart.isExtraPart);
 		OriginalHeadBakeChargenMorphs(a_npc, a_mainRoot, a_faceBonesRoot, a_extraData);
 	}
 
@@ -827,13 +846,19 @@ namespace Hooks
 			RE::NiPointer<RE::NiNode> mainRoot;
 			const auto error = RE::BSModelDB::Demand(modelPath, std::addressof(mainRoot), args);
 			if (error == RE::BSResource::ErrorCode::kNone && mainRoot) {
-				forceMainModel = a_useChargenModel && hasFaceBonesModel;
-				PendingIncrementalHeadPart = {
-					.faceNode = a_faceNode,
-					.mainRoot = std::move(mainRoot),
-					.nifPath = modelPath,
-					.usesMainModel = forceMainModel || !a_useChargenModel,
-				};
+				const auto physicsXml = FindPhysicsXmlExtraData(mainRoot.get());
+				const auto isExtraPart = a_headPart->IsExtraPart();
+				const auto contributesToPhysicsClosure = physicsXml.has_value() || isExtraPart;
+				forceMainModel = contributesToPhysicsClosure && a_useChargenModel && hasFaceBonesModel;
+				if (contributesToPhysicsClosure) {
+					PendingIncrementalHeadPart = {
+						.faceNode = a_faceNode,
+						.mainRoot = std::move(mainRoot),
+						.nifPath = modelPath,
+						.usesMainModel = forceMainModel || !a_useChargenModel,
+						.isExtraPart = isExtraPart,
+					};
+				}
 				if (forceMainModel) {
 					spdlog::debug(
 						"using main NIF as authoritative incremental headpart geometry headPart={:08X} main='{}' faceBones='{}'",
