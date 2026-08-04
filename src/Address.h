@@ -60,6 +60,10 @@ namespace Smp::Address
 	extern REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu;
 
 	extern const IDOffset MainOnIdleSwapCall;
+	extern const IDOffset MainSwapUpdatePendingCustomizationTexturesCall;
+	extern const IDOffset BipedAnimAttachSkinnedObjectBakeChargenMorphsCall;
+	extern const IDOffset BSFaceGenPendingHeadAttachBakeChargenMorphsCall;
+	extern const IDOffset BSFaceGenAddHeadPartOnActorPrepareHeadPartCall;
 	extern const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall;
 
 	extern const VariantOffset BipedAnimApplySkinnedObjectsPrologueSize;

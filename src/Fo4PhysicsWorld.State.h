@@ -72,11 +72,14 @@
 		std::vector<SuspendedActorCandidate> suspendedActors_;
 		std::vector<PendingActorRebuild> pendingActorRebuilds_;
 		std::vector<PendingHeadRebuild> pendingHeadRebuilds_;
+		std::vector<FaceGenRebuildGuard> faceGenRebuildGuards_;
 		std::vector<PendingSkeletonTransition> pendingSkeletonTransitions_;
 		std::vector<RetainedHeadSkeletonCache> retainedHeadSkeletonCaches_;
 		std::vector<SaveLoadActorCandidate> saveLoadActors_;
 		std::uint32_t characterCustomizationMenuDepth_{ 0 };
 		RE::ActorHandle characterCustomizationTarget_;
+		std::uint64_t faceGenManagerObservation_{ 0 };
+		bool faceGenManagerIdle_{ false };
 		std::uint32_t loadingMenuDepth_{ 0 };
 		bool loadingPhysicsSuspended_{ false };
 		bool saveLoadInProgress_{ false };

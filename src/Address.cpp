@@ -22,6 +22,22 @@ namespace Smp::Address
 		REL::ID{ 633524, 2228917 },
 		VariantOffset{ 0x6EC, 0xCDC }
 	};
+	const IDOffset MainSwapUpdatePendingCustomizationTexturesCall{
+		REL::ID{ 1075087, 2228913 },
+		VariantOffset{ 0x60, 0x62 }
+	};
+	const IDOffset BipedAnimAttachSkinnedObjectBakeChargenMorphsCall{
+		REL::ID{ 1575810, 2194388 },
+		VariantOffset{ 0x156, 0x156 }
+	};
+	const IDOffset BSFaceGenPendingHeadAttachBakeChargenMorphsCall{
+		REL::ID{ 389929, 2209322 },
+		VariantOffset{ 0x2DC, 0x301 }
+	};
+	const IDOffset BSFaceGenAddHeadPartOnActorPrepareHeadPartCall{
+		REL::ID{ 913780, 2209545 },
+		VariantOffset{ 0x71, 0x79 }
+	};
 	const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall{
 		REL::ID{ 913780, 2209545 },
 		VariantOffset{ 0xFD, 0x107 }

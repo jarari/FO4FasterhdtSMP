@@ -55,6 +55,7 @@ namespace Smp
 		suspendedActors_.clear();
 		pendingActorRebuilds_.clear();
 		pendingHeadRebuilds_.clear();
+		faceGenRebuildGuards_.clear();
 		pendingSkeletonTransitions_.clear();
 		retainedHeadSkeletonCaches_.clear();
 		saveLoadActors_.clear();
@@ -90,6 +91,8 @@ namespace Smp
 		windTime_ = 0.0F;
 		windWeatherCooldown_ = 0.0F;
 		characterCustomizationMenuDepth_ = 0;
+		faceGenManagerObservation_ = 0;
+		faceGenManagerIdle_ = false;
 		ClearCharacterCustomizationTargetLocked();
 	}
 

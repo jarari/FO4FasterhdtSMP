@@ -82,6 +82,7 @@ namespace Smp
 		void ProcessPendingRebuilds();
 		void DrawBulletVisualization();
 		void NoteCharacterCustomizationTarget(RE::Actor* a_actor);
+		void NoteFaceGenManagerUpdated(bool a_idle);
 		bool BeginActorSkeletonTransition(RE::Actor* a_actor, RE::NiAVObject* a_oldRoot, RE::BSFaceGenNiNode* a_retainedFace);
 		void NoteActorSkeletonLoaded(RE::Actor* a_actor, RE::NiAVObject* a_newRoot);
 		RE::Actor* PrepareRetainedFaceForSkeleton(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton);

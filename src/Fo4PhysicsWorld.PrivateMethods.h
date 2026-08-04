@@ -43,6 +43,10 @@
 		RE::Actor* ResolveCharacterCustomizationTargetLocked();
 		bool IsCharacterCustomizationTargetLocked(RE::Actor* a_actor);
 		bool ShouldDeferCharacterCustomizationPhysicsLocked(const LifecycleEvent& a_event);
+		FaceGenRebuildGuard* FindFaceGenRebuildGuardLocked(RE::Actor* a_actor);
+		void ObserveGuardedHeadEventLocked(const LifecycleEvent& a_event);
+		void AdvanceFaceGenRebuildGuardsLocked();
+		bool IsActorFaceGenLoadPendingLocked(RE::Actor* a_actor) const;
 		void SuspendCharacterCustomizationTargetLocked();
 		void ReloadCharacterCustomizationTargetLocked();
 		void ClearCharacterCustomizationTargetLocked();

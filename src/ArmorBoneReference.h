@@ -54,7 +54,12 @@ namespace Smp
 	std::vector<ArmorBoneReference> CaptureArmorBoneReferences(
 		RE::NiAVObject* a_modelRoot,
 		RE::NiAVObject* a_skeletonRoot,
-		std::string_view a_nifPath);
+		std::string_view a_nifPath,
+		bool a_includeAllNamedNodes = true);
+	std::uint32_t MaterializeMissingFaceBonesForBake(
+		RE::NiNode* a_mainRoot,
+		RE::NiNode* a_faceBonesRoot);
+	std::vector<RetainedSkinBinding> CaptureMainSkinBindings(RE::NiAVObject* a_mainRoot);
 	std::vector<RetainedSkinBinding> CaptureRetainedSkinBindings(RE::NiAVObject* a_retainedFace);
 	RetainedSkinRebindResult RebindRetainedSkinBindings(
 		RE::BSFlattenedBoneTree* a_root,
@@ -72,5 +77,6 @@ namespace Smp
 		bool a_firstPerson,
 		std::vector<ArmorBoneReference>& a_references,
 		std::span<const RE::NiPointer<RE::NiAVObject>> a_additionalAttachedObjects = {},
-		bool a_moveBoundBonesToSkeleton = true);
+		bool a_moveBoundBonesToSkeleton = true,
+		std::span<const RetainedSkinBinding> a_sourceSkinBindings = {});
 }

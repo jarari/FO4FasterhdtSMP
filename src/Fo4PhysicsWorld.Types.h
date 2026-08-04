@@ -26,6 +26,14 @@
 			std::uint32_t cpuCopyRetryCount{ 0 };
 		};
 
+		struct FaceGenRebuildGuard
+		{
+			RE::ActorHandle actorHandle;
+			RE::NiPointer<RE::NiAVObject> latestFaceNode;
+			std::uint64_t lastManagerObservation{ 0 };
+			std::uint32_t stableIdleObservations{ 0 };
+		};
+
 		struct SaveLoadArmorRecord
 		{
 			RE::BipedAnim* bipedIdentity{ nullptr };
