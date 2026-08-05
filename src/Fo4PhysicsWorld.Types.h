@@ -58,6 +58,7 @@
 			RE::NiPointer<RE::NiAVObject> retainedFace;
 			RE::NiPointer<RE::NiAVObject> newRoot;
 			RE::NiPointer<RE::BSFlattenedBoneTree> skeletonRoot;
+			std::vector<ArmorPhysicsRecord> armorRecords;
 			std::vector<ArmorBoneReference> headBoneReferences;
 			std::vector<std::string> requiredHeadBoneNames;
 			std::vector<RetainedSkinBinding> retainedSkinBindings;

@@ -3,13 +3,13 @@
 #include "Address.h"
 #include "ArmorBoneReference.h"
 #include "Fo4PhysicsWorld.h"
+#include "HeadPartModelSourceCache.h"
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsXmlSelection.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSGeometry.h"
-#include "RE/B/BSModelDB.h"
 #include "RE/H/hkArray.h"
 #include "RE/H/hkReferencedObject.h"
 #include "RE/H/hkRefPtr.h"
@@ -20,7 +20,6 @@
 #include "RE/T/TESObjectREFR.h"
 #include "RE/T/TESNPC.h"
 
-#include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <initializer_list>
@@ -48,6 +47,7 @@ namespace Hooks
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
 	using FaceGenPrepareHeadPart_t = void (*)(RE::BSFaceGenNiNode*, RE::BGSHeadPart*, RE::TESNPC*, bool, bool);
+	using FaceGenApplyMorphToNewMesh_t = void (*)(void*, RE::BSFixedString*, void*, RE::NiPointer<RE::NiAVObject>*, float);
 	using BakeChargenMorphs_t = void (*)(RE::TESNPC*, RE::NiNode*, RE::NiNode*, void*);
 	using SetFaceGenBoneName_t = void (*)(void*, std::uint32_t, RE::BSFixedString*);
 	using LooksMenuUtilsShowLooksMenu_t = void (*)(RE::TESObjectREFR*, std::uint32_t, RE::TESObjectREFR*, RE::TESObjectREFR*, RE::TESObjectREFR*);
@@ -70,6 +70,7 @@ namespace Hooks
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
 	FaceGenPrepareHeadPart_t       OriginalFaceGenPrepareHeadPart{ nullptr };
+	FaceGenApplyMorphToNewMesh_t   OriginalFaceGenApplyMorphToNewMesh{ nullptr };
 	BakeChargenMorphs_t            OriginalArmorBakeChargenMorphs{ nullptr };
 	BakeChargenMorphs_t            OriginalHeadBakeChargenMorphs{ nullptr };
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
@@ -174,6 +175,23 @@ namespace Hooks
 			return std::nullopt;
 		}
 		return path->string();
+	}
+
+	std::optional<std::string> FindPhysicsXmlInTree(RE::NiAVObject* a_object)
+	{
+		if (auto path = FindPhysicsXmlExtraData(a_object)) {
+			return path;
+		}
+		auto* node = a_object ? a_object->IsNode() : nullptr;
+		if (!node) {
+			return std::nullopt;
+		}
+		for (auto& child : node->children) {
+			if (auto path = FindPhysicsXmlInTree(child.get())) {
+				return path;
+			}
+		}
+		return std::nullopt;
 	}
 
 	struct PreAttachPhysicsContext
@@ -384,7 +402,8 @@ namespace Hooks
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject BakeChargenMorphs callsite", Address::BipedAnimAttachSkinnedObjectBakeChargenMorphsCall.address());
 		LogRelocationTarget("BSFaceGenPendingHeadData::Attach BakeChargenMorphs callsite", Address::BSFaceGenPendingHeadAttachBakeChargenMorphsCall.address());
-		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor PrepareHeadPart callsite", Address::BSFaceGenAddHeadPartOnActorPrepareHeadPartCall.address());
+		LogRelocationTarget("BSFaceGenUtils::PrepareHeadPart", Address::BSFaceGenPrepareHeadPart.address());
+		LogRelocationTarget("BSFaceGenUtils::PrepareHeadPart ApplyMorphToNewMesh callsite", Address::BSFaceGenPrepareHeadPartApplyMorphCall.address());
 		LogRelocationTarget("BSFaceGenModelExtraData::SetBoneName", Address::BSFaceGenModelExtraDataSetBoneName.address());
 		LogRelocationTarget("LooksMenuUtils::ShowLooksMenu", Address::LooksMenuUtilsShowLooksMenu.address());
 	}
@@ -835,20 +854,55 @@ namespace Hooks
 		Smp::MaterializeMissingFaceBonesForBake(a_mainRoot, a_faceBonesRoot);
 	}
 
-	bool IsFaceBonesNifPath(const std::string_view a_path)
+	RE::NiNode* GetLoadedFaceGenModelRoot(void* a_model)
 	{
-		constexpr std::string_view suffix{ "_facebones.nif" };
-		if (a_path.size() < suffix.size()) {
-			return false;
+		if (!a_model) {
+			return nullptr;
 		}
-		return std::ranges::equal(
-			a_path.end() - static_cast<std::ptrdiff_t>(suffix.size()),
-			a_path.end(),
-			suffix.begin(),
-			suffix.end(),
-			[](const char a_lhs, const char a_rhs) {
-				return std::tolower(static_cast<unsigned char>(a_lhs)) == a_rhs;
-			});
+
+		// Verified in OG BSFaceGenModel::ApplyMorphToNewMesh and AE's matching
+		// implementation: model+0x10 owns the loaded-model record and +0x08 is
+		// its NiNode root.
+		const auto loadedModel = ReadFaceGenField<std::uintptr_t>(a_model, 0x10);
+		return loadedModel ?
+			reinterpret_cast<RE::NiNode*>(ReadFaceGenField<std::uintptr_t>(reinterpret_cast<void*>(loadedModel), 0x08)) :
+			nullptr;
+	}
+
+	void HookedFaceGenApplyMorphToNewMesh(
+		void* a_model,
+		RE::BSFixedString* a_morphName,
+		void* a_morphData,
+		RE::NiPointer<RE::NiAVObject>* a_result,
+		const float a_relativeScale)
+	{
+		OriginalFaceGenApplyMorphToNewMesh(a_model, a_morphName, a_morphData, a_result, a_relativeScale);
+
+		auto& context = PendingIncrementalHeadPart;
+		if (!context.usesMainModel || context.mainRoot || context.nifPath.empty()) {
+			return;
+		}
+
+		auto* loadedRoot = GetLoadedFaceGenModelRoot(a_model);
+		const auto physicsXml = FindPhysicsXmlInTree(loadedRoot);
+		if (!loadedRoot || (!physicsXml && !context.isExtraPart)) {
+			return;
+		}
+
+		context.mainRoot = Smp::HeadPartModelSourceCache::Capture(context.nifPath, loadedRoot);
+		if (!context.mainRoot) {
+			spdlog::warn(
+				"failed to clone Fallout-loaded authoritative headpart source nif='{}'",
+				context.nifPath);
+			return;
+		}
+
+		spdlog::debug(
+			"cached Fallout-loaded authoritative headpart source nif='{}' xml='{}' extraPart={} source={}",
+			context.nifPath,
+			physicsXml.value_or(std::string{}),
+			context.isExtraPart,
+			static_cast<void*>(loadedRoot));
 	}
 
 	void HookedArmorBakeChargenMorphs(
@@ -885,53 +939,24 @@ namespace Hooks
 		const auto* modelPath = a_headPart ?
 			static_cast<RE::BGSModelMaterialSwap*>(a_headPart)->GetModel() :
 			nullptr;
-		const auto* chargenModelPath = a_headPart ? a_headPart->ChargenModel.GetModel() : nullptr;
-		const auto hasFaceBonesModel = IsFaceBonesNifPath(chargenModelPath ? chargenModelPath : "");
-		bool forceMainModel = false;
-		if (modelPath && *modelPath) {
-			RE::BSModelDB::DBTraits::ArgsType args{};
-			args.loadLevel = 3;
-			args.performProcess = true;
-			args.loadTextures = true;
-			RE::NiPointer<RE::NiNode> mainRoot;
-			const auto error = RE::BSModelDB::Demand(modelPath, std::addressof(mainRoot), args);
-			if (error == RE::BSResource::ErrorCode::kNone && mainRoot) {
-				const auto physicsXml = FindPhysicsXmlExtraData(mainRoot.get());
-				const auto isExtraPart = a_headPart->IsExtraPart();
-				const auto contributesToPhysicsClosure = physicsXml.has_value() || isExtraPart;
-				forceMainModel = contributesToPhysicsClosure && a_useChargenModel && hasFaceBonesModel;
-				if (contributesToPhysicsClosure) {
-					PendingIncrementalHeadPart = {
-						.faceNode = a_faceNode,
-						.mainRoot = std::move(mainRoot),
-						.nifPath = modelPath,
-						.usesMainModel = forceMainModel || !a_useChargenModel,
-						.isExtraPart = isExtraPart,
-					};
-				}
-				if (forceMainModel) {
-					spdlog::debug(
-						"using main NIF as authoritative incremental headpart geometry headPart={:08X} main='{}' faceBones='{}'",
-						a_headPart->GetFormID(),
-						modelPath,
-						chargenModelPath);
-				}
-			} else {
-				spdlog::warn(
-					"failed to preload authoritative main headpart model headPart={} nif='{}' error={}",
-					a_headPart ? a_headPart->GetFormID() : 0,
-					modelPath,
-					std::to_underlying(error));
-			}
+		// Fallout owns model selection and is the only code allowed to populate the
+		// FaceGen resource cache. For a live actor it selects the main model itself;
+		// the nested ApplyMorph hook observes that already-loaded root and privately
+		// clones it only if it contributes XML (or is an extraPart).
+		if (a_headPart && a_faceNode && !a_useChargenModel && modelPath && *modelPath) {
+			PendingIncrementalHeadPart = {
+				.faceNode = a_faceNode,
+				.nifPath = modelPath,
+				.usesMainModel = true,
+				.isExtraPart = a_headPart->IsExtraPart(),
+			};
 		}
 
-		// PrepareHeadPart always uses the chargen morph TRI in either branch. Passing
-		// false only selects the main model instead of ChargenModel for the geometry.
 		OriginalFaceGenPrepareHeadPart(
 			a_faceNode,
 			a_headPart,
 			a_npc,
-			forceMainModel ? false : a_useChargenModel,
+			a_useChargenModel,
 			a_arg5);
 	}
 
@@ -1192,11 +1217,18 @@ namespace Hooks
 				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedHeadBakeChargenMorphs)));
 			spdlog::info("pending-head BakeChargenMorphs call hook installed at {:x}", callsite);
 		}
+		if (!OriginalFaceGenApplyMorphToNewMesh) {
+			const auto callsite = Address::BSFaceGenPrepareHeadPartApplyMorphCall.address();
+			OriginalFaceGenApplyMorphToNewMesh = reinterpret_cast<FaceGenApplyMorphToNewMesh_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenApplyMorphToNewMesh)));
+			spdlog::info("BSFaceGenUtils::PrepareHeadPart ApplyMorphToNewMesh call hook installed at {:x}", callsite);
+		}
 		if (!OriginalFaceGenPrepareHeadPart) {
-			const auto callsite = Address::BSFaceGenAddHeadPartOnActorPrepareHeadPartCall.address();
-			OriginalFaceGenPrepareHeadPart = reinterpret_cast<FaceGenPrepareHeadPart_t>(
-				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenPrepareHeadPart)));
-			spdlog::info("BSFaceGenUtils::AddHeadPartOnActor prepare-headpart call hook installed at {:x}", callsite);
+			OriginalFaceGenPrepareHeadPart = CreateBranchGateway5<FaceGenPrepareHeadPart_t>(
+				"BSFaceGenUtils::PrepareHeadPart",
+				Address::BSFaceGenPrepareHeadPart,
+				Address::BSFaceGenPrepareHeadPartPrologueSize.value(),
+				reinterpret_cast<void*>(&HookedFaceGenPrepareHeadPart));
 		}
 		if (!OriginalFaceGenSkinSingleGeometry) {
 			const auto skinSingleCallsite = Address::BSFaceGenAddHeadPartOnActorSkinSingleCall.address();
@@ -1226,6 +1258,7 @@ namespace Hooks
 			OriginalSetFaceGenBoneName &&
 			OriginalArmorBakeChargenMorphs &&
 			OriginalHeadBakeChargenMorphs &&
+			OriginalFaceGenApplyMorphToNewMesh &&
 			OriginalFaceGenPrepareHeadPart &&
 			OriginalFaceGenSkinSingleGeometry;
 

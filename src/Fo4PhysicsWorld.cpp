@@ -9,6 +9,7 @@
 #include "Fo4NiObjectUtils.h"
 #include "Fo4SkinnedMeshBone.h"
 #include "Fo4TransformConversion.h"
+#include "HeadPartModelSourceCache.h"
 #include "BulletVisualization.h"
 #include "PhysicsName.h"
 #include "PhysicsXml.h"
@@ -28,7 +29,6 @@
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/bhkPickData.h"
 #include "RE/B/BSFlattenedBoneTree.h"
-#include "RE/B/BSModelDB.h"
 #include "RE/B/BSTimer.h"
 #include "RE/A/AIProcess.h"
 #include "RE/C/CFilter.h"
@@ -1325,55 +1325,9 @@ namespace
 
 		const auto* modelPath = GetHeadPartModelPath(a_headPart);
 		if (modelPath && *modelPath) {
-			// BSModelDB caches by the prepared resource ID. Load the complete model
-			// before requesting FaceGen processing so an uncached extra-part NIF
-			// does not enter the cache as a stripped FaceGen source.
-			RE::BSModelDB::DBTraits::ArgsType meshArgs{};
-			meshArgs.loadLevel = 3;
-			meshArgs.performProcess = true;
-			meshArgs.loadTextures = true;
-			RE::NiPointer<RE::NiNode> meshSourceRoot;
-			const auto meshError = RE::BSModelDB::Demand(modelPath, std::addressof(meshSourceRoot), meshArgs);
-			if (meshError != RE::BSResource::ErrorCode::kNone || !meshSourceRoot) {
-				spdlog::warn(
-					"failed to load current headpart mesh source actor={} headPart={:08X} nif='{}' error={}",
-					static_cast<void*>(a_actor),
-					a_headPart->GetFormID(),
-					modelPath,
-					std::to_underlying(meshError));
-			}
-
-			auto faceGenArgs = meshArgs;
-			faceGenArgs.faceGenModel = true;
-			RE::NiPointer<RE::NiNode> sourceRoot;
-			const auto faceGenError = RE::BSModelDB::Demand(modelPath, std::addressof(sourceRoot), faceGenArgs);
-			if (faceGenError != RE::BSResource::ErrorCode::kNone || !sourceRoot) {
-				if (meshSourceRoot) {
-					spdlog::warn(
-						"failed to load current headpart FaceGen source actor={} headPart={:08X} nif='{}' error={}; using complete model source",
-						static_cast<void*>(a_actor),
-						a_headPart->GetFormID(),
-						modelPath,
-						std::to_underlying(faceGenError));
-					sourceRoot = meshSourceRoot;
-				} else {
-					spdlog::warn(
-						"failed to load current headpart model actor={} headPart={:08X} nif='{}' error={}",
-						static_cast<void*>(a_actor),
-						a_headPart->GetFormID(),
-						modelPath,
-						std::to_underlying(faceGenError));
-				}
-			}
-			if (!meshSourceRoot) {
-				meshSourceRoot = sourceRoot;
-			}
-
+			auto meshSourceRoot = Smp::HeadPartModelSourceCache::Find(modelPath);
 			if (meshSourceRoot) {
 				auto selection = FindHeadPartSourceSelection(meshSourceRoot.get());
-				if (!selection && sourceRoot && sourceRoot.get() != meshSourceRoot.get()) {
-					selection = FindHeadPartSourceSelection(sourceRoot.get());
-				}
 				auto* sourceGeometry = selection && selection->geometry ?
 					selection->geometry :
 					FindFirstGeometry(meshSourceRoot.get());
@@ -1440,6 +1394,12 @@ namespace
 						static_cast<void*>(liveGeometry),
 						liveGeometryName);
 				}
+			} else if (a_headPart->IsExtraPart()) {
+				spdlog::debug(
+					"deferred extraPart head physics source because Fallout has not exposed its loaded NIF yet actor={} headPart={:08X} nif='{}'",
+					static_cast<void*>(a_actor),
+					a_headPart->GetFormID(),
+					modelPath);
 			}
 		}
 

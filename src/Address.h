@@ -57,6 +57,7 @@ namespace Smp::Address
 	extern REL::Relocation<std::uintptr_t> TESObjectREFRFixDisplayedHeadParts;
 	extern REL::Relocation<std::uintptr_t> Reset3D;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor;
+	extern REL::Relocation<std::uintptr_t> BSFaceGenPrepareHeadPart;
 	extern REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName;
 	extern REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu;
 
@@ -65,8 +66,8 @@ namespace Smp::Address
 	extern const IDOffset TESNPCReplaceRefModelLoadBipedPartsCall;
 	extern const IDOffset BipedAnimAttachSkinnedObjectBakeChargenMorphsCall;
 	extern const IDOffset BSFaceGenPendingHeadAttachBakeChargenMorphsCall;
-	extern const IDOffset BSFaceGenAddHeadPartOnActorPrepareHeadPartCall;
 	extern const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall;
+	extern const IDOffset BSFaceGenPrepareHeadPartApplyMorphCall;
 
 	extern const VariantOffset BipedAnimApplySkinnedObjectsPrologueSize;
 	extern const VariantOffset BipedAnimAttachSkinnedObjectPrologueSize;
@@ -75,6 +76,7 @@ namespace Smp::Address
 	extern const VariantOffset TESObjectREFRFixDisplayedHeadPartsPrologueSize;
 	extern const VariantOffset Reset3DPrologueSize;
 	extern const VariantOffset BSFaceGenModelExtraDataSetBoneNamePrologueSize;
+	extern const VariantOffset BSFaceGenPrepareHeadPartPrologueSize;
 	extern const VariantOffset LooksMenuUtilsShowLooksMenuPrologueSize;
 
 	extern const std::size_t ActorLoad3DVFuncSlot;

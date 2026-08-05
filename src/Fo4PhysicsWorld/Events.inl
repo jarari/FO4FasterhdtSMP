@@ -67,9 +67,7 @@ namespace Smp
 					static_cast<void*>(a_event.object));
 				return RE::BSEventNotifyControl::kContinue;
 			}
-			if (ShouldDeferCharacterCustomizationPhysicsLocked(a_event)) {
-				return RE::BSEventNotifyControl::kContinue;
-			}
+			const auto deferredForCustomization = ShouldDeferCharacterCustomizationPhysicsLocked(a_event);
 
 			auto* liveBiped = a_event.actor->GetBiped(a_event.firstPerson).get();
 			if (a_event.biped && a_event.biped != liveBiped) {
@@ -110,6 +108,47 @@ namespace Smp
 					static_cast<void*>(liveBiped),
 					std::to_underlying(bipedObject),
 					static_cast<void*>(liveObject));
+				return RE::BSEventNotifyControl::kContinue;
+			}
+
+			if (auto* transition = FindPendingSkeletonTransitionLocked(a_event.actor)) {
+				const auto before = transition->armorRecords.size();
+				if (bipedObject != RE::BIPED_OBJECT::kTotal) {
+					const auto detachedSlotIsEmpty =
+						a_event.type == LifecycleEventType::kArmorDetachEnd && !liveObject;
+					std::erase_if(
+						transition->armorRecords,
+						[&](const ArmorPhysicsRecord& a_record) {
+							if (a_record.bipedObject != bipedObject) {
+								return false;
+							}
+							if (detachedSlotIsEmpty) {
+								return true;
+							}
+							if (!a_event.object) {
+								return false;
+							}
+							const auto matchesObject = [](RE::NiAVObject* a_recordObject, RE::NiAVObject* a_eventObject) {
+								return a_recordObject &&
+									(a_recordObject == a_eventObject ||
+									 IsObjectInTree(a_recordObject, a_eventObject) ||
+									 IsObjectInTree(a_eventObject, a_recordObject));
+							};
+							return matchesObject(a_record.attachedObject.get(), a_event.object) ||
+								matchesObject(a_record.sourceObject.get(), a_event.object);
+						});
+				}
+				ResetStepClockLocked();
+				spdlog::debug(
+					"deferred armor detach {} until actor skeleton transition completion actor={} bipedObject={} removedArmorRecords={} retainedArmorRecords={}",
+					ToString(a_event.type),
+					static_cast<void*>(a_event.actor),
+					std::to_underlying(bipedObject),
+					before - transition->armorRecords.size(),
+					transition->armorRecords.size());
+				return RE::BSEventNotifyControl::kContinue;
+			}
+			if (deferredForCustomization) {
 				return RE::BSEventNotifyControl::kContinue;
 			}
 

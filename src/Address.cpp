@@ -16,6 +16,7 @@ namespace Smp::Address
 	REL::Relocation<std::uintptr_t> TESObjectREFRFixDisplayedHeadParts{ REL::ID{ 789414, 2200988 } };
 	REL::Relocation<std::uintptr_t> Reset3D{ REL::ID{ 302888, 2229913 } };
 	REL::Relocation<std::uintptr_t> BSFaceGenAddHeadPartOnActor{ REL::ID{ 913780, 2209545 } };
+	REL::Relocation<std::uintptr_t> BSFaceGenPrepareHeadPart{ REL::ID{ 840416, 2209534 } };
 	REL::Relocation<std::uintptr_t> BSFaceGenModelExtraDataSetBoneName{ REL::ID{ 1278503, 2209387 } };
 	REL::Relocation<std::uintptr_t> LooksMenuUtilsShowLooksMenu{ REL::ID{ 411372, 2223366 } };
 
@@ -41,13 +42,13 @@ namespace Smp::Address
 		REL::ID{ 389929, 2209322 },
 		VariantOffset{ 0x2DC, 0x301 }
 	};
-	const IDOffset BSFaceGenAddHeadPartOnActorPrepareHeadPartCall{
-		REL::ID{ 913780, 2209545 },
-		VariantOffset{ 0x71, 0x79 }
-	};
 	const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall{
 		REL::ID{ 913780, 2209545 },
 		VariantOffset{ 0xFD, 0x107 }
+	};
+	const IDOffset BSFaceGenPrepareHeadPartApplyMorphCall{
+		REL::ID{ 840416, 2209534 },
+		VariantOffset{ 0x219, 0x21A }
 	};
 
 	// Each value ends on an instruction boundary in the corresponding runtime.
@@ -58,6 +59,7 @@ namespace Smp::Address
 	const VariantOffset TESObjectREFRFixDisplayedHeadPartsPrologueSize{ 5, 6 };
 	const VariantOffset Reset3DPrologueSize{ 5, 5 };
 	const VariantOffset BSFaceGenModelExtraDataSetBoneNamePrologueSize{ 5, 5 };
+	const VariantOffset BSFaceGenPrepareHeadPartPrologueSize{ 5, 5 };
 	const VariantOffset LooksMenuUtilsShowLooksMenuPrologueSize{ 5, 5 };
 
 	const std::size_t ActorLoad3DVFuncSlot = 0x86;

@@ -49,6 +49,7 @@ namespace Smp
 			return false;
 		}
 
+		std::vector<ArmorPhysicsRecord> armorRecords;
 		std::vector<ArmorBoneReference> headBoneReferences;
 		std::vector<std::string> requiredHeadBoneNames;
 		RE::NiPointer<RE::NiAVObject> retainedFace{ reinterpret_cast<RE::NiAVObject*>(a_retainedFace) };
@@ -88,6 +89,9 @@ namespace Smp
 			}
 
 			retainedHeadRecords += static_cast<std::uint32_t>(actorState.headPartRecords.size());
+			for (const auto& record : actorState.armorRecords) {
+				MergeArmorPhysicsRecord(armorRecords, record);
+			}
 			for (const auto& record : actorState.headPartRecords) {
 				for (const auto& boneName : record.requiredBoneNames) {
 					MergePhysicsName(requiredHeadBoneNames, boneName);
@@ -108,12 +112,26 @@ namespace Smp
 				a_state->armorRecords.empty();
 		});
 
+		for (const auto& candidate : suspendedActors_) {
+			if (!candidate.firstPerson && resolvesActor(candidate.actorHandle)) {
+				for (const auto& record : candidate.armorRecords) {
+					MergeArmorPhysicsRecord(armorRecords, record);
+				}
+			}
+		}
 		const auto discardedSuspended = std::erase_if(
 			suspendedActors_,
 			[a_actor](const SuspendedActorCandidate& a_candidate) {
 				const auto actor = a_candidate.actorHandle.get();
 				return actor && actor.get() == a_actor && !a_candidate.firstPerson;
 			});
+		for (const auto& pending : pendingActorRebuilds_) {
+			if (!pending.firstPerson && resolvesActor(pending.actorHandle)) {
+				for (const auto& record : pending.armorRecords) {
+					MergeArmorPhysicsRecord(armorRecords, record);
+				}
+			}
+		}
 		const auto discardedActorRebuilds = std::erase_if(
 			pendingActorRebuilds_,
 			[a_actor](const PendingActorRebuild& a_pending) {
@@ -148,6 +166,13 @@ namespace Smp
 				});
 			}
 		}
+		for (const auto& pending : pendingSkeletonTransitions_) {
+			if (resolvesActor(pending.actorHandle)) {
+				for (const auto& record : pending.armorRecords) {
+					MergeArmorPhysicsRecord(armorRecords, record);
+				}
+			}
+		}
 		const auto supersededTransitions = std::erase_if(
 			pendingSkeletonTransitions_,
 			[a_actor](const PendingSkeletonTransition& a_pending) {
@@ -159,6 +184,7 @@ namespace Smp
 			.actorHandle = actorHandle,
 			.oldRoot = a_oldRoot,
 			.retainedFace = retainedFace,
+			.armorRecords = std::move(armorRecords),
 			.headBoneReferences = std::move(headBoneReferences),
 			.requiredHeadBoneNames = std::move(requiredHeadBoneNames),
 			.retainedSkinBindings = std::move(retainedSkinBindings),
@@ -167,11 +193,12 @@ namespace Smp
 
 		ResetStepClockLocked();
 		spdlog::debug(
-			"began actor skeleton transition actor={} oldRoot={} retainedFace={} clearedStates={} retainedHeadRecords={} retainedBoneRecipes={} requiredHeadBones={} retainedSkinInstances={} discardedSuspended={} discardedActorRebuilds={} discardedHeadRebuilds={} supersededTransitions={}",
+			"began actor skeleton transition actor={} oldRoot={} retainedFace={} clearedStates={} retainedArmorRecords={} retainedHeadRecords={} retainedBoneRecipes={} requiredHeadBones={} retainedSkinInstances={} discardedSuspended={} discardedActorRebuilds={} discardedHeadRebuilds={} supersededTransitions={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_oldRoot),
 			static_cast<void*>(retainedFace.get()),
 			clearedStates,
+			pendingSkeletonTransitions_.back().armorRecords.size(),
 			retainedHeadRecords,
 			pendingSkeletonTransitions_.back().headBoneReferences.size(),
 			pendingSkeletonTransitions_.back().requiredHeadBoneNames.size(),
@@ -498,7 +525,14 @@ namespace Smp
 			// Rebuild against the current skeleton as soon as every physics-required
 			// bone exists, while retaining oldRoot for any remaining live skin slots.
 			if (!it->rebuildsQueued) {
-				MarkPendingActorRebuildLocked(actor.get(), false, {}, true, true, false);
+				const auto retainedArmorRecords = it->armorRecords.size();
+				MarkPendingActorRebuildLocked(
+					actor.get(),
+					false,
+					std::move(it->armorRecords),
+					true,
+					true,
+					true);
 				MarkPendingHeadRebuildLocked(LifecycleEvent{
 					.type = LifecycleEventType::kActorHeadInitialized,
 					.actor = actor.get(),
@@ -508,10 +542,11 @@ namespace Smp
 				it->rebuildsQueued = true;
 				ResetStepClockLocked();
 				spdlog::debug(
-					"released actor physics rebuild after replacement skeleton became physics-ready actor={} oldRoot={} newRoot={} requiredPhysicsBones={} faceSkinned={} headReloadQueued=true",
+					"released actor physics rebuild after replacement skeleton became physics-ready actor={} oldRoot={} newRoot={} retainedArmorRecords={} requiredPhysicsBones={} faceSkinned={} headReloadQueued=true",
 					static_cast<void*>(actor.get()),
 					static_cast<void*>(it->oldRoot.get()),
 					static_cast<void*>(it->newRoot.get()),
+					retainedArmorRecords,
 					it->requiredHeadBoneNames.size(),
 					it->faceSkinned);
 			}

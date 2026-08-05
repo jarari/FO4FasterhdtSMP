@@ -119,27 +119,45 @@ namespace Smp
 
 		const auto armorAttach = IsArmorAttachCandidate(a_event.type);
 		const auto actorArmorAttach = armorAttach && a_event.actor && !a_event.firstPerson;
-		const auto actorSkeletonTransitionPending =
-			a_event.actor &&
-			std::ranges::any_of(pendingSkeletonTransitions_, [&a_event](const PendingSkeletonTransition& a_pending) {
-				const auto actor = a_pending.actorHandle.get();
-				return actor && actor.get() == a_event.actor && !a_pending.physicsReady;
-			});
-		if (actorSkeletonTransitionPending) {
+		auto* actorSkeletonTransition = FindPendingSkeletonTransitionLocked(a_event.actor);
+		if (actorSkeletonTransition) {
+			// A FaceGen idle guard can overlap the skeleton swap. Let it observe the
+			// same event so neither deferred recipe snapshot can later resurrect an
+			// attachment that the other snapshot replaced.
+			ShouldDeferCharacterCustomizationPhysicsLocked(a_event);
 			if (actorArmorAttach) {
-				auto armorRecords = CollectQueuedArmorRecordsForAttachLocked(a_event);
-				MarkPendingActorRebuildLocked(
-					a_event.actor,
-					a_event.firstPerson,
-					std::move(armorRecords),
-					false,
-					false);
+				const auto bipedObject = ResolveEventBipedObject(a_event);
+				auto attachedRecords = CollectSuspendedArmorRecordsLocked(a_event);
+				const auto authoritativeSlotOwner =
+					(a_event.type == LifecycleEventType::kArmorApplySkinnedObjects ||
+					 a_event.type == LifecycleEventType::kArmorAttachSkinnedObject) &&
+					bipedObject != RE::BIPED_OBJECT::kTotal;
+				if (authoritativeSlotOwner) {
+					const auto sameRetainedOwner = a_event.object && std::ranges::any_of(
+						actorSkeletonTransition->armorRecords,
+						[&](const ArmorPhysicsRecord& a_record) {
+							return a_record.bipedObject == bipedObject &&
+								(a_record.attachedObject.get() == a_event.object ||
+								 a_record.sourceObject.get() == a_event.object);
+						});
+					if (a_event.object && !sameRetainedOwner) {
+						std::erase_if(
+							actorSkeletonTransition->armorRecords,
+							[bipedObject](const ArmorPhysicsRecord& a_record) {
+								return a_record.bipedObject == bipedObject;
+							});
+					}
+				}
+				for (auto& record : attachedRecords) {
+					MergeArmorPhysicsRecord(actorSkeletonTransition->armorRecords, std::move(record));
+				}
 			}
 			spdlog::debug(
-				"deferred system physics attach candidate {} until actor skeleton transition completion actor={} object={}",
+				"deferred system physics attach candidate {} until actor skeleton transition completion actor={} object={} retainedArmorRecords={}",
 				ToString(a_event.type),
 				static_cast<void*>(a_event.actor),
-				static_cast<void*>(a_event.object));
+				static_cast<void*>(a_event.object),
+				actorSkeletonTransition->armorRecords.size());
 			return;
 		}
 		if (actorArmorAttach && loadingPhysicsSuspended_) {

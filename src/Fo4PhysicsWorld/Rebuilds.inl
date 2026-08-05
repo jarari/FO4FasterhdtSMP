@@ -516,6 +516,21 @@ namespace Smp
 		return removed;
 	}
 
+	Fo4PhysicsWorld::PendingSkeletonTransition* Fo4PhysicsWorld::FindPendingSkeletonTransitionLocked(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return nullptr;
+		}
+
+		const auto found = std::ranges::find_if(
+			pendingSkeletonTransitions_,
+			[a_actor](const PendingSkeletonTransition& a_pending) {
+				const auto actor = a_pending.actorHandle.get();
+				return actor && actor.get() == a_actor;
+			});
+		return found != pendingSkeletonTransitions_.end() ? std::addressof(*found) : nullptr;
+	}
+
 	Fo4PhysicsWorld::PendingActorRebuild* Fo4PhysicsWorld::FindPendingActorRebuildLocked(RE::Actor* a_actor, const bool a_firstPerson)
 	{
 		if (!a_actor) {
