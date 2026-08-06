@@ -8,8 +8,6 @@
 #include "PhysicsXml.h"
 #include "SmpConfig.h"
 
-#include <version.h>
-
 #include <array>
 #include <charconv>
 #include <cctype>
@@ -636,7 +634,6 @@ F4SEPluginLoad(const F4SE::LoadInterface* a_f4se)
 		.trampolineSize = 1 << 15,
     });
 
-	spdlog::info("{} v{} ({}) loading", Version::PROJECT, Version::NAME, SimdVariantName());
 	const auto runtimeVersion = a_f4se->RuntimeVersion();
 	const auto executableVersion = REX::FModule::GetExecutingModule().GetFileVersion();
 	spdlog::info(
@@ -675,9 +672,14 @@ extern "C"
 {
     F4SE_EXPORT bool F4SEPlugin_Query(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
     {
-		a_info->name = Version::PROJECT.data();
+		const auto* versionData = F4SE::PluginVersionData::GetSingleton();
+		if (!versionData) {
+			return false;
+		}
+
+		a_info->name = versionData->GetPluginName().data();
 		a_info->infoVersion = F4SE::PluginInfo::kVersion;
-        a_info->version = Version::MAJOR;
+		a_info->version = versionData->pluginVersion;
         return true;
     }
 }

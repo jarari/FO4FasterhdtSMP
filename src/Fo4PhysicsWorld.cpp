@@ -612,35 +612,26 @@ namespace
 			return {};
 		}
 
-		using HeadPartArray = RE::BSTArray<RE::BGSHeadPart*>;
-		using AlternateHeadPartMap = RE::BSTHashMap<const RE::TESNPC*, HeadPartArray*>;
-		// The runtime map stores pointers to separately allocated arrays. Modeling
-		// the mapped value inline changes the scatter-table entry stride.
-		static REL::Relocation<AlternateHeadPartMap*> alternateHeadParts{
-			RE::ID::TESNPC::AlternateHeadPartListMap,
-			-0x8
-		};
-
-		const auto findAlternate = [&]() -> HeadPartArray* {
-			auto& map = *alternateHeadParts;
-			const auto found = map.find(a_npc);
-			return found != map.end() ? found->second : nullptr;
-		};
-		const auto toSpan = [](HeadPartArray* a_headParts) {
-			return a_headParts ?
-				std::span<RE::BGSHeadPart*>{ a_headParts->data(), a_headParts->size() } :
+		// The published map relocation points at different fields of the scatter
+		// table on OG and AE. Let the engine perform the lookup so the plugin does
+		// not depend on either global's address or container base offset.
+		const auto getAlternate = [a_npc]() {
+			auto** headParts = Smp::Address::TESNPCGetAlternateHeadPartList(a_npc);
+			const auto count = Smp::Address::TESNPCGetAlternateHeadPartListSize(a_npc);
+			return headParts && count > 0 ?
+				std::span<RE::BGSHeadPart*>{ headParts, count } :
 				std::span<RE::BGSHeadPart*>{};
 		};
 
 		if (a_npc->IsPlayer()) {
 			const auto* player = RE::PlayerCharacter::GetSingleton();
 			if (player && player->charGenRace && player->charGenRace != a_npc->formRace) {
-				if (auto* alternate = findAlternate()) {
-					return toSpan(alternate);
+				if (auto alternate = getAlternate(); !alternate.empty()) {
+					return alternate;
 				}
 			}
 		} else if (a_npc->originalRace && a_npc->originalRace != a_npc->formRace) {
-			return toSpan(findAlternate());
+			return getAlternate();
 		}
 
 		return a_npc->headParts && a_npc->numHeadParts > 0 ?
@@ -2265,9 +2256,7 @@ namespace
 		}
 
 		const auto havokBoneCount = std::min(skeleton->bones.size, skeleton->referencePose.size);
-		std::unordered_map<std::string, RE::NiTransform> referenceLocals;
 		std::unordered_map<std::string, std::int32_t> referenceIndices;
-		referenceLocals.reserve(static_cast<std::size_t>(havokBoneCount));
 		referenceIndices.reserve(static_cast<std::size_t>(havokBoneCount));
 		for (std::int32_t index = 0; index < havokBoneCount; ++index) {
 			const auto* boneName = HkStringPtrData(skeleton->bones.data[index].name);
@@ -2275,23 +2264,21 @@ namespace
 				continue;
 			}
 			const auto normalizedName = Smp::NormalizePhysicsName(boneName);
-			referenceLocals.insert_or_assign(
-				normalizedName,
-				ToNiTransform(skeleton->referencePose.data[index]));
 			referenceIndices.insert_or_assign(std::move(normalizedName), index);
 		}
-		if (referenceLocals.empty()) {
+		if (referenceIndices.empty()) {
 			return false;
 		}
 		const auto hasHavokReference = [&](const std::string_view a_name) {
-			return referenceLocals.contains(Smp::NormalizePhysicsName(a_name));
+			return referenceIndices.contains(Smp::NormalizePhysicsName(a_name));
 		};
 
-		// Emulate BSFlattenedBoneTree::UpdateBoneArray without mutating the live
-		// tree. The reference implementation replaces matching Ni locals with
-		// Havok reference locals and then lets the game skeleton hierarchy compute
-		// worlds; composing through hkaSkeleton::parentIndices is not equivalent
-		// for merged armor/hair skeletons.
+		// Emulate the non-realized-bone path in
+		// BSFlattenedBoneTree::UpdateBoneArray without mutating the live tree. Both
+		// OG and AE compose each FlattenedBone::local through its flattened parent
+		// index. Mixing same-name hkaSkeleton reference locals into this hierarchy
+		// produces a compressed hybrid pose because the two skeleton
+		// representations do not share interchangeable local transforms.
 		const auto flattenedBoneCount = static_cast<std::size_t>(a_flattened->boneCountExpanded);
 		std::unordered_map<std::string, std::size_t> flattenedIndices;
 		flattenedIndices.reserve(flattenedBoneCount);
@@ -2304,8 +2291,7 @@ namespace
 
 		std::vector<RE::NiTransform> canonicalActorWorlds(flattenedBoneCount, RE::NiTransform::IDENTITY);
 		std::vector<std::uint8_t> actorWorldState(flattenedBoneCount, 0);
-		std::uint32_t appliedReferenceLocals = 0;
-		std::uint32_t retainedFlattenedLocals = 0;
+		std::uint32_t appliedFlattenedLocals = 0;
 		const auto computeActorWorld = [&](this auto&& a_self, const std::size_t a_index, RE::NiTransform& a_world) -> bool {
 			if (a_index >= canonicalActorWorlds.size()) {
 				return false;
@@ -2320,13 +2306,8 @@ namespace
 
 			actorWorldState[a_index] = 1;
 			const auto& flattenedBone = a_flattened->bone[a_index];
-			const auto referenceLocal = referenceLocals.find(Smp::NormalizePhysicsName(flattenedBone.name.c_str()));
-			const auto& local = referenceLocal != referenceLocals.end() ? referenceLocal->second : flattenedBone.local;
-			if (referenceLocal != referenceLocals.end()) {
-				++appliedReferenceLocals;
-			} else {
-				++retainedFlattenedLocals;
-			}
+			const auto& local = flattenedBone.local;
+			++appliedFlattenedLocals;
 
 			RE::NiTransform parentWorld = a_flattened->world;
 			const auto parentIndex = flattenedBone.parent;
@@ -2503,13 +2484,12 @@ namespace
 		}
 
 		spdlog::debug(
-			"built detached Havok reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedReferenceLocals={} retainedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} havokHierarchyFallbackBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
+			"built detached Havok reference pose for system actor={} flattened={} havokBones={} flattenedBones={} appliedFlattenedLocals={} capturedArmorOnlyBones={} actorBones={} havokHierarchyFallbackBones={} capturedSharedFallbackBones={} matchedBones={}/{} requiredBones={} unresolvedRequired={}",
 			static_cast<void*>(a_actor),
 			static_cast<void*>(a_flattened),
 			havokBoneCount,
 			flattenedBoneCount,
-			appliedReferenceLocals,
-			retainedFlattenedLocals,
+			appliedFlattenedLocals,
 			appliedArmorBones,
 			appliedActorBones,
 			appliedHavokHierarchyFallbackBones,

@@ -7,6 +7,8 @@ namespace Smp::Address
 		REL::ID{ 865291, 2270071 }
 	};
 	REL::Relocation<BSFlattenedBoneTreeFind_t*> BSFlattenedBoneTreeFind{ REL::ID{ 1435518, 2270080 } };
+	REL::Relocation<TESNPCGetAlternateHeadPartList_t*> TESNPCGetAlternateHeadPartList{ REL::ID{ 437572, 2207501 } };
+	REL::Relocation<TESNPCGetAlternateHeadPartListSize_t*> TESNPCGetAlternateHeadPartListSize{ REL::ID{ 517331, 2207502 } };
 
 	REL::Relocation<std::uintptr_t> MainOnIdle{ REL::ID{ 633524, 2228917 } };
 	REL::Relocation<std::uintptr_t> BipedAnimApplySkinnedObjects{ REL::ID{ 224320, 2194381 } };
