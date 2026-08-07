@@ -540,6 +540,68 @@ namespace Smp
 			const auto transformB = bodyB.getWorldTransform();
 			const auto originA = transformA.getOrigin();
 			const auto originB = transformB.getOrigin();
+			btTransform frameA;
+			btTransform frameB;
+			bool hasFrames = false;
+			switch (constraint.kind) {
+			case PhysicsConstraintKind::kGeneric:
+			{
+				const auto* generic = static_cast<const btGeneric6DofSpring2Constraint*>(bulletConstraint);
+				frameA = generic->getFrameOffsetA();
+				frameB = generic->getFrameOffsetB();
+				hasFrames = true;
+				break;
+			}
+			case PhysicsConstraintKind::kConeTwist:
+			{
+				const auto* coneTwist = static_cast<const btConeTwistConstraint*>(bulletConstraint);
+				frameA = coneTwist->getAFrame();
+				frameB = coneTwist->getBFrame();
+				hasFrames = true;
+				break;
+			}
+			case PhysicsConstraintKind::kStiffSpring:
+			default:
+				break;
+			}
+			if (hasFrames) {
+				const auto frameAOrigin = frameA.getOrigin();
+				const auto frameBOrigin = frameB.getOrigin();
+				const auto frameARotation = frameA.getRotation();
+				const auto frameBRotation = frameB.getRotation();
+				spdlog::debug(
+					"actor bullet constraint actor={} constraint={} buildGroup={} kind={} bodyA='{}' bodyB='{}' enabled={} bodyAkin={} bodyBkin={} bodyApos=({:.3f},{:.3f},{:.3f}) bodyBpos=({:.3f},{:.3f},{:.3f}) frameApos=({:.3f},{:.3f},{:.3f}) frameArot=({:.6f},{:.6f},{:.6f},{:.6f}) frameBpos=({:.3f},{:.3f},{:.3f}) frameBrot=({:.6f},{:.6f},{:.6f},{:.6f})",
+					static_cast<void*>(a_state.actor),
+					static_cast<const void*>(bulletConstraint),
+					constraint.buildGroup,
+					std::to_underlying(constraint.kind),
+					constraint.bodyA,
+					constraint.bodyB,
+					bulletConstraint->isEnabled(),
+					bodyA.isStaticOrKinematicObject(),
+					bodyB.isStaticOrKinematicObject(),
+					originA.x(),
+					originA.y(),
+					originA.z(),
+					originB.x(),
+					originB.y(),
+					originB.z(),
+					frameAOrigin.x(),
+					frameAOrigin.y(),
+					frameAOrigin.z(),
+					frameARotation.x(),
+					frameARotation.y(),
+					frameARotation.z(),
+					frameARotation.w(),
+					frameBOrigin.x(),
+					frameBOrigin.y(),
+					frameBOrigin.z(),
+					frameBRotation.x(),
+					frameBRotation.y(),
+					frameBRotation.z(),
+					frameBRotation.w());
+				continue;
+			}
 			spdlog::debug(
 				"actor bullet constraint actor={} constraint={} buildGroup={} kind={} bodyA='{}' bodyB='{}' enabled={} bodyAkin={} bodyBkin={} bodyApos=({:.3f},{:.3f},{:.3f}) bodyBpos=({:.3f},{:.3f},{:.3f})",
 				static_cast<void*>(a_state.actor),

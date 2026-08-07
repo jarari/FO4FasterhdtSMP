@@ -2375,6 +2375,13 @@ namespace
 			const auto found = referenceIndices.find(Smp::NormalizePhysicsName(a_name));
 			return found != referenceIndices.end() && computeHavokWorld(found->second, a_world);
 		};
+		const auto findSharedCanonicalWorld = [&](const std::string_view a_name, RE::NiTransform& a_world) {
+			// Keep every shared actor bone in one canonical hierarchy. A complete
+			// Havok world is the fallback when FO4 omits the bone from the
+			// flattened array; captured NIF transforms are only a compatibility
+			// fallback after both actor reference sources fail.
+			return findActorWorld(a_name, a_world) || findHavokWorld(a_name, a_world);
+		};
 
 		std::unordered_map<std::string, const Smp::ArmorBoneReference*> capturedReferences;
 		capturedReferences.reserve(a_boneReferences.size());
@@ -2393,11 +2400,11 @@ namespace
 				return true;
 			}
 
-			// Shared bones belong to the actor pose whenever FO4 exposes them
-			// through the flattened tree. The captured transform is only the
-			// compatibility fallback for shared attachment nodes omitted from
-			// that tree (notably some twist bones).
-			if (!a_reference.isArmorOnly && findActorWorld(a_reference.name, a_world)) {
+			// Shared bones belong to the actor pose: prefer FO4's flattened
+			// hierarchy, then its complete Havok reference hierarchy. The
+			// captured transform is only a compatibility fallback for attachment
+			// nodes omitted from both representations (notably some twist bones).
+			if (!a_reference.isArmorOnly && findSharedCanonicalWorld(a_reference.name, a_world)) {
 				canonicalCapturedWorlds.emplace(normalizedName, a_world);
 				return true;
 			}
@@ -2413,7 +2420,7 @@ namespace
 				if (parentReference != capturedReferences.end() && parentReference->second->isArmorOnly) {
 					foundParent = a_self(*parentReference->second, parentWorld);
 				} else {
-					foundParent = findActorWorld(a_reference.parentBoneName, parentWorld);
+					foundParent = findSharedCanonicalWorld(a_reference.parentBoneName, parentWorld);
 					if (!foundParent && parentReference != capturedReferences.end()) {
 						foundParent = a_self(*parentReference->second, parentWorld);
 					}
