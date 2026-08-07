@@ -504,7 +504,7 @@ Use `defaultBBPs.xml` when the same XML should cover several geometry names, or 
 - NPCs outside the active actor range are soft-suspended. Fresh out-of-range armor builds are reset to their stored reference merge pose before Bullet is removed from them.
 - LooksMenu suspends active prototype states and reloads armor records after customization closes.
 - `disable1stPersonViewPhysics` skips first-person player physics when enabled.
-- `disableSMPHairWhenWigEquipped` disables hair-domain mesh bodies while wig slots are occupied.
+- `disableSMPHairWhenWigEquipped` suppresses headpart-hair physics only when Fallout has hidden every draw range in that hair source after applying the hair-top/long-hair slot mask.
 - Wind only affects bones when global wind is enabled and each bone's `<wind-factor>` is above zero.
 
 ## Authoring Workflow

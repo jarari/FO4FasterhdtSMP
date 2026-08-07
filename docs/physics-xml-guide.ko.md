@@ -504,7 +504,7 @@ frame mode:
 - active actor range 밖의 NPC는 soft-suspend 됩니다. range 밖에서 새로 build된 armor는 Bullet에서 즉시 제거되기 전에 저장된 reference merge pose로 reset됩니다.
 - LooksMenu가 닫히면 active prototype state가 suspend되고 armor record가 다시 로드됩니다.
 - `disable1stPersonViewPhysics`가 켜져 있으면 1인칭 player physics를 건너뜁니다.
-- `disableSMPHairWhenWigEquipped`가 켜져 있으면 wig slot이 차 있을 때 hair domain mesh body를 비활성화합니다.
+- `disableSMPHairWhenWigEquipped`가 켜져 있으면 Fallout이 hair-top/long-hair slot mask를 적용한 뒤 해당 hair source의 모든 draw range를 숨긴 경우에만 headpart hair physics를 억제합니다.
 - wind는 전역 wind가 활성화되어 있고 각 bone의 `<wind-factor>`가 0보다 클 때만 작동합니다.
 
 ## 작성 순서
