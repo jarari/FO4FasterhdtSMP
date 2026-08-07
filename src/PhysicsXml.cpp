@@ -46,13 +46,24 @@ namespace
 			a_value.replace(comma, 1, ".");
 		}
 
-		const auto begin = a_value.data();
+		auto begin = a_value.data();
 		const auto end = begin + a_value.size();
-		const auto [ptr, error] = std::from_chars(begin, end, a_out);
-		if (error != std::errc{} || ptr != end) {
+		// std::from_chars accepts a leading minus but, unlike strtof, rejects a
+		// leading plus. Existing SMP XMLs use both forms, so handle '+' explicitly.
+		if (*begin == '+') {
+			++begin;
+		}
+		if (begin == end) {
 			return false;
 		}
 
+		float value = 0.0F;
+		const auto [ptr, error] = std::from_chars(begin, end, value);
+		if (error != std::errc{} || ptr != end || !std::isfinite(value)) {
+			return false;
+		}
+
+		a_out = value;
 		return true;
 	}
 
