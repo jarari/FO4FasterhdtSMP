@@ -4,5 +4,5 @@ class btDiscreteDynamicsWorld;
 
 namespace Smp::BulletVisualization
 {
-	void DrawWorld(const btDiscreteDynamicsWorld* a_world);
+	void DrawWorld(btDiscreteDynamicsWorld* a_world);
 }

@@ -528,7 +528,7 @@ namespace
 
 namespace Smp::BulletVisualization
 {
-	void DrawWorld(const btDiscreteDynamicsWorld* a_world)
+	void DrawWorld(btDiscreteDynamicsWorld* a_world)
 	{
 		if (!a_world) {
 			return;
@@ -546,8 +546,8 @@ namespace Smp::BulletVisualization
 		std::uint32_t fallbackObjects = 0;
 		std::vector<std::pair<const hdt::SkinnedMeshBody*, MeshVisualStats>> meshDebug;
 		for (int index = 0; index < objectCount; ++index) {
-			const auto* object = a_world->getCollisionObjectArray()[index];
-			const auto* shape = object ? object->getCollisionShape() : nullptr;
+			auto* object = a_world->getCollisionObjectArray()[index];
+			auto* shape = object ? object->getCollisionShape() : nullptr;
 			if (!object || !shape) {
 				continue;
 			}
@@ -569,7 +569,11 @@ namespace Smp::BulletVisualization
 			}
 
 			if (shape->getShapeType() == CUSTOM_CONCAVE_SHAPE_TYPE) {
-				const auto* mesh = static_cast<const hdt::SkinnedMeshBody*>(object);
+				auto* mesh = static_cast<hdt::SkinnedMeshBody*>(object);
+				// Large collision meshes normally skin their vertices lazily after a
+				// broad-phase overlap. Visualization needs current vertices even when
+				// the mesh has no collision candidate this frame.
+				mesh->internalUpdate();
 				const auto stats = DrawSkinnedMeshBody(*drawList, projector, *mesh, color);
 				meshDebug.emplace_back(mesh, stats);
 				DrawText(*drawList, projector, stats.meshCenter, label);
