@@ -246,6 +246,21 @@ namespace Smp
 		return physicsFilePath;
 	}
 
+	bool Fo4PhysicsWorld::IsSoftSuspended(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		PruneInvalidSystemsLocked();
+
+		return std::ranges::any_of(systems_, [a_actor](const auto& a_state) {
+			return a_state->actor == a_actor && a_state->IsInactive();
+		});
+	}
+
 	std::vector<bool> Fo4PhysicsWorld::TogglePhysics(
 		RE::Actor* a_actor,
 		const std::span<const std::string> a_boneNames,

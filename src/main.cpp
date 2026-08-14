@@ -339,6 +339,23 @@ namespace
 		}
 
 		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
+		if (_stricmp(subcommand.data(), "IsSoftSuspended") == 0) {
+			auto* actor = ResolveConsoleActor(a_refObject);
+			if (!actor) {
+				a_returnValue = 0.0F;
+				return true;
+			}
+
+			const auto suspended = physicsWorld->IsSoftSuspended(actor);
+			a_returnValue = suspended ? 1.0F : 0.0F;
+			if (auto* console = RE::ConsoleLog::GetSingleton()) {
+				console->Log(
+					"[HDT-SMP] selected actor is soft suspended: {}",
+					suspended ? "true" : "false");
+			}
+			return true;
+		}
+
 		if (_stricmp(subcommand.data(), "ReloadPhysicsFile") == 0) {
 			auto* actor = ResolveConsoleActor(a_refObject);
 			const auto armorAddonFormID = ParseConsoleFormID(argument1.data());
