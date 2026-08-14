@@ -935,15 +935,15 @@ namespace Smp
 		const auto buildSuspendedArmorCandidate = ShouldBuildSuspendedArmorCandidateLocked(a_event);
 		// Head builds repair hierarchy and skin bindings even when the actor is not
 		// currently rendered. The completed runtime is softly deactivated below.
-		const auto buildBeforeViewDeactivation =
+		const auto buildBeforeDeactivation =
 			buildSuspendedArmorCandidate || IsHeadCandidate(a_event.type);
 		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
 			return a_state->IsActive();
 		}));
 		if (FindSystemLocked(a_event.actor, a_event.firstPerson) == nullptr && activeActors >= currentMaxActiveActors_) {
-			if (buildSuspendedArmorCandidate) {
+			if (buildBeforeDeactivation) {
 				spdlog::debug(
-					"allowing out-of-budget SMP armor candidate {} for actor={} to build before inactive-system deactivation ({}/{})",
+					"allowing out-of-budget system physics candidate {} for actor={} to build before inactive-system deactivation ({}/{})",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					activeActors,
@@ -961,9 +961,9 @@ namespace Smp
 		}
 
 		if (!IsActorWithinDistanceLocked(a_event.actor)) {
-			if (buildSuspendedArmorCandidate) {
+			if (buildBeforeDeactivation) {
 				spdlog::debug(
-					"allowing out-of-range SMP armor candidate {} for actor={} to build before inactive-system deactivation maxActorDistance={}",
+					"allowing out-of-range system physics candidate {} for actor={} to build before inactive-system deactivation maxActorDistance={}",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor),
 					maxActorDistance_);
@@ -979,7 +979,7 @@ namespace Smp
 		}
 
 		if (!IsActorInReferenceCullView(a_event.actor, a_event.object, a_event.firstPerson)) {
-			if (buildBeforeViewDeactivation) {
+			if (buildBeforeDeactivation) {
 				spdlog::debug(
 					"allowing inactive-view system physics candidate {} for actor={} to build before inactive-system deactivation",
 					ToString(a_event.type),

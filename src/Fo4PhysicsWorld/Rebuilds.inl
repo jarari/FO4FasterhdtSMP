@@ -219,7 +219,7 @@ namespace Smp
 		}
 
 		spdlog::debug(
-			"deactivating freshly built armor system actor={} reason={} activeActors={} actorCap={} event={} buildGroups={}",
+			"deactivating freshly built system physics actor={} reason={} activeActors={} actorCap={} event={} buildGroups={}",
 			static_cast<void*>(a_state.actor),
 			reason ? reason : "unknown",
 			activeActors,
