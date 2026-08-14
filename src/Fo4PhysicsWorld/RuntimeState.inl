@@ -417,6 +417,56 @@ namespace Smp
 	void Fo4PhysicsWorld::CompletePendingSkeletonTransitions()
 	{
 		std::scoped_lock lock(lock_);
+		struct ForcedReleaseResult
+		{
+			std::uint32_t reboundSlots{ 0 };
+			std::uint32_t reboundRoots{ 0 };
+			bool reparentedFace{ false };
+		};
+		const auto forceReleaseOldSkeletonDependencies = [](PendingSkeletonTransition& a_pending) {
+			ForcedReleaseResult result;
+			auto* oldRoot = a_pending.oldRoot.get();
+			auto* newRoot = a_pending.skeletonRoot.get();
+			if (!oldRoot || !newRoot) {
+				return result;
+			}
+
+			if (auto* retainedFace = a_pending.retainedFace.get();
+				retainedFace && NiObject::IsDescendantOf(retainedFace, oldRoot)) {
+				RE::NiPointer<RE::NiAVObject> keepAlive{ retainedFace };
+				if (retainedFace->parent) {
+					retainedFace->parent->DetachChild(retainedFace);
+				}
+				newRoot->AttachChild(retainedFace, false);
+				result.reparentedFace = true;
+			}
+
+			std::unordered_set<RE::BSSkin::Instance*> visitedSkins;
+			for (const auto& binding : a_pending.retainedSkinBindings) {
+				auto* skin = binding.skin.get();
+				if (!skin || !visitedSkins.insert(skin).second) {
+					continue;
+				}
+
+				if (skin->rootNode && NiObject::IsDescendantOf(skin->rootNode, oldRoot)) {
+					skin->rootNode = newRoot;
+					++result.reboundRoots;
+				}
+				for (std::uint32_t index = 0; index < skin->bones.size(); ++index) {
+					auto* bone = skin->bones[index];
+					if (!bone || !NiObject::IsDescendantOf(bone, oldRoot)) {
+						continue;
+					}
+
+					skin->bones[index] = newRoot;
+					if (index < skin->worldTransforms.size()) {
+						skin->worldTransforms[index] = std::addressof(newRoot->world);
+					}
+					++result.reboundSlots;
+				}
+			}
+			return result;
+		};
 		std::erase_if(
 			retainedHeadSkeletonCaches_,
 			[](const RetainedHeadSkeletonCache& a_cached) {
@@ -497,6 +547,37 @@ namespace Smp
 						it->loadedFrameAge,
 						unresolvedRequiredPhysicsBones);
 				}
+				if (it->loadedFrameAge >= kSkeletonTransitionResolutionTimeoutFrames) {
+					const auto retainedArmorRecords = it->armorRecords.size();
+					const auto forcedRelease = forceReleaseOldSkeletonDependencies(*it);
+					MarkPendingActorRebuildLocked(
+						actor.get(),
+						false,
+						std::move(it->armorRecords),
+						true,
+						true,
+						true);
+					MarkPendingHeadRebuildLocked(LifecycleEvent{
+						.type = LifecycleEventType::kActorHeadInitialized,
+						.actor = actor.get(),
+						.object = reinterpret_cast<RE::NiAVObject*>(actor->GetFaceNodeSkinned()),
+						.firstPerson = false,
+					});
+					ResetStepClockLocked();
+					spdlog::error(
+						"forced completion of actor skeleton transition after required physics bones did not resolve actor={} oldRoot={} newRoot={} loadedFrameAge={} unresolvedRequiredPhysicsBones={} retainedArmorRecords={} fallbackSlots={} fallbackRoots={} reparentedFace={} rebuildsQueued=true",
+						static_cast<void*>(actor.get()),
+						static_cast<void*>(it->oldRoot.get()),
+						static_cast<void*>(it->newRoot.get()),
+						it->loadedFrameAge,
+						unresolvedRequiredPhysicsBones,
+						retainedArmorRecords,
+						forcedRelease.reboundSlots,
+						forcedRelease.reboundRoots,
+						forcedRelease.reparentedFace);
+					it = pendingSkeletonTransitions_.erase(it);
+					continue;
+				}
 				++it;
 				continue;
 			}
@@ -563,8 +644,23 @@ namespace Smp
 						static_cast<void*>(it->retainedFace.get()),
 						it->loadedFrameAge);
 				}
-				++it;
-				continue;
+				if (it->loadedFrameAge < kSkeletonTransitionResolutionTimeoutFrames) {
+					++it;
+					continue;
+				}
+
+				const auto forcedRelease = forceReleaseOldSkeletonDependencies(*it);
+				it->faceSkinned = true;
+				spdlog::error(
+					"forced retained-face release after skin bindings did not migrate actor={} oldRoot={} newRoot={} retainedFace={} loadedFrameAge={} fallbackSlots={} fallbackRoots={} reparentedFace={}",
+					static_cast<void*>(actor.get()),
+					static_cast<void*>(it->oldRoot.get()),
+					static_cast<void*>(it->newRoot.get()),
+					static_cast<void*>(it->retainedFace.get()),
+					it->loadedFrameAge,
+					forcedRelease.reboundSlots,
+					forcedRelease.reboundRoots,
+					forcedRelease.reparentedFace);
 			}
 
 			spdlog::debug(

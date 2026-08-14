@@ -92,6 +92,7 @@ namespace
 	constexpr std::uint32_t kCpuCopyPendingMaxRetries = 3;
 	constexpr std::uint32_t kSkeletonTransitionLoadTimeoutFrames = 120;
 	constexpr std::uint32_t kRetainedFaceSkinningTimeoutFrames = 30;
+	constexpr std::uint32_t kSkeletonTransitionResolutionTimeoutFrames = 120;
 	constexpr std::uint64_t kPapyrusArmorPoseCacheBuildGroup = std::numeric_limits<std::uint64_t>::max();
 	constexpr std::uint64_t kPapyrusHeadPoseCacheBuildGroup = kPapyrusArmorPoseCacheBuildGroup - 1;
 	using Clock = std::chrono::steady_clock;
@@ -1152,15 +1153,6 @@ namespace
 				.geometry = FindFirstGeometry(a_object),
 			};
 		}
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return std::nullopt;
-		}
-		for (auto& child : node->children) {
-			if (auto selection = FindHeadPartSourceSelection(child.get())) {
-				return selection;
-			}
-		}
 		return std::nullopt;
 	}
 
@@ -1544,34 +1536,14 @@ namespace
 			return;
 		}
 
-		auto* node = a_object->IsNode();
-		if (!node) {
-			if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(a_object)) {
-				a_candidates.push_back({
-					.object = a_object,
-					.selection = ArmorPhysicsXmlSelection{
-						.path = defaultBbp->physicsXml,
-						.meshNameMap = std::move(defaultBbp->meshNameMap),
-					},
-				});
-			}
-			return;
-		}
-
-		const auto previousCandidateCount = a_candidates.size();
-		for (auto& child : node->children) {
-			CollectDirectArmorPhysicsXmlSelections(child.get(), a_candidates);
-		}
-		if (a_candidates.size() == previousCandidateCount) {
-			if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(a_object)) {
-				a_candidates.push_back({
-					.object = a_object,
-					.selection = ArmorPhysicsXmlSelection{
-						.path = defaultBbp->physicsXml,
-						.meshNameMap = std::move(defaultBbp->meshNameMap),
-					},
-				});
-			}
+		if (auto defaultBbp = Smp::DefaultBBP::GetSingleton()->Find(a_object)) {
+			a_candidates.push_back({
+				.object = a_object,
+				.selection = ArmorPhysicsXmlSelection{
+					.path = defaultBbp->physicsXml,
+					.meshNameMap = std::move(defaultBbp->meshNameMap),
+				},
+			});
 		}
 	}
 
@@ -1731,14 +1703,6 @@ namespace
 			return;
 		}
 
-		auto* node = a_object->IsNode();
-		if (!node) {
-			return;
-		}
-
-		for (auto& child : node->children) {
-			CollectHeadPhysicsXmlSelections(child.get(), a_hairKeys, a_candidates, isHair);
-		}
 	}
 
 	std::optional<ArmorPhysicsXmlSelection> FindArmorPhysicsXml(RE::NiAVObject* a_object)

@@ -28,7 +28,7 @@ namespace
 		return {};
 	}
 
-	void CollectGeometryNames(RE::NiAVObject* a_object, Smp::DefaultBBP::NameMap& a_names)
+	void AddGeometryName(RE::NiAVObject* a_object, Smp::DefaultBBP::NameMap& a_names)
 	{
 		if (!a_object) {
 			return;
@@ -40,14 +40,27 @@ namespace
 				a_names[std::string(name)].insert(std::string(name));
 			}
 		}
+	}
 
-		auto* node = a_object->IsNode();
+	void CollectDirectGeometryNames(RE::NiAVObject* a_parent, Smp::DefaultBBP::NameMap& a_names)
+	{
+		auto* node = a_parent ? a_parent->IsNode() : nullptr;
 		if (!node) {
 			return;
 		}
 
 		for (auto& child : node->children) {
-			CollectGeometryNames(child.get(), a_names);
+			AddGeometryName(child.get(), a_names);
+		}
+	}
+
+	void CollectDefaultGeometryNames(RE::NiAVObject* a_root, Smp::DefaultBBP::NameMap& a_names)
+	{
+		CollectDirectGeometryNames(a_root, a_names);
+
+		if (auto* faceGenSkinned = a_root ? a_root->GetObjectByName("BSFaceGenNiNodeSkinned") : nullptr;
+			faceGenSkinned && faceGenSkinned != a_root) {
+			CollectDirectGeometryNames(faceGenSkinned, a_names);
 		}
 	}
 
@@ -90,7 +103,7 @@ namespace Smp
 		}
 
 		NameMap nameMap;
-		CollectGeometryNames(a_object, nameMap);
+		CollectDefaultGeometryNames(a_object, nameMap);
 		if (nameMap.empty()) {
 			return std::nullopt;
 		}

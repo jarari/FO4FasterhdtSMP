@@ -177,23 +177,6 @@ namespace Hooks
 		return path->string();
 	}
 
-	std::optional<std::string> FindPhysicsXmlInTree(RE::NiAVObject* a_object)
-	{
-		if (auto path = FindPhysicsXmlExtraData(a_object)) {
-			return path;
-		}
-		auto* node = a_object ? a_object->IsNode() : nullptr;
-		if (!node) {
-			return std::nullopt;
-		}
-		for (auto& child : node->children) {
-			if (auto path = FindPhysicsXmlInTree(child.get())) {
-				return path;
-			}
-		}
-		return std::nullopt;
-	}
-
 	struct PreAttachPhysicsContext
 	{
 		std::optional<std::string> selectedXml;
@@ -884,7 +867,7 @@ namespace Hooks
 		}
 
 		auto* loadedRoot = GetLoadedFaceGenModelRoot(a_model);
-		const auto physicsXml = FindPhysicsXmlInTree(loadedRoot);
+		const auto physicsXml = FindPhysicsXmlExtraData(loadedRoot);
 		if (!loadedRoot || (!physicsXml && !context.isExtraPart)) {
 			return;
 		}

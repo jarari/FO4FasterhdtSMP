@@ -41,6 +41,23 @@ namespace
 		return OriginalWndProc ? CallWindowProc(OriginalWndProc, a_hwnd, a_msg, a_wparam, a_lparam) : DefWindowProc(a_hwnd, a_msg, a_wparam, a_lparam);
 	}
 
+	bool RestoreWndProc()
+	{
+		if (!WindowHandle || !OriginalWndProc) {
+			return true;
+		}
+
+		SetLastError(ERROR_SUCCESS);
+		const auto previous = SetWindowLongPtr(WindowHandle, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(OriginalWndProc));
+		if (previous == 0 && GetLastError() != ERROR_SUCCESS) {
+			spdlog::error("failed to restore original WndProc after ImGui initialization failure");
+			return false;
+		}
+
+		OriginalWndProc = nullptr;
+		return true;
+	}
+
 	LRESULT CALLBACK WndProc(HWND a_hwnd, UINT a_msg, WPARAM a_wparam, LPARAM a_lparam)
 	{
 		switch (a_msg) {
@@ -208,21 +225,40 @@ namespace Smp::ImguiLayer
 		}
 
 		IMGUI_CHECKVERSION();
-		ImGui::CreateContext();
+		auto* imguiContext = ImGui::CreateContext();
+		if (!imguiContext) {
+			spdlog::warn("failed to create ImGui context");
+			return false;
+		}
 		auto& io = ImGui::GetIO();
 		io.IniFilename = nullptr;
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-		OriginalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(WindowHandle, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
 		if (!OriginalWndProc) {
-			spdlog::warn("failed to install ImGui WndProc hook");
-			return false;
+			SetLastError(ERROR_SUCCESS);
+			OriginalWndProc = reinterpret_cast<WNDPROC>(SetWindowLongPtr(WindowHandle, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(WndProc)));
+			if (!OriginalWndProc && GetLastError() != ERROR_SUCCESS) {
+				spdlog::warn("failed to install ImGui WndProc hook");
+				ImGui::DestroyContext(imguiContext);
+				return false;
+			}
 		}
 
-		ImGui_ImplWin32_Init(WindowHandle);
-		ImGui_ImplDX11_Init(
+		if (!ImGui_ImplWin32_Init(WindowHandle)) {
+			spdlog::warn("failed to initialize ImGui Win32 backend");
+			RestoreWndProc();
+			ImGui::DestroyContext(imguiContext);
+			return false;
+		}
+		if (!ImGui_ImplDX11_Init(
 			reinterpret_cast<ID3D11Device*>(RendererData->device),
-			reinterpret_cast<ID3D11DeviceContext*>(RendererData->context));
+			reinterpret_cast<ID3D11DeviceContext*>(RendererData->context))) {
+			spdlog::warn("failed to initialize ImGui DX11 backend");
+			ImGui_ImplWin32_Shutdown();
+			RestoreWndProc();
+			ImGui::DestroyContext(imguiContext);
+			return false;
+		}
 
 		Initialized = true;
 		EnsurePresentHook();
