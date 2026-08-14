@@ -190,7 +190,12 @@ namespace Smp
 		if (!IsActorWithinDistanceLocked(a_state.actor)) {
 			shouldSuspend = true;
 			reason = "distance";
-		} else if (!IsActorInReferenceCullView(a_state.actor, a_event.object, a_event.firstPerson)) {
+		}
+		auto* actorRoot = a_state.actor ? a_state.actor->Get3D(a_state.firstPerson) : nullptr;
+		if (!actorRoot && a_state.actor && !a_state.firstPerson) {
+			actorRoot = a_state.actor->Get3D();
+		}
+		if (!shouldSuspend && !IsActorInReferenceCullView(a_state.actor, actorRoot, a_state.firstPerson)) {
 			shouldSuspend = true;
 			reason = "view";
 		}

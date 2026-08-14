@@ -898,6 +898,7 @@ namespace Smp
 			actorState.headPartRecords.size(),
 			hairKeys.size(),
 			cpuCopyPending);
+		DeactivateBuiltSystemIfInactiveLocked(actorState, a_event);
 		std::erase_if(systems_, [](const auto& a_state) {
 			return !a_state->suspended && !a_state->HasPhysics() && a_state->armorRecords.empty();
 		});
@@ -932,6 +933,10 @@ namespace Smp
 		}
 
 		const auto buildSuspendedArmorCandidate = ShouldBuildSuspendedArmorCandidateLocked(a_event);
+		// Head builds repair hierarchy and skin bindings even when the actor is not
+		// currently rendered. The completed runtime is softly deactivated below.
+		const auto buildBeforeViewDeactivation =
+			buildSuspendedArmorCandidate || IsHeadCandidate(a_event.type);
 		const auto activeActors = static_cast<std::size_t>(std::ranges::count_if(systems_, [](const auto& a_state) {
 			return a_state->IsActive();
 		}));
@@ -974,9 +979,9 @@ namespace Smp
 		}
 
 		if (!IsActorInReferenceCullView(a_event.actor, a_event.object, a_event.firstPerson)) {
-			if (buildSuspendedArmorCandidate) {
+			if (buildBeforeViewDeactivation) {
 				spdlog::debug(
-					"allowing inactive-view SMP armor candidate {} for actor={} to build before inactive-system deactivation",
+					"allowing inactive-view system physics candidate {} for actor={} to build before inactive-system deactivation",
 					ToString(a_event.type),
 					static_cast<void*>(a_event.actor));
 				return true;
