@@ -57,12 +57,13 @@
 		float windStrength_{ 0.0F };
 		bool disableSMPHairWhenWigEquipped_{ true };
 		float windDistanceForNoWind_{ 50.0F };
-		float windDistanceForMaxWind_{ 3000.0F };
+		float windDistanceForMaxWind_{ 2000.0F };
 		float windWeatherCooldown_{ 0.0F };
 		float windWeatherShortCooldownSeconds_{ 0.5F };
 		float windWeatherLongCooldownSeconds_{ 5.0F };
 		int windSmoothingSamples_{ 8 };
-		bool randomizePerBoneWind_{ true };
+		bool randomizePerBoneWind_{ false };
+		std::mt19937 windRandomEngine_{ std::random_device{}() };
 		btVector3 windDirection_{ 1.0F, 0.0F, 0.0F };
 		btVector3 currentWind_{ 0.0F, 0.0F, 0.0F };
 		btVector3 targetWind_{ 0.0F, 0.0F, 0.0F };

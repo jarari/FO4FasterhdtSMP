@@ -5,6 +5,7 @@
 
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -122,16 +123,19 @@ namespace
 	std::vector<bool> TogglePhysics(
 		std::monostate,
 		RE::Actor* a_actor,
-		const std::vector<RE::BSFixedString> a_boneNames,
+		const std::optional<std::vector<RE::BSFixedString>> a_boneNames,
 		const bool a_on)
 	{
-		if (!a_actor || a_boneNames.empty()) {
+		// Papyrus represents an array set to None as a null array object. Binding
+		// directly to std::vector dereferences that object in CommonLibF4's
+		// marshaller, so retain the nullable state until it has been validated.
+		if (!a_actor || !a_boneNames || a_boneNames->empty()) {
 			return {};
 		}
 
 		std::vector<std::string> boneNames;
-		boneNames.reserve(a_boneNames.size());
-		for (const auto& name : a_boneNames) {
+		boneNames.reserve(a_boneNames->size());
+		for (const auto& name : *a_boneNames) {
 			boneNames.emplace_back(name.c_str());
 		}
 		return Smp::Fo4PhysicsWorld::GetSingleton()->TogglePhysics(a_actor, boneNames, a_on);

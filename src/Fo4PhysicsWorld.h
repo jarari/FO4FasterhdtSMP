@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,8 +74,8 @@ namespace Smp
 		void PrintConsoleSummary();
 		void StepFrame();
 		void Step(float a_deltaSeconds);
-		void UpdateWindLocked();
-		void ApplyWindForcesLocked();
+		void UpdateWindLocked(float a_deltaSeconds);
+		void ApplyWindForcesLocked(float a_deltaSeconds);
 		void RecordFrameMetrics(float a_stepMs);
 		void RecordWritebackMetric(float a_writebackMs, WritebackSource a_source, bool a_wroteAny, bool a_skippedDuplicate);
 		void WriteBackSystems(WritebackSource a_source = WritebackSource::kUnknown);

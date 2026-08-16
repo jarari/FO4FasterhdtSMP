@@ -15,6 +15,7 @@
 #include "PhysicsXml.h"
 #include "PhysicsXmlSelection.h"
 #include "PapyrusFunctions.h"
+#include "PluginInterfaceImpl.h"
 #include "PhysicsProfiler.h"
 #include "ResourceFile.h"
 #include "SmpConfig.h"
@@ -46,6 +47,7 @@
 #include "RE/S/Sky.h"
 #include "RE/T/TESObjectCELL.h"
 #include "RE/T/TESNPC.h"
+#include "RE/T/TESWeather.h"
 #include "RE/U/UI.h"
 
 #include <Windows.h>
@@ -68,7 +70,9 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <numbers>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <tbb/parallel_for.h>
@@ -841,9 +845,33 @@ namespace
 		}
 	}
 
-	btVector3 WindDirectionFromFo4SkyAngle(const float a_radians)
+	int RandomWindInteger(std::mt19937& a_engine, const int a_minimum, const int a_maximum)
 	{
-		return btVector3(std::sin(a_radians), std::cos(a_radians), 0.0F);
+		return std::uniform_int_distribution<int>(a_minimum, a_maximum)(a_engine);
+	}
+
+	float RandomWeatherDirectionOffsetDegrees(std::mt19937& a_engine)
+	{
+		// Match the reference distribution: small deviations are common, with a
+		// one-in-ten chance of selecting the wider 0.6-5 degree range.
+		const auto rangeTenths = RandomWindInteger(a_engine, 1, 10) == 1 ?
+			RandomWindInteger(a_engine, 6, 50) :
+			RandomWindInteger(a_engine, 0, 5);
+		const auto rangeDegrees = static_cast<float>(rangeTenths) / 10.0F;
+		return static_cast<float>(RandomWindInteger(
+			a_engine,
+			static_cast<int>(-rangeDegrees),
+			static_cast<int>(rangeDegrees)));
+	}
+
+	btVector3 WindDirectionFromFo4AngleUnits(const float a_angleUnits, const float a_randomOffsetDegrees)
+	{
+		// TESWeather/Sky wind direction uses Bethesda's 0..256 angle units. The
+		// reference rotates (0, 1, 0) by angle * 180 / 256 - 90 degrees.
+		const auto theta =
+			(a_angleUnits * 180.0F / 256.0F - 90.0F + a_randomOffsetDegrees) *
+			(std::numbers::pi_v<float> / 180.0F);
+		return btVector3(-std::sin(theta), std::cos(theta), 0.0F);
 	}
 
 	RE::NiPoint3 ToNiPoint3(const btVector3& a_value)
@@ -865,10 +893,10 @@ namespace
 
 	bool IsWeatherWindSkyValid(const RE::Sky* a_sky)
 	{
-		return a_sky &&
-			a_sky->currentWeather &&
-			a_sky->mode == RE::Sky::Mode::kFull &&
-			!a_sky->flags.any(RE::Sky::Flags::kHideSky);
+		// The reference gates weather wind on a valid Sky and an exterior
+		// worldspace. Sky mode/visibility flags are rendering state and should not
+		// attenuate or disable the physical wind force.
+		return a_sky != nullptr;
 	}
 
 	RE::NiPoint3 ResolveWindRayStart(RE::Actor* a_actor)
@@ -895,7 +923,7 @@ namespace
 	bool IsActorWeatherWindCellValid(RE::Actor* a_actor)
 	{
 		auto* cell = a_actor ? a_actor->GetParentCell() : nullptr;
-		return cell && cell->IsExterior() && cell->worldSpace;
+		return cell && cell->worldSpace;
 	}
 
 	float ResolveActorWindObstructionFactor(RE::Actor* a_actor, const btVector3& a_windDirection, const float a_noWindDistance, const float a_fullWindDistance)

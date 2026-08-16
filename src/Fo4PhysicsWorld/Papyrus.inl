@@ -285,7 +285,11 @@ namespace Smp
 						stateActor = resolved.get();
 					}
 				}
-				if (stateActor != a_actor) {
+				// An Actor parameter identifies the actor, not one particular first- or
+				// third-person system. Match every live system owned by that actor and
+				// toggle every same-named rigid body in each system.
+				if (!stateActor ||
+					(stateActor != a_actor && stateActor->GetFormID() != a_actor->GetFormID())) {
 					continue;
 				}
 
@@ -316,24 +320,8 @@ namespace Smp
 					rigidBody.setInterpolationAngularVelocity(zero);
 					rigidBody.activate(true);
 
-					for (auto& constraint : actorState.constraints) {
-						if (!constraint.constraint) {
-							continue;
-						}
-						auto* bulletConstraint = constraint.GetConstraint();
-						if (!bulletConstraint) {
-							continue;
-						}
-						auto& constraintBodyA = bulletConstraint->getRigidBodyA();
-						auto& constraintBodyB = bulletConstraint->getRigidBodyB();
-						if (std::addressof(constraintBodyA) != std::addressof(rigidBody) &&
-							std::addressof(constraintBodyB) != std::addressof(rigidBody)) {
-							continue;
-						}
-						const auto bothKinematic =
-							constraintBodyA.isStaticOrKinematicObject() &&
-							constraintBodyB.isStaticOrKinematicObject();
-						bulletConstraint->setEnabled(!bothKinematic);
+					if (dynamicsWorld_) {
+						dynamicsWorld_->updateConstraintsForBone(body.bone.get());
 					}
 				}
 			}

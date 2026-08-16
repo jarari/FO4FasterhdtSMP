@@ -110,7 +110,6 @@ namespace Smp
 				continue;
 			}
 			if (skipFirstPersonPlayerPhysics && actorState.actor == player) {
-				actorState.currentWindFactor = 0.0F;
 				continue;
 			}
 			UpdateMeshDisableStatesLocked(actorState);
@@ -155,8 +154,8 @@ namespace Smp
 		const auto readMs = ElapsedMs(phaseStart, Clock::now());
 
 		phaseStart = Clock::now();
-		UpdateWindLocked();
-		ApplyWindForcesLocked();
+		UpdateWindLocked(simulationDelta);
+		ApplyWindForcesLocked(simulationDelta);
 		const auto windMs = ElapsedMs(phaseStart, Clock::now());
 
 		pendingStepReadMs_ += readMs;
@@ -178,6 +177,7 @@ namespace Smp
 
 		ResetFrameCollisionProfile();
 		auto phaseStart = Clock::now();
+		hdt::g_pluginInterface.OnPreStep({ dynamicsWorld_->getCollisionObjectArray(), a_deltaSeconds });
 		const auto translationOffset = ApplyTranslationOffset(*dynamicsWorld_);
 		if (auto* world = static_cast<Fo4SkinnedMeshWorld*>(dynamicsWorld_.get())) {
 			world->StepReference(a_deltaSeconds, a_fixedStepSeconds);
@@ -186,6 +186,7 @@ namespace Smp
 		if (!translationOffset.fuzzyZero()) {
 			RefreshSkinnedMeshWorldState(*dynamicsWorld_);
 		}
+		hdt::g_pluginInterface.OnPostStep({ dynamicsWorld_->getCollisionObjectArray(), a_deltaSeconds });
 		const auto bulletMs = ElapsedMs(phaseStart, Clock::now());
 		std::uint32_t collisionCalls = 0;
 		const auto collisionMs = ConsumeFrameCollisionProfile(collisionCalls);
@@ -333,7 +334,7 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::UpdateWindLocked()
+	void Fo4PhysicsWorld::UpdateWindLocked(const float a_deltaSeconds)
 	{
 		if (!windEnabled_ || windStrength_ <= 0.0F) {
 			currentWind_.setZero();
@@ -344,21 +345,32 @@ namespace Smp
 		auto direction = windDirection_;
 		auto strength = windStrength_;
 		if (windUseWeather_) {
+			windWeatherCooldown_ -= std::max(a_deltaSeconds, 0.0F);
+			if (windWeatherCooldown_ > 0.0F) {
+				return;
+			}
+
 			const auto* sky = RE::Sky::GetSingleton();
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			auto* cell = player ? player->GetParentCell() : nullptr;
-			if (!IsWeatherWindSkyValid(sky) || !player || !cell || !cell->IsExterior() || !cell->worldSpace) {
+			if (!IsWeatherWindSkyValid(sky) || !player || !cell || !cell->worldSpace) {
 				ClearWindState(currentWind_, targetWind_, windWeatherCooldown_, windWeatherLongCooldownSeconds_);
 				return;
 			}
 
-			windWeatherCooldown_ -= currentStepSeconds_;
-			if (windWeatherCooldown_ <= 0.0F) {
-				direction = WindDirectionFromFo4SkyAngle(sky->windAngle);
-				strength *= std::max(sky->windSpeed, 0.0F);
-				targetWind_ = direction * strength * kGameUnitsPerMeter;
-				windWeatherCooldown_ = windWeatherShortCooldownSeconds_;
+			auto angleUnits = sky->windAngle;
+			if (sky->currentWeather) {
+				constexpr auto windDirectionIndex =
+					static_cast<std::size_t>(RE::TESWeather::WeatherData::kWindDir);
+				angleUnits = static_cast<float>(
+					static_cast<std::uint8_t>(sky->currentWeather->weatherData[windDirectionIndex]));
 			}
+			direction = WindDirectionFromFo4AngleUnits(
+				angleUnits,
+				RandomWeatherDirectionOffsetDegrees(windRandomEngine_));
+			strength *= std::max(sky->windSpeed, 0.0F);
+			targetWind_ = direction * strength * kGameUnitsPerMeter;
+			windWeatherCooldown_ = windWeatherShortCooldownSeconds_;
 		} else {
 			targetWind_ = direction * strength * kGameUnitsPerMeter;
 		}
@@ -371,14 +383,13 @@ namespace Smp
 		}
 	}
 
-	void Fo4PhysicsWorld::ApplyWindForcesLocked()
+	void Fo4PhysicsWorld::ApplyWindForcesLocked(const float a_deltaSeconds)
 	{
 		const auto windMagnitude = currentWind_.length();
 		if (windMagnitude <= SIMD_EPSILON) {
-			for (auto& actorStatePointer : systems_) {
-				auto& actorState = *actorStatePointer;
-				actorState.currentWindFactor = 0.0F;
-			}
+			// The obstruction factor belongs to the actor/system, not the current
+			// weather sample. Preserve it while wind is absent so returning weather
+			// does not have to ramp up from zero.
 			return;
 		}
 
@@ -392,7 +403,7 @@ namespace Smp
 		constexpr btScalar kVerticalPhaseScale = 0.006F;
 		constexpr btScalar kPressureCenterOffset = 0.8F;
 
-		windTime_ += hdt::clampScalar(currentStepSeconds_, 0.0F, kMaxFrameStep);
+		windTime_ += hdt::clampScalar(a_deltaSeconds, 0.0F, kMaxFrameStep);
 		if (windTime_ > kTimeWrap) {
 			windTime_ -= kTimeWrap;
 		}
@@ -413,17 +424,15 @@ namespace Smp
 		for (auto& actorStatePointer : systems_) {
 			auto& actorState = *actorStatePointer;
 			if (actorState.IsInactive()) {
-				actorState.currentWindFactor = 0.0F;
 				continue;
 			}
 			if (windUseWeather_ && !IsActorWeatherWindCellValid(actorState.actor)) {
-				actorState.currentWindFactor = 0.0F;
 				continue;
 			}
 
 			const auto targetActorWindScale = ResolveActorWindObstructionFactor(actorState.actor, currentWind_, windDistanceForNoWind_, windDistanceForMaxWind_);
-			actorState.currentWindFactor += (targetActorWindScale - actorState.currentWindFactor) / static_cast<float>(std::max(windSmoothingSamples_, 1));
-			if (std::abs(actorState.currentWindFactor - targetActorWindScale) <= 0.001F) {
+			actorState.currentWindFactor = std::lerp(actorState.currentWindFactor, targetActorWindScale, 0.05F);
+			if (std::abs(actorState.currentWindFactor - targetActorWindScale) <= 0.01F) {
 				actorState.currentWindFactor = targetActorWindScale;
 			}
 			const auto actorWindScale = std::clamp(actorState.currentWindFactor, 0.0F, 1.0F);

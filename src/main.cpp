@@ -5,6 +5,7 @@
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PapyrusFunctions.h"
+#include "PluginInterfaceImpl.h"
 #include "PhysicsXml.h"
 #include "SmpConfig.h"
 
@@ -622,6 +623,7 @@ void OnInit(F4SE::MessagingInterface::Message* a_msg)
 {
 	switch (a_msg->type) {
 		case F4SE::MessagingInterface::kPostPostLoad:
+			hdt::g_pluginInterface.OnPostPostLoad();
 			break;
 		case F4SE::MessagingInterface::kPreLoadGame:
 			Smp::Fo4PhysicsWorld::GetSingleton()->BeginSaveLoad();
@@ -658,6 +660,8 @@ F4SEPluginLoad(const F4SE::LoadInterface* a_f4se)
 		RuntimeName(),
 		runtimeVersion.string(),
 		executableVersion.string());
+
+	hdt::g_pluginInterface.Initialize();
 
 	if (!Smp::Papyrus::Register()) {
 		spdlog::error("failed to register DynamicHDT Papyrus functions");
