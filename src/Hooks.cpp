@@ -7,6 +7,7 @@
 #include "ImguiLayer.h"
 #include "LifecycleEvents.h"
 #include "PhysicsXmlSelection.h"
+#include "RE/A/Actor.h"
 #include "RE/B/BSAnimationGraphManager.h"
 #include "RE/B/BGSHeadPart.h"
 #include "RE/B/BSGeometry.h"
@@ -77,6 +78,8 @@ namespace Hooks
 	LooksMenuUtilsShowLooksMenu_t  OriginalLooksMenuUtilsShowLooksMenu{ nullptr };
 
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
+	inline constexpr std::uint32_t kTemporaryFormFlag = 1u << 14;
+	inline constexpr std::uint32_t kHasChargenSkeletonFlag = 1u << 5;
 	inline constexpr std::size_t kFaceGenQueuePointerOffset = 0x3100;
 	inline constexpr std::size_t kFaceGenArenaCountOffset = 0x31B0;
 	inline constexpr std::size_t kFaceGenStagedDataOffset = 0x31F0;
@@ -145,6 +148,17 @@ namespace Hooks
 			return static_cast<RE::Actor*>(a_ref);
 		}
 		return a_ref->IsActor() ? static_cast<RE::Actor*>(a_ref) : nullptr;
+	}
+
+	bool IsTemporaryChargenActor(const RE::Actor* a_actor)
+	{
+		// BSFaceGenPendingHeadData::Attach creates a disposable Actor, calls both
+		// SetHasChargenSkeleton(true) and TESForm::SetTemporary, and only then calls
+		// Actor::Load3D.  Requiring both bits keeps the filter limited to that actor
+		// instead of excluding ordinary temporary references or real chargen actors.
+		return a_actor &&
+		       (a_actor->GetFormFlags() & kTemporaryFormFlag) != 0 &&
+		       (a_actor->moreFlags & kHasChargenSkeletonFlag) != 0;
 	}
 
 	bool IsBipedObjectSlot(const RE::BIPED_OBJECT a_bipedObject)
@@ -393,6 +407,10 @@ namespace Hooks
 
 	void EmitEvent(const Smp::LifecycleEvent& a_event)
 	{
+		if (IsTemporaryChargenActor(a_event.actor)) {
+			return;
+		}
+
 		const auto highFrequency =
 			(a_event.type == Smp::LifecycleEventType::kActorSet3D && !a_event.object) ||
 			((a_event.type == Smp::LifecycleEventType::kArmorApplySkinnedObjects ||
@@ -419,7 +437,7 @@ namespace Hooks
 	{
 		auto* actor = AsActor(a_ref);
 		auto* faceNode = actor ? actor->GetFaceNodeSkinned() : nullptr;
-		if (!actor || !faceNode) {
+		if (!actor || IsTemporaryChargenActor(actor) || !faceNode) {
 			return;
 		}
 
@@ -501,10 +519,15 @@ namespace Hooks
 			return OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
 		}
 
+		auto* actor = ResolveActor(a_biped);
+		if (IsTemporaryChargenActor(actor)) {
+			ScopedApplySkinnedObjectsDepth scopedDepth;
+			return OriginalBipedAnimApplySkinnedObjects(a_biped, a_originalModelRoot, a_bipedObject, a_firstPerson);
+		}
+
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* originalModelObject = a_originalModelRoot ? static_cast<RE::NiAVObject*>(a_originalModelRoot) : nullptr;
-		auto* actor = ResolveActor(a_biped);
 		auto* ownershipRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
 		if (!ownershipRoot && actor) {
 			ownershipRoot = actor->Get3D();
@@ -552,6 +575,15 @@ namespace Hooks
 	RE::NiAVObject* HookedBipedAnimAttachSkinnedObject(RE::BipedAnim* a_biped, RE::NiNode* a_modelRoot, RE::NiNode* a_skeletonRoot, RE::BIPED_OBJECT a_bipedObject, bool a_firstPerson)
 	{
 		const bool nestedApply = ApplySkinnedObjectsDepth > 0;
+		auto* actor = ResolveActor(a_biped);
+		if (IsTemporaryChargenActor(actor)) {
+			auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_modelRoot, a_skeletonRoot, a_bipedObject, a_firstPerson);
+			if (nestedApply) {
+				ApplySkinnedObjectsSkeletonRoot = a_skeletonRoot;
+			}
+			return attachedObject;
+		}
+
 		if (!IsBipedObjectSlot(a_bipedObject)) {
 			auto* attachedObject = OriginalBipedAnimAttachSkinnedObject(a_biped, a_modelRoot, a_skeletonRoot, a_bipedObject, a_firstPerson);
 			if (nestedApply) {
@@ -563,7 +595,6 @@ namespace Hooks
 		auto* bipObject = a_biped ? a_biped->GetBipObject(a_bipedObject) : nullptr;
 		const std::string_view nifPath = bipObject && bipObject->part ? bipObject->part->GetModel() : "";
 		auto* modelObject = a_modelRoot ? static_cast<RE::NiAVObject*>(a_modelRoot) : nullptr;
-		auto* actor = ResolveActor(a_biped);
 		auto* ownershipRoot = actor ? actor->Get3D(a_firstPerson) : nullptr;
 		if (!ownershipRoot && actor) {
 			ownershipRoot = actor->Get3D();
@@ -612,12 +643,15 @@ namespace Hooks
 	void HookedBipedAnimAttachToParent(RE::NiAVObject* a_parent, RE::NiAVObject* a_attachedObject, RE::NiAVObject* a_sourceObject, RE::BSTSmartPointer<RE::BipedAnim>& a_biped, RE::BIPED_OBJECT a_bipedObject)
 	{
 		OriginalBipedAnimAttachToParent(a_parent, a_attachedObject, a_sourceObject, a_biped, a_bipedObject);
-		if (ApplySkinnedObjectsDepth > 0 || !IsBipedObjectSlot(a_bipedObject)) {
+		auto* actor = ResolveActor(a_biped.get());
+		if (ApplySkinnedObjectsDepth > 0 ||
+			IsTemporaryChargenActor(actor) ||
+			!IsBipedObjectSlot(a_bipedObject)) {
 			return;
 		}
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorAttachToParent,
-			.actor = ResolveActor(a_biped.get()),
+			.actor = actor,
 			.biped = a_biped.get(),
 			.bipedObject = a_bipedObject,
 			.object = a_attachedObject,
@@ -628,10 +662,16 @@ namespace Hooks
 
 	void HookedBipedAnimRemovePart(RE::BipedAnim* a_biped, RE::BIPOBJECT* a_bipObject, bool a_queueDetach)
 	{
+		auto* actor = ResolveActor(a_biped);
+		if (IsTemporaryChargenActor(actor)) {
+			OriginalBipedAnimRemovePart(a_biped, a_bipObject, a_queueDetach);
+			return;
+		}
+
 		const auto bipedObject = ResolveBipedObject(a_biped, a_bipObject);
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorDetachBegin,
-			.actor = ResolveActor(a_biped),
+			.actor = actor,
 			.biped = a_biped,
 			.bipObject = a_bipObject,
 			.bipedObject = bipedObject,
@@ -644,7 +684,7 @@ namespace Hooks
 
 		EmitEvent({
 			.type = Smp::LifecycleEventType::kArmorDetachEnd,
-			.actor = ResolveActor(a_biped),
+			.actor = actor,
 			.biped = a_biped,
 			.bipObject = a_bipObject,
 			.bipedObject = bipedObject,
@@ -663,7 +703,7 @@ namespace Hooks
 
 		auto* actor = ResolveActor(a_biped);
 		auto* currentFace = actor ? actor->GetFaceNodeSkinned() : nullptr;
-		if (!actor || !currentFace) {
+		if (!actor || IsTemporaryChargenActor(actor) || !currentFace) {
 			return;
 		}
 
@@ -686,7 +726,7 @@ namespace Hooks
 
 		auto* actor = AsActor(a_ref);
 		auto* currentFace = actor ? actor->GetFaceNodeSkinned() : nullptr;
-		if (!actor || !currentFace || (a_faceNode && a_faceNode != currentFace)) {
+		if (!actor || IsTemporaryChargenActor(actor) || !currentFace || (a_faceNode && a_faceNode != currentFace)) {
 			return;
 		}
 		SeedFaceGenActor(a_ref);
@@ -701,7 +741,7 @@ namespace Hooks
 	{
 		auto* actor = AsActor(a_ref);
 		auto* oldRoot = actor ? actor->Get3D(false) : nullptr;
-		if (!actor || !oldRoot || oldRoot == a_replacementRoot) {
+		if (!actor || IsTemporaryChargenActor(actor) || !oldRoot || oldRoot == a_replacementRoot) {
 			return;
 		}
 
@@ -739,7 +779,7 @@ namespace Hooks
 	RE::NiAVObject* HookedActorLoad3D(RE::TESObjectREFR* a_ref, bool a_backgroundLoading)
 	{
 		auto* loaded3D = OriginalActorLoad3D(a_ref, a_backgroundLoading);
-		if (auto* actor = AsActor(a_ref)) {
+		if (auto* actor = AsActor(a_ref); actor && !IsTemporaryChargenActor(actor)) {
 			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, loaded3D);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorLoad3D,
@@ -753,7 +793,7 @@ namespace Hooks
 	RE::NiAVObject* HookedPlayerCharacterLoad3D(RE::TESObjectREFR* a_ref, bool a_backgroundLoading)
 	{
 		auto* loaded3D = OriginalPlayerCharacterLoad3D(a_ref, a_backgroundLoading);
-		if (auto* actor = AsActor(a_ref)) {
+		if (auto* actor = AsActor(a_ref); actor && !IsTemporaryChargenActor(actor)) {
 			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, loaded3D);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorLoad3D,
@@ -768,7 +808,7 @@ namespace Hooks
 	{
 		BeginSkeletonTransitionIfNeeded(a_ref, a_object);
 		OriginalActorSet3D(a_ref, a_object, a_queue3DTasks);
-		if (auto* actor = AsActor(a_ref)) {
+		if (auto* actor = AsActor(a_ref); actor && !IsTemporaryChargenActor(actor)) {
 			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, a_object);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorSet3D,
@@ -783,7 +823,7 @@ namespace Hooks
 	{
 		BeginSkeletonTransitionIfNeeded(a_ref, a_object);
 		OriginalPlayerCharacterSet3D(a_ref, a_object, a_queue3DTasks);
-		if (auto* actor = AsActor(a_ref)) {
+		if (auto* actor = AsActor(a_ref); actor && !IsTemporaryChargenActor(actor)) {
 			Smp::Fo4PhysicsWorld::GetSingleton()->NoteActorSkeletonLoaded(actor, a_object);
 			EmitEvent({
 				.type = Smp::LifecycleEventType::kActorSet3D,
@@ -796,6 +836,11 @@ namespace Hooks
 
 	void HookedActorOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
+		if (IsTemporaryChargenActor(AsActor(a_ref))) {
+			OriginalActorOnHeadInitialized(a_ref);
+			return;
+		}
+
 		SeedFaceGenActor(a_ref);
 		OriginalActorOnHeadInitialized(a_ref);
 		auto* actor = AsActor(a_ref);
@@ -812,6 +857,11 @@ namespace Hooks
 
 	void HookedPlayerCharacterOnHeadInitialized(RE::TESObjectREFR* a_ref)
 	{
+		if (IsTemporaryChargenActor(AsActor(a_ref))) {
+			OriginalPlayerCharacterOnHeadInitialized(a_ref);
+			return;
+		}
+
 		SeedFaceGenActor(a_ref);
 		OriginalPlayerCharacterOnHeadInitialized(a_ref);
 		auto* actor = AsActor(a_ref);
@@ -945,6 +995,12 @@ namespace Hooks
 
 	void HookedFaceGenSkinAllGeometry(RE::BSFaceGenNiNode* a_faceNode, RE::NiNode* a_skeleton, bool a_arg3)
 	{
+		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		if (IsTemporaryChargenActor(actor)) {
+			OriginalFaceGenSkinAllGeometry(a_faceNode, a_skeleton, a_arg3);
+			return;
+		}
+
 		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
 		// Vanilla only fixes skin instances on direct geometry children. Targets
 		// must exist and every retained slot must be safe before that pass because
@@ -956,7 +1012,7 @@ namespace Hooks
 			physicsWorld->CompleteRetainedFaceSkinning(transitionActor, a_faceNode, a_skeleton);
 		}
 
-		auto* actor = transitionActor ? transitionActor : ResolveFaceGenActor(a_faceNode, a_skeleton);
+		actor = transitionActor ? transitionActor : actor;
 		if (!actor) {
 			spdlog::trace(
 				"skipped skinned head full-geometry event because actor is unresolved faceNode={} skeleton={}",
@@ -977,6 +1033,11 @@ namespace Hooks
 		auto incrementalContext = std::move(PendingIncrementalHeadPart);
 		PendingIncrementalHeadPart = {};
 		auto* actor = ResolveFaceGenActor(a_faceNode, a_skeleton);
+		if (IsTemporaryChargenActor(actor)) {
+			OriginalFaceGenSkinSingleGeometry(a_faceNode, a_skeleton, a_geometry, a_arg4);
+			return;
+		}
+
 		std::vector<Smp::ArmorBoneReference> mainReferences;
 		std::vector<Smp::RetainedSkinBinding> liveMainBindings;
 		const auto useMainContext =

@@ -75,7 +75,10 @@ namespace Smp::NiObject
 		}
 
 		const auto index = found->second;
-		return index >= 0 && index < a_tree->boneCountExpanded ?
+		// boneCountExpanded is the number of records whose NiNode has already been
+		// materialized.  boneMap indexes the complete flattened-bone array, including
+		// deferred records such as Head_skin, so validate against boneCount.
+		return index >= 0 && index < a_tree->boneCount ?
 			std::addressof(a_tree->bone[index]) :
 			nullptr;
 	}
@@ -89,10 +92,9 @@ namespace Smp::NiObject
 			return true;
 		}
 
-		// BSBoneMap is the immutable name-to-node map created from skeleton.nif.
-		// It includes default deferred/skin nodes that are not guaranteed to have
-		// an entry in BSFlattenedBoneTree::boneMap. Armor nodes attached later are
-		// never added to BOM, which makes it the correct ownership boundary.
+		// Non-flattened skeletons use their concrete BSBoneMap as the fallback.
+		// Flattened skeleton membership is decided above from the complete boneMap;
+		// BSBoneMap only gains a deferred bone after the engine materializes its node.
 		const RE::BSFixedString boneName{ std::string(a_name) };
 		if (auto* bones = FindDefaultBoneMap(a_root)) {
 			return bones->find(boneName) != bones->end();
