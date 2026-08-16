@@ -27,6 +27,8 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -47,6 +49,8 @@ namespace Hooks
 	using Reset3D_t = void (*)(RE::Actor*, bool, std::uint32_t, bool, std::uint32_t);
 	using FaceGenSkinAllGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, bool);
 	using FaceGenSkinSingleGeometry_t = void (*)(RE::BSFaceGenNiNode*, RE::NiNode*, RE::BSGeometry*, bool);
+	using FaceGenQueuedModelAddRequest_t = std::uint32_t (*)(void*, void*, const void*);
+	using TESModelDBQueuedHandlesDoOnCollectionFinished_t = void (*)(void*);
 	using FaceGenPrepareHeadPart_t = void (*)(RE::BSFaceGenNiNode*, RE::BGSHeadPart*, RE::TESNPC*, bool, bool);
 	using FaceGenApplyMorphToNewMesh_t = void (*)(void*, RE::BSFixedString*, void*, RE::NiPointer<RE::NiAVObject>*, float);
 	using BakeChargenMorphs_t = void (*)(RE::TESNPC*, RE::NiNode*, RE::NiNode*, void*);
@@ -70,12 +74,17 @@ namespace Hooks
 	Reset3D_t                      OriginalReset3D{ nullptr };
 	FaceGenSkinAllGeometry_t       OriginalFaceGenSkinAllGeometry{ nullptr };
 	FaceGenSkinSingleGeometry_t    OriginalFaceGenSkinSingleGeometry{ nullptr };
+	FaceGenQueuedModelAddRequest_t OriginalFaceGenQueuedModelAddRequest{ nullptr };
+	TESModelDBQueuedHandlesDoOnCollectionFinished_t OriginalTESModelDBQueuedHandlesDoOnCollectionFinished{ nullptr };
 	FaceGenPrepareHeadPart_t       OriginalFaceGenPrepareHeadPart{ nullptr };
 	FaceGenApplyMorphToNewMesh_t   OriginalFaceGenApplyMorphToNewMesh{ nullptr };
 	BakeChargenMorphs_t            OriginalArmorBakeChargenMorphs{ nullptr };
 	BakeChargenMorphs_t            OriginalHeadBakeChargenMorphs{ nullptr };
 	SetFaceGenBoneName_t           OriginalSetFaceGenBoneName{ nullptr };
 	LooksMenuUtilsShowLooksMenu_t  OriginalLooksMenuUtilsShowLooksMenu{ nullptr };
+	REL::Relocation<std::uintptr_t> TESModelDBQueuedHandlesVTable{
+		RE::VTABLE::TESModelDB__TESQueuedHandles[0]
+	};
 
 	inline constexpr std::uint32_t kFaceGenModelExtraDataBoneNameLimit = 0x80;
 	inline constexpr std::uint32_t kTemporaryFormFlag = 1u << 14;
@@ -88,6 +97,12 @@ namespace Hooks
 	inline constexpr std::size_t kFaceGenPreloadIndexOffset = 0x3498;
 	inline constexpr std::size_t kFaceGenQueueReadIndexOffset = 0x2400;
 	inline constexpr std::size_t kFaceGenQueueWriteIndexOffset = 0x2500;
+	inline constexpr std::size_t kQueuedModelHandleArrayOffset = 0x88;
+	inline constexpr std::size_t kQueuedModelHandleStorageOffset = 0x90;
+	inline constexpr std::size_t kQueuedModelHandleCountOffset = 0xC0;
+	inline constexpr std::size_t kQueuedModelHandleEntrySize = 0x18;
+	inline constexpr std::size_t kModelDatabaseEntryRootOffset = 0x20;
+	inline constexpr std::size_t kMaxQueuedFaceGenModels = 4096;
 
 	template <class T>
 	T ReadFaceGenField(const void* a_base, const std::size_t a_offset)
@@ -189,6 +204,162 @@ namespace Hooks
 			return std::nullopt;
 		}
 		return path->string();
+	}
+
+	const std::byte* GetQueuedModelHandleEntries(void* a_queuedHandles)
+	{
+		const auto allocationState = ReadFaceGenField<std::int32_t>(
+			a_queuedHandles,
+			kQueuedModelHandleArrayOffset);
+		return allocationState >= 0 ?
+			reinterpret_cast<const std::byte*>(ReadFaceGenField<std::uintptr_t>(
+				a_queuedHandles,
+				kQueuedModelHandleStorageOffset)) :
+			static_cast<const std::byte*>(a_queuedHandles) + kQueuedModelHandleStorageOffset;
+	}
+
+	void* GetQueuedModelResourceEntry(const std::byte* a_handleEntry)
+	{
+		return reinterpret_cast<void*>(ReadFaceGenField<std::uintptr_t>(a_handleEntry, 0));
+	}
+
+	RE::NiNode* GetQueuedModelRoot(void* a_resourceEntry)
+	{
+		return a_resourceEntry ?
+			reinterpret_cast<RE::NiNode*>(ReadFaceGenField<std::uintptr_t>(
+				a_resourceEntry,
+				kModelDatabaseEntryRootOffset)) :
+			nullptr;
+	}
+
+	std::string GetQueuedExtraPartModelPath(void* a_model)
+	{
+		if (!a_model) {
+			return {};
+		}
+
+		auto* headPart = static_cast<RE::BGSHeadPart*>(
+			static_cast<RE::BGSModelMaterialSwap*>(a_model));
+		if (!headPart->IsExtraPart()) {
+			return {};
+		}
+
+		const auto* modelPath = static_cast<RE::BGSModelMaterialSwap*>(headPart)->GetModel();
+		return modelPath && *modelPath ? std::string(modelPath) : std::string{};
+	}
+
+	struct QueuedExtraPartRequest
+	{
+		void* resourceEntry{ nullptr };
+		std::string modelPath;
+	};
+
+	std::mutex TrackedFaceGenExtraPartsLock;
+	std::unordered_map<void*, std::vector<QueuedExtraPartRequest>> TrackedFaceGenExtraParts;
+
+	void CacheQueuedExtraPartSource(
+		const std::string_view a_modelPath,
+		void* a_resourceEntry,
+		RE::NiNode* a_loadedRoot)
+	{
+		if (!a_loadedRoot) {
+			return;
+		}
+
+		if (!Smp::HeadPartModelSourceCache::Capture(a_modelPath, a_loadedRoot)) {
+			spdlog::warn(
+				"failed to clone Fallout-queued extra-part source nif='{}' entry={}",
+				a_modelPath,
+				a_resourceEntry);
+			return;
+		}
+	}
+
+	void TrackFaceGenQueuedExtraPart(
+		void* a_queuedHandles,
+		const std::uint32_t a_countBefore,
+		const std::string_view a_modelPath)
+	{
+		const auto count = ReadFaceGenField<std::uint32_t>(a_queuedHandles, kQueuedModelHandleCountOffset);
+		if (count <= a_countBefore || count > kMaxQueuedFaceGenModels) {
+			return;
+		}
+
+		auto* entries = GetQueuedModelHandleEntries(a_queuedHandles);
+		if (!entries) {
+			return;
+		}
+
+		// The appended HandleEntry is Fallout's authoritative association between
+		// the TESModel request and its MO2/VFS-resolved BSModelDB entry.
+		auto* handleEntry = entries + (count - 1) * kQueuedModelHandleEntrySize;
+		auto* resourceEntry = GetQueuedModelResourceEntry(handleEntry);
+		if (!resourceEntry) {
+			return;
+		}
+
+		if (auto* loadedRoot = GetQueuedModelRoot(resourceEntry)) {
+			CacheQueuedExtraPartSource(a_modelPath, resourceEntry, loadedRoot);
+			return;
+		}
+
+		std::scoped_lock lock(TrackedFaceGenExtraPartsLock);
+		TrackedFaceGenExtraParts[a_queuedHandles].push_back({
+			.resourceEntry = resourceEntry,
+			.modelPath = std::string(a_modelPath),
+		});
+	}
+
+	std::vector<QueuedExtraPartRequest> TakeTrackedFaceGenExtraParts(void* a_queuedHandles)
+	{
+		if (!a_queuedHandles) {
+			return {};
+		}
+
+		std::scoped_lock lock(TrackedFaceGenExtraPartsLock);
+		const auto found = TrackedFaceGenExtraParts.find(a_queuedHandles);
+		if (found == TrackedFaceGenExtraParts.end()) {
+			return {};
+		}
+
+		auto result = std::move(found->second);
+		TrackedFaceGenExtraParts.erase(found);
+		return result;
+	}
+
+	void CaptureCompletedFaceGenExtraParts(void* a_queuedHandles)
+	{
+		for (const auto& request : TakeTrackedFaceGenExtraParts(a_queuedHandles)) {
+			auto* loadedRoot = GetQueuedModelRoot(request.resourceEntry);
+			if (!loadedRoot) {
+				spdlog::warn(
+					"Fallout completed queued extra-part without an NiNode root nif='{}' entry={}",
+					request.modelPath,
+					request.resourceEntry);
+				continue;
+			}
+
+			CacheQueuedExtraPartSource(request.modelPath, request.resourceEntry, loadedRoot);
+		}
+	}
+
+	std::uint32_t HookedFaceGenQueuedModelAddRequest(void* a_queuedHandles, void* a_model, const void* a_args)
+	{
+		const auto requestedPath = GetQueuedExtraPartModelPath(a_model);
+		const auto countBefore = requestedPath.empty() ?
+			0U :
+			ReadFaceGenField<std::uint32_t>(a_queuedHandles, kQueuedModelHandleCountOffset);
+		const auto result = OriginalFaceGenQueuedModelAddRequest(a_queuedHandles, a_model, a_args);
+		if (!requestedPath.empty()) {
+			TrackFaceGenQueuedExtraPart(a_queuedHandles, countBefore, requestedPath);
+		}
+		return result;
+	}
+
+	void HookedTESModelDBQueuedHandlesDoOnCollectionFinished(void* a_queuedHandles)
+	{
+		OriginalTESModelDBQueuedHandlesDoOnCollectionFinished(a_queuedHandles);
+		CaptureCompletedFaceGenExtraParts(a_queuedHandles);
 	}
 
 	struct PreAttachPhysicsContext
@@ -397,6 +568,8 @@ namespace Hooks
 		LogRelocationTarget("TESObjectREFR::FixDisplayedHeadParts", Address::TESObjectREFRFixDisplayedHeadParts.address());
 		LogRelocationTarget("Actor::Reset3D", Address::Reset3D.address());
 		LogRelocationTarget("BSFaceGenUtils::AddHeadPartOnActor", Address::BSFaceGenAddHeadPartOnActor.address());
+		LogRelocationTarget("TESModelDB::TESQueuedHandles vtable", TESModelDBQueuedHandlesVTable.address());
+		LogRelocationTarget("BSFaceGenManager::QueueHeadParts model request callsite", Address::BSFaceGenQueueHeadPartsAddModelRequestCall.address());
 		LogRelocationTarget("BipedAnim::AttachSkinnedObject BakeChargenMorphs callsite", Address::BipedAnimAttachSkinnedObjectBakeChargenMorphsCall.address());
 		LogRelocationTarget("BSFaceGenPendingHeadData::Attach BakeChargenMorphs callsite", Address::BSFaceGenPendingHeadAttachBakeChargenMorphsCall.address());
 		LogRelocationTarget("BSFaceGenUtils::PrepareHeadPart", Address::BSFaceGenPrepareHeadPart.address());
@@ -1231,6 +1404,19 @@ namespace Hooks
 				Address::BSFaceGenSkinAllGeometryVFuncSlot,
 				reinterpret_cast<void*>(&HookedFaceGenSkinAllGeometry));
 		}
+		if (!OriginalTESModelDBQueuedHandlesDoOnCollectionFinished) {
+			OriginalTESModelDBQueuedHandlesDoOnCollectionFinished = InstallVFuncHook<TESModelDBQueuedHandlesDoOnCollectionFinished_t>(
+				"TESModelDB::TESQueuedHandles::DoOnCollectionFinished",
+				TESModelDBQueuedHandlesVTable,
+				Address::TESModelDBQueuedHandlesDoOnCollectionFinishedVFuncSlot,
+				reinterpret_cast<void*>(&HookedTESModelDBQueuedHandlesDoOnCollectionFinished));
+		}
+		if (!OriginalFaceGenQueuedModelAddRequest) {
+			const auto callsite = Address::BSFaceGenQueueHeadPartsAddModelRequestCall.address();
+			OriginalFaceGenQueuedModelAddRequest = reinterpret_cast<FaceGenQueuedModelAddRequest_t>(
+				REL::GetTrampoline().write_call<5>(callsite, reinterpret_cast<std::uintptr_t>(&HookedFaceGenQueuedModelAddRequest)));
+			spdlog::info("BSFaceGenManager::QueueHeadParts model request call hook installed at {:x}", callsite);
+		}
 
 		if (!OriginalReset3D) {
 			OriginalReset3D = CreateBranchGateway5<Reset3D_t>("Actor::Reset3D", Address::Reset3D, Address::Reset3DPrologueSize.value(), reinterpret_cast<void*>(&HookedReset3D));
@@ -1297,6 +1483,8 @@ namespace Hooks
 			OriginalActorOnHeadInitialized &&
 			OriginalPlayerCharacterOnHeadInitialized &&
 			OriginalFaceGenSkinAllGeometry &&
+			OriginalFaceGenQueuedModelAddRequest &&
+			OriginalTESModelDBQueuedHandlesDoOnCollectionFinished &&
 			OriginalReset3D &&
 			OriginalLooksMenuUtilsShowLooksMenu &&
 			OriginalSetFaceGenBoneName &&

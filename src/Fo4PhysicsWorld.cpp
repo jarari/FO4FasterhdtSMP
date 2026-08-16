@@ -1347,12 +1347,16 @@ namespace
 					std::string{};
 				auto* liveGeometry = ResolveLiveHeadPartGeometry(a_faceObject, a_headPart, sourceGeometryName);
 				// extraParts are dependencies of their owning closure. They may provide
-				// meshes and bone layout for a sibling's XML without owning XML themselves.
+				// meshes and bone layout for a sibling's XML without owning XML or a live
+				// FaceGen attachment themselves. Virtual collision-only parts are consumed
+				// from Fallout's retained loaded-model snapshot.
 				const auto contributesToClosure = selection.has_value() || a_headPart->IsExtraPart();
+				const auto contributesMeshSource =
+					contributesToClosure && (liveGeometry || a_headPart->IsExtraPart());
 				if (liveGeometry && contributesToClosure && !a_closure.object) {
 					a_closure.object = liveGeometry;
 				}
-				if (liveGeometry && contributesToClosure &&
+				if (contributesMeshSource &&
 					std::ranges::none_of(a_closure.meshSourceRoots, [&](const auto& a_root) {
 						return a_root.get() == meshSourceRoot.get();
 					})) {
@@ -1386,7 +1390,7 @@ namespace
 						modelPath,
 						sourceGeometryName,
 						selection ? selection->path.string() : std::string{},
-						true);
+						a_headPart->IsExtraPart());
 				} else {
 					const auto liveGeometryName = std::string(std::string_view(liveGeometry->GetName()));
 					const auto selectedXml = selection ? selection->path.string() : std::string{};

@@ -52,6 +52,10 @@ namespace Smp::Address
 		REL::ID{ 840416, 2209534 },
 		VariantOffset{ 0x219, 0x21A }
 	};
+	const IDOffset BSFaceGenQueueHeadPartsAddModelRequestCall{
+		REL::ID{ 1211128, 2209307 },
+		VariantOffset{ 0x181, 0x213 }
+	};
 
 	// Each value ends on an instruction boundary in the corresponding runtime.
 	const VariantOffset BipedAnimApplySkinnedObjectsPrologueSize{ 14, 15 };
@@ -68,4 +72,5 @@ namespace Smp::Address
 	const std::size_t ActorSet3DVFuncSlot = 0x88;
 	const std::size_t ActorOnHeadInitializedVFuncSlot = 0x98;
 	const std::size_t BSFaceGenSkinAllGeometryVFuncSlot = 0x43;
+	const std::size_t TESModelDBQueuedHandlesDoOnCollectionFinishedVFuncSlot = 0x0E;
 }

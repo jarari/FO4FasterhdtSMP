@@ -74,6 +74,7 @@ namespace Smp::Address
 	extern const IDOffset BSFaceGenPendingHeadAttachBakeChargenMorphsCall;
 	extern const IDOffset BSFaceGenAddHeadPartOnActorSkinSingleCall;
 	extern const IDOffset BSFaceGenPrepareHeadPartApplyMorphCall;
+	extern const IDOffset BSFaceGenQueueHeadPartsAddModelRequestCall;
 
 	extern const VariantOffset BipedAnimApplySkinnedObjectsPrologueSize;
 	extern const VariantOffset BipedAnimAttachSkinnedObjectPrologueSize;
@@ -89,4 +90,5 @@ namespace Smp::Address
 	extern const std::size_t ActorSet3DVFuncSlot;
 	extern const std::size_t ActorOnHeadInitializedVFuncSlot;
 	extern const std::size_t BSFaceGenSkinAllGeometryVFuncSlot;
+	extern const std::size_t TESModelDBQueuedHandlesDoOnCollectionFinishedVFuncSlot;
 }
