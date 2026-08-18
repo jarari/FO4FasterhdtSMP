@@ -115,6 +115,11 @@ namespace
 		return RE::BSFixedString(path);
 	}
 
+	bool HasPhysicsSystem(std::monostate, RE::Actor* a_actor)
+	{
+		return a_actor && Smp::Fo4PhysicsWorld::GetSingleton()->HasPhysicsSystem(a_actor);
+	}
+
 	bool IsSoftSuspended(std::monostate, RE::Actor* a_actor)
 	{
 		return a_actor && Smp::Fo4PhysicsWorld::GetSingleton()->IsSoftSuspended(a_actor);
@@ -155,6 +160,7 @@ namespace
 		a_vm->BindNativeMethod(kPapyrusClass, "ReloadPhysicsFile", ReloadPhysicsFile);
 		a_vm->BindNativeMethod(kPapyrusClass, "SwapPhysicsFile", SwapPhysicsFile);
 		a_vm->BindNativeMethod(kPapyrusClass, "QueryCurrentPhysicsFile", QueryCurrentPhysicsFile);
+		a_vm->BindNativeMethod(kPapyrusClass, "HasPhysicsSystem", HasPhysicsSystem);
 		a_vm->BindNativeMethod(kPapyrusClass, "IsSoftSuspended", IsSoftSuspended);
 		a_vm->BindNativeMethod(kPapyrusClass, "TogglePhysics", TogglePhysics);
 		a_vm->BindNativeMethod(kPapyrusClass, "ResetPhysics", ResetPhysics);

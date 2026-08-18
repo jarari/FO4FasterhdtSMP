@@ -246,6 +246,21 @@ namespace Smp
 		return physicsFilePath;
 	}
 
+	bool Fo4PhysicsWorld::HasPhysicsSystem(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+
+		WaitForAsyncStep();
+		std::scoped_lock lock(lock_);
+		PruneInvalidSystemsLocked();
+
+		return std::ranges::any_of(systems_, [a_actor](const auto& a_state) {
+			return a_state->actor == a_actor && a_state->HasPhysics();
+		});
+	}
+
 	bool Fo4PhysicsWorld::IsSoftSuspended(RE::Actor* a_actor)
 	{
 		if (!a_actor) {

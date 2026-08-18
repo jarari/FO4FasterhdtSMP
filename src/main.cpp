@@ -340,6 +340,23 @@ namespace
 		}
 
 		auto* physicsWorld = Smp::Fo4PhysicsWorld::GetSingleton();
+		if (_stricmp(subcommand.data(), "HasPhysicsSystem") == 0) {
+			auto* actor = ResolveConsoleActor(a_refObject);
+			if (!actor) {
+				a_returnValue = 0.0F;
+				return true;
+			}
+
+			const auto hasPhysicsSystem = physicsWorld->HasPhysicsSystem(actor);
+			a_returnValue = hasPhysicsSystem ? 1.0F : 0.0F;
+			if (auto* console = RE::ConsoleLog::GetSingleton()) {
+				console->Log(
+					"[HDT-SMP] selected actor has a physics system: {}",
+					hasPhysicsSystem ? "true" : "false");
+			}
+			return true;
+		}
+
 		if (_stricmp(subcommand.data(), "IsSoftSuspended") == 0) {
 			auto* actor = ResolveConsoleActor(a_refObject);
 			if (!actor) {

@@ -10,6 +10,9 @@ Bool Function SwapPhysicsFile(Actor on_actor, String old_physics_file_path, Stri
 ; Return the current physics XML path for an equipped ArmorAddon.
 String Function QueryCurrentPhysicsFile(Actor on_actor, ArmorAddon on_ARMA_item, Bool verbose_log = false) Native Global
 
+; Return true when the Actor has at least one initialized physics system.
+Bool Function HasPhysicsSystem(Actor actor) Native Global
+
 ; Return true when the Actor has retained physics that is currently soft suspended.
 Bool Function IsSoftSuspended(Actor actor) Native Global
 

@@ -91,6 +91,7 @@ namespace Smp
 		bool ReloadPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, std::string_view a_physicsFilePath, bool a_persist, bool a_verbose);
 		bool SwapPhysicsFile(RE::Actor* a_actor, std::string_view a_oldPhysicsFilePath, std::string_view a_newPhysicsFilePath, bool a_persist, bool a_verbose);
 		[[nodiscard]] std::string QueryCurrentPhysicsFile(RE::Actor* a_actor, RE::TESObjectARMA* a_armorAddon, bool a_verbose);
+		[[nodiscard]] bool HasPhysicsSystem(RE::Actor* a_actor);
 		[[nodiscard]] bool IsSoftSuspended(RE::Actor* a_actor);
 		[[nodiscard]] std::vector<bool> TogglePhysics(RE::Actor* a_actor, std::span<const std::string> a_boneNames, bool a_on);
 		void ResetActorPhysics(RE::Actor* a_actor, bool a_full);
