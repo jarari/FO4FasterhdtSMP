@@ -11,11 +11,17 @@ namespace RE
 {
 	class Actor;
 	class BGSHeadPart;
+	struct BSFlattenedBoneRef;
 	class BSFlattenedBoneTree;
 	class NiAVObject;
 	class NiNode;
 	class NiPoint3;
 	class TESNPC;
+
+	namespace BSSkin
+	{
+		class Instance;
+	}
 }
 
 namespace Smp::Address
@@ -46,12 +52,15 @@ namespace Smp::Address
 	using BSFlattenedBoneTreeGetOrCreateBoneNode_t =
 		RE::NiNode*(RE::BSFlattenedBoneTree*, const RE::BSFixedString&, bool&);
 	using BSFlattenedBoneTreeFind_t = RE::BSFlattenedBoneTree*(RE::NiAVObject*, std::int32_t);
+	using BSSkinInstanceGetFlattenedBoneReference_t =
+		bool(const RE::BSSkin::Instance*, std::uint32_t, RE::BSFlattenedBoneRef&);
 	using TESNPCGetAlternateHeadPartList_t = RE::BGSHeadPart**(const RE::TESNPC*);
 	using TESNPCGetAlternateHeadPartListSize_t = std::uint32_t(const RE::TESNPC*);
 
 	extern REL::Relocation<ActorCalculateLOS_t*> ActorCalculateLOS;
 	extern REL::Relocation<BSFlattenedBoneTreeGetOrCreateBoneNode_t*> BSFlattenedBoneTreeGetOrCreateBoneNode;
 	extern REL::Relocation<BSFlattenedBoneTreeFind_t*> BSFlattenedBoneTreeFind;
+	extern REL::Relocation<BSSkinInstanceGetFlattenedBoneReference_t*> BSSkinInstanceGetFlattenedBoneReference;
 	extern REL::Relocation<TESNPCGetAlternateHeadPartList_t*> TESNPCGetAlternateHeadPartList;
 	extern REL::Relocation<TESNPCGetAlternateHeadPartListSize_t*> TESNPCGetAlternateHeadPartListSize;
 

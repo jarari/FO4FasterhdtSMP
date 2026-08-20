@@ -4,6 +4,17 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace RE
+{
+	struct BSFlattenedBoneRef
+	{
+		NiPointer<NiAVObject> object;
+		std::int32_t           index{ -1 };
+		std::uint32_t          pad0C{ 0 };
+	};
+	static_assert(sizeof(BSFlattenedBoneRef) == 0x10);
+}
+
 namespace RE::BSSkin
 {
 	inline constexpr std::uint32_t kMaxExpectedBones = 1024;

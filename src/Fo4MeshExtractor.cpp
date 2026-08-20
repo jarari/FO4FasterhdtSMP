@@ -1,5 +1,6 @@
 #include "Fo4MeshExtractor.h"
 
+#include "Address.h"
 #include "BSSkin.h"
 #include "Fo4CpuBuffer.h"
 #include "Fo4NiObjectUtils.h"
@@ -296,34 +297,8 @@ namespace
 		return Smp::FindMatchingPhysicsName(a_meshNames, name).has_value();
 	}
 
-	RE::NiAVObject* GetTopRoot(RE::NiAVObject* a_object)
-	{
-		auto* current = a_object;
-		while (current && current->parent) {
-			current = current->parent;
-		}
-		return current;
-	}
-
-	RE::BSFlattenedBoneTree::FlattenedBone* FindFlattenedBoneByWorldTransform(RE::BSFlattenedBoneTree* a_tree, const RE::NiTransform* a_worldTransform)
-	{
-		const auto boneCount = a_tree ? a_tree->boneCountExpanded : 0;
-		if (!a_tree || !a_tree->bone || !a_worldTransform || boneCount <= 0 || boneCount > static_cast<std::int32_t>(RE::BSSkin::kMaxExpectedBones)) {
-			return nullptr;
-		}
-
-		for (std::int32_t index = 0; index < boneCount; ++index) {
-			auto& entry = a_tree->bone[index];
-			if (std::addressof(entry.world) == a_worldTransform) {
-				return std::addressof(entry);
-			}
-		}
-		return nullptr;
-	}
-
 	bool DecodeSkinBones(
 		RE::BSSkin::Instance* a_skin,
-		RE::NiAVObject* a_extractionRoot,
 		std::vector<Smp::Fo4DecodedSkinBone>& a_bones,
 		Smp::Fo4MeshExtractionStats& a_stats)
 	{
@@ -344,35 +319,78 @@ namespace
 			spdlog::warn("ignoring suspicious FO4 skin bone data with {} transforms", a_skin->boneData->transforms.size());
 		}
 
-		auto* flattened = Smp::NiObject::FindFlattenedBoneTree(a_skin->rootNode);
-		if (!flattened) {
-			flattened = Smp::NiObject::FindFlattenedBoneTree(GetTopRoot(a_extractionRoot));
-		}
-
 		a_bones.reserve(a_skin->bones.size());
 		for (std::uint32_t index = 0; index < a_skin->bones.size(); ++index) {
 			auto* boneObject = a_skin->bones[index];
+			auto* worldTransform = a_skin->worldTransforms.empty() ? nullptr : a_skin->worldTransforms[index];
 			Smp::Fo4DecodedSkinBone decoded;
 			if (!boneObject) {
 				++a_stats.nullBones;
-				auto* worldTransform = a_skin->worldTransforms.empty() ? nullptr : a_skin->worldTransforms[index];
-				auto* entry = FindFlattenedBoneByWorldTransform(flattened, worldTransform);
-				if (!entry || entry->name.empty()) {
+			}
+
+			RE::BSFlattenedBoneRef reference;
+			if (!Smp::Address::BSSkinInstanceGetFlattenedBoneReference(a_skin, index, reference) || !reference.object) {
+				spdlog::debug(
+					"unable to resolve FO4 skin bone reference skin={} index={} bone={} worldTransform={} root={}",
+					static_cast<void*>(a_skin),
+					index,
+					static_cast<void*>(boneObject),
+					static_cast<void*>(worldTransform),
+					static_cast<void*>(a_skin->rootNode));
+				return false;
+			}
+
+			if (reference.index >= 0) {
+				auto* flattened = netimmerse_cast<RE::BSFlattenedBoneTree*>(reference.object.get());
+				if (!flattened || !flattened->bone ||
+					reference.index >= flattened->boneCount ||
+					reference.index >= static_cast<std::int32_t>(RE::BSSkin::kMaxExpectedBones)) {
+					spdlog::debug(
+						"invalid flattened FO4 skin bone reference skin={} index={} referenceObject={} flattenedIndex={}",
+						static_cast<void*>(a_skin),
+						index,
+						static_cast<void*>(reference.object.get()),
+						reference.index);
 					return false;
 				}
-				decoded.node = entry->node.get();
-				decoded.worldTransform = std::addressof(entry->world);
-				decoded.name = std::string(std::string_view(entry->name));
+
+				auto& entry = flattened->bone[reference.index];
+				if (entry.name.empty()) {
+					return false;
+				}
+
+				auto* node = entry.node.get();
+				if (!node) {
+					bool deferredAttach = false;
+					node = Smp::Address::BSFlattenedBoneTreeGetOrCreateBoneNode(
+						flattened,
+						entry.name,
+						deferredAttach);
+				}
+				if (!node) {
+					spdlog::debug(
+						"unable to materialize flattened FO4 skin bone skin={} index={} flattened={} flattenedIndex={} name='{}'",
+						static_cast<void*>(a_skin),
+						index,
+						static_cast<void*>(flattened),
+						reference.index,
+						std::string_view(entry.name));
+					return false;
+				}
+
+				decoded.node = node;
+				decoded.worldTransform = worldTransform ? worldTransform : std::addressof(entry.world);
+				decoded.name = std::string(std::string_view(entry.name));
 			} else {
+				boneObject = reference.object.get();
 				auto* bone = boneObject->IsNode();
 				if (!bone) {
 					++a_stats.nonNodeBones;
 					return false;
 				}
-
 				const auto name = boneObject->GetName();
 				decoded.node = bone;
-				decoded.worldTransform = std::addressof(bone->world);
+				decoded.worldTransform = worldTransform ? worldTransform : std::addressof(bone->world);
 				decoded.name = name.empty() ? std::string{} : std::string(name);
 			}
 
@@ -445,7 +463,7 @@ namespace
 		return true;
 	}
 
-	bool DecodeGeometry(RE::BSGeometry* a_geometry, RE::NiAVObject* a_extractionRoot, Smp::Fo4MeshExtractionResult& a_result)
+	bool DecodeGeometry(RE::BSGeometry* a_geometry, Smp::Fo4MeshExtractionResult& a_result)
 	{
 		auto* triShape = a_geometry ? a_geometry->IsTriShape() : nullptr;
 		auto* skin = a_geometry && a_geometry->skinInstance ? a_geometry->skinInstance.get() : nullptr;
@@ -524,7 +542,7 @@ namespace
 		mesh.geometry = a_geometry;
 		mesh.skinRootNode = skin->rootNode;
 		mesh.name = ResolveGeometryName(a_geometry);
-		if (!DecodeSkinBones(skin, a_extractionRoot, mesh.bones, a_result.stats)) {
+		if (!DecodeSkinBones(skin, mesh.bones, a_result.stats)) {
 			spdlog::warn("skipping mesh '{}' because its FO4 skin bone array is not coherent", mesh.name);
 			return false;
 		}
@@ -725,7 +743,7 @@ namespace
 			}
 
 			++a_result.stats.matchedGeometries;
-			DecodeGeometry(geometry, a_extractionRoot, a_result);
+			DecodeGeometry(geometry, a_result);
 			return;
 		}
 
